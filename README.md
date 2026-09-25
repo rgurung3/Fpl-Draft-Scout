@@ -46,12 +46,14 @@ that aren't 15 players, missing xGI data, or clubs without fixtures.
 
 Each player gets a 0-100 rating from recent form, points per game, attacking
 threat (xGI per 90), share of minutes played, and fixture difficulty over the
-next 3 gameweeks. Weights differ by position (fixtures matter more for
+next 3 gameweeks. Each stat is measured against the 95th percentile of
+players with at least 180 minutes and capped there, so one standout week
+doesn't skew everyone else's rating. Weights differ by position (fixtures matter more for
 keepers and defenders, xGI matters more for forwards). The total is then
 scaled down if the player is flagged as doubtful or injured.
 
-You can tweak the weights in `WEIGHTS` and the fixture window in `LOOKAHEAD`
-at the top of `app.py`.
+You can tweak the weights in `WEIGHTS`, the fixture window in `LOOKAHEAD`,
+and the scale in `SCALE_PERCENTILE` and `MIN_MINUTES` at the top of `app.py`.
 
 ## Notes
 

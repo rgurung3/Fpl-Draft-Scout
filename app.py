@@ -13,6 +13,8 @@ CLASSIC = "https://fantasy.premierleague.com/api"
 HEADERS = {"User-Agent": "Mozilla/5.0 (DraftScout personal tool)"}
 CACHE_SECONDS = 600
 LOOKAHEAD = 3  # how many upcoming gameweeks count toward fixture ease
+MIN_MINUTES = 180       # players need this many minutes for xGI/90 and to set the rating scale
+SCALE_PERCENTILE = 95   # each stat is measured against this percentile of regular players
 
 app = Flask(__name__, static_folder="static")
 _cache = {}
@@ -98,28 +100,59 @@ def availability(el):
     return AVAIL_BY_STATUS.get(el.get("status", "a"), 1.0)
 
 
+def percentile(values, pct):
+    """
+    The value that pct% of the list sits at or below, e.g. percentile(v, 95).
+    Uses the same in-between method as a spreadsheet's PERCENTILE function.
+    """
+    if not values:
+        return 0
+    ordered = sorted(values)
+    pos = (len(ordered) - 1) * pct / 100
+    low = int(pos)
+    high = min(low + 1, len(ordered) - 1)
+    return ordered[low] + (ordered[high] - ordered[low]) * (pos - low)
+
+
+SCALED_STATS = ("form", "ppg", "xgi90", "fix")  # minutes share is already 0-1
+
+
+def stat_scales(raw, minutes):
+    """
+    The number each stat gets divided by: its SCALE_PERCENTILE among regular
+    players (MIN_MINUTES or more). Early in the season, before anyone has that
+    many minutes, it falls back to everyone who has played, then to everyone.
+    """
+    regulars = [r for r, m in zip(raw, minutes) if m >= MIN_MINUTES]
+    pool = regulars or [r for r, m in zip(raw, minutes) if m > 0] or raw
+    return {k: percentile([r[k] for r in pool], SCALE_PERCENTILE) or 1 for k in SCALED_STATS}
+
+
 def score_players(elements, fixtures_by_team, current_gw):
-    raw = []
+    raw, minutes = [], []
     games_so_far = max(current_gw, 1)
     for el in elements:
         mins = num(el.get("minutes"))
         xgi = num(el.get("expected_goal_involvements"))
+        minutes.append(mins)
         raw.append({
             "form": max(num(el.get("form")), 0),
             "ppg": max(num(el.get("points_per_game")), 0),
-            "xgi90": (xgi / mins * 90) if mins >= 180 else 0.0,
+            "xgi90": (xgi / mins * 90) if mins >= MIN_MINUTES else 0.0,
             "mins": min(mins / (games_so_far * 90), 1.0),
             "fix": fixture_ease(fixtures_by_team.get(el["team"], [])),
         })
 
-    # normalise each stat against the best in the game (top value -> 1.0)
-    maxes = {k: max((r[k] for r in raw), default=0) or 1 for k in raw[0]} if raw else {}
+    # measure each stat against the 95th percentile of regular players, capped at 1.0,
+    # so one outlier (a hat-trick, a double gameweek) can't squash everyone else
+    scale = stat_scales(raw, minutes)
 
     scores = {}
     for el, r in zip(elements, raw):
         w = WEIGHTS.get(el["element_type"], WEIGHTS[3])
-        parts = [r["form"] / maxes["form"], r["ppg"] / maxes["ppg"],
-                 r["xgi90"] / maxes["xgi90"], r["mins"], r["fix"] / maxes["fix"]]
+        parts = [min(r["form"] / scale["form"], 1.0), min(r["ppg"] / scale["ppg"], 1.0),
+                 min(r["xgi90"] / scale["xgi90"], 1.0), r["mins"],
+                 min(r["fix"] / scale["fix"], 1.0)]
         base = sum(wi * pi for wi, pi in zip(w, parts))
         scores[el["id"]] = {
             "score": round(100 * base * availability(el), 1),

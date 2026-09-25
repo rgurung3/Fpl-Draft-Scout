@@ -285,7 +285,7 @@ function render() {
 
   $("myLink").value = location.origin + location.pathname + linkQuery();
 
-  $("scoreNote").textContent = "Rating is 0–100, built from recent form, points per game, attacking threat (xGI per 90), share of minutes played and fixture difficulty over the next " + DATA.lookahead + " gameweeks, then scaled down for injury doubts. It's a guide, not a prediction.";
+  $("scoreNote").textContent = "Rating is 0–100, built from recent form, points per game, attacking threat (xGI per 90), share of minutes played and fixture difficulty over the next " + DATA.lookahead + " gameweeks, then scaled down for injury doubts. Each stat is measured against the top 5% of regular players, so one standout week doesn't skew everyone else. It's a guide, not a prediction.";
 
   renderSwaps(); renderTable(); renderStrength();
 }

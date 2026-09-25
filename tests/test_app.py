@@ -118,6 +118,49 @@ def test_low_minutes_players_get_no_xgi_boost():
     assert scores[1]["xgi90"] == 0
 
 
+# ---------------------------------------------------------------- rating scale (95th percentile)
+
+def test_percentile():
+    assert app.percentile([], 95) == 0
+    assert app.percentile([7], 95) == 7
+    assert app.percentile([0, 10], 50) == 5
+    assert app.percentile(list(range(1, 101)), 95) == pytest.approx(95.05)  # like a spreadsheet
+
+
+def regulars(n=20, form="5.0"):
+    """n ordinary players who have all played every minute of 6 gameweeks."""
+    return [make_player(i, form=form, minutes=540) for i in range(1, n + 1)]
+
+
+def test_one_outlier_does_not_drag_everyone_down():
+    without = app.score_players(regulars(), {}, current_gw=6)
+    with_star = app.score_players(regulars() + [make_player(99, form="50.0", minutes=540)],
+                                  {}, current_gw=6)
+    assert with_star[1]["score"] == pytest.approx(without[1]["score"])
+
+
+def test_low_minutes_players_do_not_set_the_scale():
+    cameos = [make_player(90 + i, form="20.0", minutes=45) for i in range(3)]
+    without = app.score_players(regulars(), {}, current_gw=6)
+    with_cameos = app.score_players(regulars() + cameos, {}, current_gw=6)
+    assert with_cameos[1]["score"] == pytest.approx(without[1]["score"])
+
+
+def test_stats_above_the_line_are_capped():
+    players = regulars() + [make_player(99, form="50.0", minutes=540)]
+    scores = app.score_players(players, {}, current_gw=6)
+    # form is capped at 1.0, so the star rates the same as an ordinary player
+    # whose form is already at the 95th percentile
+    assert scores[99]["score"] == pytest.approx(scores[1]["score"])
+
+
+def test_scale_works_before_anyone_has_180_minutes():
+    first_week = [make_player(1, form="9.0", minutes=90), make_player(2, form="2.0", minutes=90),
+                  make_player(3, form="0.0", minutes=0)]
+    scores = app.score_players(first_week, {}, current_gw=1)
+    assert scores[1]["score"] > scores[2]["score"] > 0
+
+
 # ---------------------------------------------------------------- the web route
 
 def test_league_endpoint_returns_players_and_owners(fake_api):
