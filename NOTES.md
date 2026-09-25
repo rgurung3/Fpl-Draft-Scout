@@ -1,7 +1,5 @@
 Draft Scout – project notes
 
-Keep this file up to date. Claude reads it at the start of every chat in the Project, so it's how new chats know where things stand.
-
 Status
 v1 working: waiver targets, free agents table, league squads
 Tested against my real league: mostly working
