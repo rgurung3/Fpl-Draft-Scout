@@ -1,0 +1,5 @@
+# Linter settings. "E"/"F" catch real bugs, "I" keeps imports tidy.
+line-length = 110
+
+[lint]
+select = ["E", "F", "I"]
