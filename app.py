@@ -49,7 +49,7 @@ def upcoming_fixtures(draft_teams, from_gw):
     try:
         classic_teams = get_json(f"{CLASSIC}/bootstrap-static/")["teams"]
         fixtures = get_json(f"{CLASSIC}/fixtures/")
-    except Exception:
+    except (requests.RequestException, KeyError, TypeError, ValueError):
         return result  # fixture ease just drops out of the score if this fails
 
     by_short = {t["short_name"]: t["id"] for t in draft_teams}
@@ -131,6 +131,19 @@ def score_players(elements, fixtures_by_team, current_gw):
 
 # ---------------------------------------------------------------- routes
 
+def fpl_error_message(code):
+    """Turn an error code from the FPL servers into advice a person can act on."""
+    if code == 404:
+        return "No Draft league found with that ID. Check the number in your league's URL."
+    if code == 403:
+        return ("The FPL Draft site refused the request (403). It sometimes blocks "
+                "automated traffic for a while. Wait a few minutes and try again.")
+    if code == 503:
+        return ("The FPL site is updating, which happens around deadlines and after "
+                "matches. Try again in a few minutes.")
+    return f"The FPL Draft site returned an error ({code}). Try again shortly."
+
+
 @app.route("/")
 def index():
     return send_from_directory(app.static_folder, "index.html")
@@ -144,9 +157,11 @@ def league(league_id):
         status = get_json(f"{DRAFT}/league/{league_id}/element-status")
     except requests.HTTPError as e:
         code = e.response.status_code if e.response is not None else 502
-        msg = ("No Draft league found with that ID. Check the number in your league's URL."
-               if code == 404 else f"The FPL Draft site returned an error ({code}). Try again shortly.")
-        return jsonify({"error": msg}), 400
+        return jsonify({"error": fpl_error_message(code)}), 400 if code == 404 else 502
+    except ValueError:
+        # the site answered, but not with JSON (e.g. a maintenance page)
+        return jsonify({"error": "The FPL Draft site sent back something unexpected. "
+                                 "Try again in a few minutes."}), 502
     except requests.RequestException:
         return jsonify({"error": "Couldn't reach the FPL Draft site. Check your internet connection."}), 502
 

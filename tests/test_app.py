@@ -8,6 +8,7 @@ import pytest
 import requests
 
 import app
+import check_league
 
 # ---------------------------------------------------------------- fake data
 
@@ -136,19 +137,64 @@ def test_league_endpoint_includes_fixtures(fake_api):
     assert arsenal_player["fixtures"][0]["home"] is True
 
 
-def test_unknown_league_gives_friendly_error(monkeypatch):
-    def not_found(url):
+@pytest.mark.parametrize("code,status,text", [
+    (404, 400, "No Draft league found"),
+    (403, 502, "refused the request"),
+    (503, 502, "FPL site is updating"),
+    (500, 502, "returned an error (500)"),
+])
+def test_fpl_errors_give_friendly_messages(monkeypatch, code, status, text):
+    def failing(url):
         resp = requests.Response()
-        resp.status_code = 404
+        resp.status_code = code
         raise requests.HTTPError(response=resp)
 
-    monkeypatch.setattr(app, "get_json", not_found)
+    monkeypatch.setattr(app, "get_json", failing)
     res = app.app.test_client().get("/api/league/999999")
-    assert res.status_code == 400
-    assert "No Draft league found" in res.get_json()["error"]
+    assert res.status_code == status
+    assert text in res.get_json()["error"]
+
+
+def test_non_json_reply_gives_friendly_message(monkeypatch):
+    def not_json(url):
+        raise ValueError("Expecting value")  # what r.json() raises on an HTML page
+
+    monkeypatch.setattr(app, "get_json", not_json)
+    res = app.app.test_client().get("/api/league/123")
+    assert res.status_code == 502
+    assert "something unexpected" in res.get_json()["error"]
+
+
+def test_fixtures_feed_failure_does_not_break_the_page(fake_api, monkeypatch):
+    real = app.get_json
+
+    def classic_down(url):
+        if "fantasy.premierleague.com" in url:
+            raise requests.ConnectionError()
+        return real(url)
+
+    monkeypatch.setattr(app, "get_json", classic_down)
+    res = app.app.test_client().get("/api/league/123")
+    assert res.status_code == 200
+    assert all(p["fixtures"] == [] for p in res.get_json()["players"])
 
 
 def test_homepage_loads():
     res = app.app.test_client().get("/")
     assert res.status_code == 200
     assert b"Draft Scout" in res.data
+
+
+# ---------------------------------------------------------------- league checker
+
+def test_checker_accepts_matching_owners(fake_api):
+    data = app.app.test_client().get("/api/league/123").get_json()
+    results = {msg: ok for ok, msg in check_league.check(data)}
+    assert results["every owned player belongs to a manager in the league"] is True
+
+
+def test_checker_flags_owner_ids_that_match_no_manager(fake_api):
+    data = app.app.test_client().get("/api/league/123").get_json()
+    data["players"][0]["owner"] = 555  # nobody in the league has this id
+    problems = [msg for ok, msg in check_league.check(data) if not ok]
+    assert any("555" in msg for msg in problems)

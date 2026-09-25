@@ -222,9 +222,12 @@ async function loadLeague(id) {
   $("loadBtn").disabled = true; $("loadBtn").textContent = "Loading…";
   $("error").classList.add("hidden");
   try {
-    const r = await fetch(`/api/league/${id}`);
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error || "Something went wrong loading the league.");
+    let r;
+    try { r = await fetch(`/api/league/${id}`); }
+    catch (e) { throw new Error("Can't reach Draft Scout. Is app.py still running in your terminal?"); }
+    let j = null;
+    try { j = await r.json(); } catch (e) { /* not JSON, e.g. a crash page */ }
+    if (!r.ok || !j) throw new Error(j?.error || "Draft Scout hit an unexpected error. The details are in the terminal where app.py is running.");
     DATA = j;
     store("leagueId", id);
     render();

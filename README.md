@@ -16,6 +16,17 @@ pip install -r requirements.txt
 python app.py
 ```
 
+## Check it against your league
+
+```bash
+python check_league.py 12345
+```
+
+Replace 12345 with your league ID. It loads the league the same way the
+browser does and prints a short report. Lines starting with `!!` need a look:
+missing managers, owners that don't match anyone in the league, squads that
+aren't 15 players, missing xGI data, or clubs without fixtures.
+
 ## How the rating works
 
 Each player gets a 0-100 rating from recent form, points per game, attacking
