@@ -6,7 +6,7 @@ Run:  python app.py   then open http://127.0.0.1:5000
 import time
 
 import requests
-from flask import Flask, jsonify, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory
 
 DRAFT = "https://draft.premierleague.com/api"
 CLASSIC = "https://fantasy.premierleague.com/api"
@@ -129,12 +129,103 @@ def score_players(elements, fixtures_by_team, current_gw):
     return scores
 
 
-# ---------------------------------------------------------------- routes
+# ---------------------------------------------------------------- squads and waivers
+
+# a legal Draft starting eleven: exactly 1 keeper, 3-5 DEF, 2-5 MID, 1-3 FWD
+FORMATION = {"GKP": (1, 1), "DEF": (3, 5), "MID": (2, 5), "FWD": (1, 3)}
+
+MIN_CHANCE_FOR_WAIVERS = 75  # suggest doubtful players only if at least this likely to play
+MIN_GAIN = 3                 # a swap has to be worth at least this many rating points
+PAIRS_PER_POSITION = 2
+MAX_TARGETS = 5
+
+
+def by_score(players):
+    return sorted(players, key=lambda p: p["score"], reverse=True)
+
+
+def best_eleven(squad):
+    """
+    The highest-rated legal eleven from a squad. First take the minimum at each
+    position (1 GKP, 3 DEF, 2 MID, 1 FWD), then fill the other 4 places with the
+    best players left, without going over the maximum at any position.
+    """
+    by_pos = {pos: by_score(p for p in squad if p["pos"] == pos) for pos in FORMATION}
+    xi = []
+    for pos, (low, _high) in FORMATION.items():
+        xi += by_pos[pos][:low]
+    extras = by_score(p for pos, (low, high) in FORMATION.items()
+                      for p in by_pos[pos][low:high])
+    return xi + extras[:11 - len(xi)]
+
+
+def squad_strength(players, entry_id):
+    """Average rating of a manager's best legal eleven, plus who's in it and the shape."""
+    xi = best_eleven([p for p in players if p["owner"] == entry_id])
+    count = {pos: sum(p["pos"] == pos for p in xi) for pos in FORMATION}
+    return {
+        "strength": round(sum(p["score"] for p in xi) / len(xi), 1) if xi else 0,
+        "best_xi": [p["id"] for p in xi],
+        "formation": f'{count["DEF"]}-{count["MID"]}-{count["FWD"]}' if xi else "",
+    }
+
+
+def waiver_targets(players, me):
+    """
+    Suggested drop/claim swaps for one manager, best gain first.
+
+    Per position, my weakest players are paired one-for-one with the best free
+    agents who are at least MIN_CHANCE_FOR_WAIVERS% likely to play. A doubtful
+    claim is still suggested (its rating is already scaled down for the risk),
+    but gets a backup: the best fully fit free agent in the same position.
+    """
+    mine = [p for p in players if p["owner"] == me]
+    free = [p for p in players if p["owner"] is None and p["chance"] >= MIN_CHANCE_FOR_WAIVERS]
+
+    swaps = []
+    for pos in FORMATION:
+        weakest_first = by_score(p for p in mine if p["pos"] == pos)[::-1]
+        best_first = by_score(p for p in free if p["pos"] == pos)
+        for drop, claim in list(zip(weakest_first, best_first))[:PAIRS_PER_POSITION]:
+            gain = round(claim["score"] - drop["score"], 1)
+            if gain >= MIN_GAIN:
+                swaps.append({"drop": drop, "claim": claim, "gain": gain})
+
+    top = sorted(swaps, key=lambda s: s["gain"], reverse=True)[:MAX_TARGETS]
+    claimed = {s["claim"]["id"] for s in top}
+
+    targets = []
+    for s in top:
+        claim = s["claim"]
+        backup = None
+        if claim["chance"] < 100:
+            fit = by_score(p for p in free if p["pos"] == claim["pos"]
+                           and p["chance"] == 100 and p["id"] not in claimed)
+            backup = fit[0]["id"] if fit else None
+        targets.append({"drop": s["drop"]["id"], "claim": claim["id"],
+                        "gain": s["gain"], "backup": backup})
+    return targets
+
+
+# ---------------------------------------------------------------- talking to FPL
+
+LEAGUE_NOT_FOUND = "No Draft league found with that ID. Check the number in your league's URL."
+TEAM_NOT_FOUND = ("No Draft team found with that ID. Open your team's Points page on "
+                  "draft.premierleague.com: your team ID is the number after /entry/.")
+NO_LEAGUE_YET = "That team isn't in a Draft league yet. Join or create a league first."
+
+
+class FplError(Exception):
+    """A problem talking to the FPL servers, with a message a person can act on."""
+
+    def __init__(self, message, status=502):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+
 
 def fpl_error_message(code):
     """Turn an error code from the FPL servers into advice a person can act on."""
-    if code == 404:
-        return "No Draft league found with that ID. Check the number in your league's URL."
     if code == 403:
         return ("The FPL Draft site refused the request (403). It sometimes blocks "
                 "automated traffic for a while. Wait a few minutes and try again.")
@@ -144,26 +235,32 @@ def fpl_error_message(code):
     return f"The FPL Draft site returned an error ({code}). Try again shortly."
 
 
-@app.route("/")
-def index():
-    return send_from_directory(app.static_folder, "index.html")
-
-
-@app.route("/api/league/<int:league_id>")
-def league(league_id):
+def fetch(url, not_found):
+    """
+    get_json, but any failure becomes an FplError with a friendly message.
+    not_found is the message to show if the site says the thing doesn't exist (404).
+    """
     try:
-        boot = get_json(f"{DRAFT}/bootstrap-static")
-        details = get_json(f"{DRAFT}/league/{league_id}/details")
-        status = get_json(f"{DRAFT}/league/{league_id}/element-status")
+        return get_json(url)
     except requests.HTTPError as e:
         code = e.response.status_code if e.response is not None else 502
-        return jsonify({"error": fpl_error_message(code)}), 400 if code == 404 else 502
-    except ValueError:
+        if code == 404:
+            raise FplError(not_found, 400) from e
+        raise FplError(fpl_error_message(code)) from e
+    except ValueError as e:
         # the site answered, but not with JSON (e.g. a maintenance page)
-        return jsonify({"error": "The FPL Draft site sent back something unexpected. "
-                                 "Try again in a few minutes."}), 502
-    except requests.RequestException:
-        return jsonify({"error": "Couldn't reach the FPL Draft site. Check your internet connection."}), 502
+        raise FplError("The FPL Draft site sent back something unexpected. "
+                       "Try again in a few minutes.") from e
+    except requests.RequestException as e:
+        raise FplError("Couldn't reach the FPL Draft site. "
+                       "Check your internet connection.") from e
+
+
+def load_league(league_id):
+    """Fetch a league from the Draft site and build everything the page needs."""
+    boot = fetch(f"{DRAFT}/bootstrap-static", LEAGUE_NOT_FOUND)
+    details = fetch(f"{DRAFT}/league/{league_id}/details", LEAGUE_NOT_FOUND)
+    status = fetch(f"{DRAFT}/league/{league_id}/element-status", LEAGUE_NOT_FOUND)
 
     events = boot.get("events", {})
     current_gw = events.get("current") or 1
@@ -196,6 +293,7 @@ def league(league_id):
             "xgi90": s["xgi90"],
             "mins_share": s["mins_share"],
             "status": el.get("status", "a"),
+            "chance": round(availability(el) * 100),
             "news": el.get("news") or "",
             "fixtures": fixtures.get(el["team"], []),
         })
@@ -205,15 +303,55 @@ def league(league_id):
         "team_name": e.get("entry_name"),
         "manager": f'{e.get("player_first_name", "")} {e.get("player_last_name", "")}'.strip(),
     } for e in details.get("league_entries", []) if e.get("entry_id")]
+    for m in managers:
+        m.update(squad_strength(players, m["entry_id"]))
 
-    return jsonify({
+    return {
+        "league_id": league_id,
         "league_name": details.get("league", {}).get("name", f"League {league_id}"),
         "current_gw": current_gw,
         "next_gw": next_gw,
         "lookahead": LOOKAHEAD,
         "managers": managers,
         "players": players,
-    })
+    }
+
+
+# ---------------------------------------------------------------- routes
+
+@app.route("/")
+def index():
+    return send_from_directory(app.static_folder, "index.html")
+
+
+@app.route("/api/league/<int:league_id>")
+def league(league_id):
+    try:
+        return jsonify(load_league(league_id))
+    except FplError as e:
+        return jsonify({"error": e.message}), e.status
+
+
+@app.route("/api/team/<int:entry_id>")
+def team(entry_id):
+    """
+    Look up which league a team plays in, then load that league with the team
+    marked as "me". If the team is in more than one league, ?league=<id> picks one.
+    """
+    try:
+        entry = fetch(f"{DRAFT}/entry/{entry_id}/public", TEAM_NOT_FOUND).get("entry") or {}
+        leagues = entry.get("league_set") or []
+        if not leagues:
+            return jsonify({"error": NO_LEAGUE_YET}), 400
+        wanted = request.args.get("league", type=int)
+        data = load_league(wanted if wanted in leagues else leagues[0])
+    except FplError as e:
+        return jsonify({"error": e.message}), e.status
+
+    data["me"] = entry_id
+    data["my_leagues"] = leagues
+    data["waiver_targets"] = waiver_targets(data["players"], entry_id)
+    return jsonify(data)
 
 
 if __name__ == "__main__":

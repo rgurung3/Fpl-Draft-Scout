@@ -1,7 +1,8 @@
 """
 Sanity-check Draft Scout against a real league.
 
-Run:  python check_league.py 12345
+Run:  python check_league.py 12345           (a league ID)
+ or:  python check_league.py --team 276914   (your team ID, like the browser uses)
 
 It loads the league through the app exactly like the browser does, then
 prints a short report. Lines starting with "!!" need a look.
@@ -21,6 +22,14 @@ def check(data):
     players = data["players"]
 
     results.append((bool(managers), f"{len(managers)} managers found"))
+
+    # when loaded by team ID, that team should be one of the league's managers
+    me = data.get("me")
+    if me is not None:
+        if me in managers:
+            results.append((True, f"your team ({managers[me]}) is one of this league's managers"))
+        else:
+            results.append((False, f"team {me} isn't one of this league's managers"))
     results.append((len(players) > 500, f"{len(players)} players in the game"))
 
     # does every owned player belong to someone in this league?
@@ -53,11 +62,17 @@ def check(data):
 
 
 def main():
-    if len(sys.argv) != 2 or not sys.argv[1].isdigit():
+    args = sys.argv[1:]
+    if len(args) == 2 and args[0] == "--team" and args[1].isdigit():
+        url = f"/api/team/{args[1]}"
+    elif len(args) == 1 and args[0].isdigit():
+        url = f"/api/league/{args[0]}"
+    else:
         print("Usage: python check_league.py <league id>")
+        print("   or: python check_league.py --team <team id>")
         return 2
 
-    res = app.app.test_client().get(f"/api/league/{sys.argv[1]}")
+    res = app.app.test_client().get(url)
     data = res.get_json(silent=True)
     if res.status_code != 200 or not data:
         error = (data or {}).get("error", "the app crashed; the error details are printed above")
@@ -65,8 +80,12 @@ def main():
         return 1
 
     last_gw = data["next_gw"] + data["lookahead"] - 1
-    print(f"League: {data['league_name']} "
-          f"(gameweek {data['current_gw']}, fixtures GW{data['next_gw']}-{last_gw})\n")
+    print(f"League: {data['league_name']} (ID {data['league_id']}, "
+          f"gameweek {data['current_gw']}, fixtures GW{data['next_gw']}-{last_gw})")
+    if len(data.get("my_leagues", [])) > 1:
+        print(f"This team is in several leagues: {data['my_leagues']}. "
+              "Showing the first one.")
+    print()
 
     problems = 0
     for ok, message in check(data):

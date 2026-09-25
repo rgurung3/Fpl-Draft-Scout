@@ -1,11 +1,11 @@
 # Draft Scout
 
-A small helper app for FPL Draft leagues. It loads your league, rates every
-player, and shows you:
+A small helper app for FPL Draft leagues. Enter your team ID and it finds your
+league, rates every player, and shows you:
 
-- **Waiver targets**: free agents who rate higher than the weakest player you own in the same position
+- **Waiver targets**: free agents who rate higher than your weakest player in the same position. Players with a 75% chance of playing are included, with a warning and a fully fit backup
 - **Free agents**: a sortable, filterable table of everyone unowned in your league, with upcoming fixtures
-- **League squads**: how every manager's best eleven stacks up
+- **League squads**: how every manager's best legal eleven (one keeper, 3-5 DEF, 2-5 MID, 1-3 FWD) stacks up, with your squad highlighted
 
 ## Run it
 
@@ -16,16 +16,31 @@ pip install -r requirements.txt
 python app.py
 ```
 
+Then open http://127.0.0.1:5000
+
+## Your team ID and personal link
+
+On draft.premierleague.com, open your team's Points page. The number after
+`/entry/` in the address bar is your team ID. Enter it in Draft Scout and it
+looks up your league for you.
+
+Once loaded, the address bar shows your personal link, for example
+`http://127.0.0.1:5000/?team=276914`. Bookmark it and you'll land straight on
+your own view. Everyone in the league can do the same with their own team ID.
+There are no accounts: anyone with a link sees that team's view, which only
+uses data the Draft site already makes public.
+
 ## Check it against your league
 
 ```bash
-python check_league.py 12345
+python check_league.py 12345          # by league ID
+python check_league.py --team 276914  # by team ID, the way the browser does it
 ```
 
-Replace 12345 with your league ID. It loads the league the same way the
-browser does and prints a short report. Lines starting with `!!` need a look:
-missing managers, owners that don't match anyone in the league, squads that
-aren't 15 players, missing xGI data, or clubs without fixtures.
+It loads the league through the app and prints a short report. Lines
+starting with `!!` need a look: missing managers, owners that don't match
+anyone in the league, your team not being in the league it found, squads
+that aren't 15 players, missing xGI data, or clubs without fixtures.
 
 ## How the rating works
 

@@ -46,10 +46,15 @@
   .intro p { color: var(--muted); }
   .error { background: var(--amber-soft); border-left: 4px solid var(--rival); padding: 12px 14px; border-radius: 4px; margin-bottom: 20px; }
 
-  .leaguebar { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center; margin-bottom: 32px; }
+  .leaguebar { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center; margin-bottom: 10px; }
   .leaguebar .name { font-family: var(--display); font-size: 1.9rem; font-weight: 600; }
   .leaguebar .gw { color: var(--muted); }
-  .leaguebar select { padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); min-width: 220px; }
+  .leaguebar select { padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+  .leaguebar .myteam { font-weight: 600; border-left: 5px solid var(--amber); padding-left: 10px; }
+  .mylink { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; margin-bottom: 32px; color: var(--muted); font-size: .9rem; }
+  .mylink input { flex: 1 1 240px; max-width: 340px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px;
+    background: var(--surface); color: var(--ink); font-size: .9rem; }
+  .btn.ghost { background: transparent; color: var(--pitch); border: 1px solid var(--pitch); padding: 6px 14px; }
 
   section { margin-bottom: 44px; }
 
@@ -72,9 +77,15 @@
   .swap .arrow { color: var(--muted); font-size: 1.3rem; }
   .gain { font-family: var(--display); font-weight: 700; font-size: 1.3rem; color: var(--amber); white-space: nowrap; }
   .empty { background: var(--pitch-soft); padding: 14px 16px; border-radius: 4px; }
+  .swap .risk { grid-column: 1 / -1; display: flex; gap: 10px; align-items: flex-start;
+    background: var(--amber-soft); border-radius: 4px; padding: 8px 10px; font-size: .9rem; }
+  .bang { flex: none; width: 1.5em; height: 1.5em; border-radius: 50%; background: var(--amber); color: #fff;
+    font-family: var(--display); font-weight: 700; display: grid; place-items: center; }
   @media (max-width: 640px) {
     .swap { grid-template-columns: 1fr auto; }
     .swap .arrow { display: none; }
+    .swap .drop, .swap .claim { grid-column: 1; }
+    .swap .gain { grid-column: 2; grid-row: 1 / span 2; }
   }
 
   /* fixture strip */
@@ -110,8 +121,11 @@
   .srow .bar i { display: block; height: 100%; background: var(--pitch); }
   .srow.me .bar i { background: var(--amber); }
   .srow .tn { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .srow .you { font-weight: 400; color: var(--muted); }
   .roster { padding: 4px 0 14px 12px; border-left: 2px solid var(--line); margin-left: 4px; display: grid; gap: 2px; }
   .roster div { display: flex; justify-content: space-between; gap: 12px; max-width: 420px; }
+  .roster .label { color: var(--muted); font-size: .85rem; margin-top: 6px; }
+  .roster .bench { color: var(--muted); }
   .hidden { display: none !important; }
   .note { color: var(--muted); font-size: .9rem; max-width: 70ch; }
 </style>
@@ -124,32 +138,39 @@
       <p class="sub" style="margin:4px 0 0">Waiver and squad help for your FPL Draft league</p>
     </div>
     <form class="load" id="loadForm">
-      <label>League ID
-        <input id="leagueId" inputmode="numeric" pattern="[0-9]+" required placeholder="e.g. 12345">
+      <label>Team ID
+        <input id="teamId" inputmode="numeric" pattern="[0-9]+" required placeholder="e.g. 276914">
       </label>
-      <button class="btn" id="loadBtn" type="submit">Load league</button>
+      <button class="btn" id="loadBtn" type="submit">Open my team</button>
     </form>
   </header>
 
   <div id="error" class="error hidden" role="alert"></div>
 
   <div id="intro" class="intro">
-    <h2>Find your league ID</h2>
-    <p>Open your league on draft.premierleague.com and look at the address bar. The number after <code>/league/</code> is your league ID. Paste it above and pick your team to see who to claim off waivers.</p>
+    <h2>Find your team ID</h2>
+    <p>On draft.premierleague.com, open your team's Points page and look at the address bar. The number after <code>/entry/</code> is your team ID. Paste it above and Draft Scout finds your league for you.</p>
+    <p>You'll then get a personal link. Bookmark it and you'll land straight on your own team next time.</p>
   </div>
 
   <div id="app" class="hidden">
     <div class="leaguebar">
       <span class="name" id="leagueName"></span>
       <span class="gw" id="gwInfo"></span>
-      <label>My team
-        <select id="meSelect"></select>
+      <span class="myteam" id="myTeam"></span>
+      <label id="leaguePick" class="hidden">League
+        <select id="leagueSelect"></select>
       </label>
+    </div>
+    <div class="mylink">
+      <span>Bookmark your link:</span>
+      <input id="myLink" readonly aria-label="Your personal link">
+      <button class="btn ghost" id="copyLink" type="button">Copy link</button>
     </div>
 
     <section>
       <h2>Waiver targets</h2>
-      <p class="sub">Free agents who rate higher than the weakest player you own in the same position.</p>
+      <p class="sub">Free agents who rate higher than your weakest player in the same position. Players with a small injury doubt (75% chance of playing) are included, with a backup in case they're ruled out.</p>
       <div class="swaps" id="swaps"></div>
     </section>
 
@@ -176,7 +197,7 @@
 
     <section>
       <h2>League squads</h2>
-      <p class="sub">Average rating of each manager's best eleven. Select a team to see its squad.</p>
+      <p class="sub">Average rating of each manager's best legal eleven: one keeper, at least three defenders, two midfielders and one forward. Yours is open below; select any team to see its squad.</p>
       <div class="strength" id="strength"></div>
     </section>
 
@@ -187,7 +208,7 @@
 <script>
 const $ = id => document.getElementById(id);
 let DATA = null;
-let state = { pos: "", q: "", hideFlagged: true, sortKey: "score", sortDir: -1, me: null };
+let state = { pos: "", q: "", hideFlagged: true, sortKey: "score", sortDir: -1, me: null, team: null };
 
 const COLS = [
   { key: "score", label: "Rating", n: true },
@@ -218,23 +239,32 @@ function fixStrip(p) {
   return `<span class="fx">${out.join("")}</span>`;
 }
 
-async function loadLeague(id) {
+// the part after "?" in a personal link, e.g. team=276914 (plus league=... only if it matters)
+function linkQuery() {
+  const params = new URLSearchParams({ team: state.team });
+  if (DATA.my_leagues.length > 1 && DATA.league_id !== DATA.my_leagues[0]) params.set("league", DATA.league_id);
+  return "?" + params;
+}
+
+async function loadTeam(id, league) {
   $("loadBtn").disabled = true; $("loadBtn").textContent = "Loading…";
   $("error").classList.add("hidden");
   try {
     let r;
-    try { r = await fetch(`/api/league/${id}`); }
+    try { r = await fetch(`/api/team/${id}` + (league ? `?league=${league}` : "")); }
     catch (e) { throw new Error("Can't reach Draft Scout. Is app.py still running in your terminal?"); }
     let j = null;
     try { j = await r.json(); } catch (e) { /* not JSON, e.g. a crash page */ }
     if (!r.ok || !j) throw new Error(j?.error || "Draft Scout hit an unexpected error. The details are in the terminal where app.py is running.");
     DATA = j;
-    store("leagueId", id);
+    state.team = id;
+    store("teamId", id);
+    history.replaceState(null, "", linkQuery());  // the address bar now shows the personal link
     render();
   } catch (e) {
     $("error").textContent = e.message; $("error").classList.remove("hidden");
   } finally {
-    $("loadBtn").disabled = false; $("loadBtn").textContent = "Load league";
+    $("loadBtn").disabled = false; $("loadBtn").textContent = "Open my team";
   }
 }
 
@@ -244,44 +274,60 @@ function render() {
   $("leagueName").textContent = DATA.league_name;
   $("gwInfo").textContent = `Gameweek ${DATA.current_gw}, fixtures shown for GW${DATA.next_gw}–${DATA.next_gw + DATA.lookahead - 1}`;
 
-  const saved = Number(recall("me:" + $("leagueId").value));
-  const valid = DATA.managers.some(m => m.entry_id === saved);
-  state.me = valid ? saved : (state.me && DATA.managers.some(m => m.entry_id === state.me) ? state.me : DATA.managers[0]?.entry_id);
-  $("meSelect").innerHTML = DATA.managers.map(m =>
-    `<option value="${m.entry_id}" ${m.entry_id === state.me ? "selected" : ""}>${esc(m.team_name)} (${esc(m.manager)})</option>`).join("");
+  state.me = DATA.me;
+  const me = DATA.managers.find(m => m.entry_id === state.me);
+  $("myTeam").textContent = me ? `${me.team_name} (${me.manager})` : `Team ${state.me}`;
+
+  // only shown in the rare case a team is in more than one league
+  $("leaguePick").classList.toggle("hidden", DATA.my_leagues.length < 2);
+  $("leagueSelect").innerHTML = DATA.my_leagues.map(id =>
+    `<option value="${id}" ${id === DATA.league_id ? "selected" : ""}>${id === DATA.league_id ? esc(DATA.league_name) : "League " + id}</option>`).join("");
+
+  $("myLink").value = location.origin + location.pathname + linkQuery();
 
   $("scoreNote").textContent = "Rating is 0–100, built from recent form, points per game, attacking threat (xGI per 90), share of minutes played and fixture difficulty over the next " + DATA.lookahead + " gameweeks, then scaled down for injury doubts. It's a guide, not a prediction.";
 
   renderSwaps(); renderTable(); renderStrength();
 }
 
+const player = id => DATA.players.find(p => p.id === id);
+
+// the "!" row under a swap whose claim might not play, with a fit backup to fall back on
+function riskNote(s) {
+  const c = player(s.claim);
+  if (c.chance >= 100) return "";
+  const why = c.news.includes("%") ? c.news : `${c.chance}% chance of playing${c.news ? ": " + c.news : ""}`;
+  const b = s.backup != null ? player(s.backup) : null;
+  const plan = b
+    ? `Have a safe replacement ready: if he's ruled out, go for <strong>${esc(b.name)}</strong> <span class="pos">${b.pos}, ${esc(b.team)}</span>, rated ${b.score.toFixed(0)} and fully fit.`
+    : `There's no fully fit ${c.pos} on the wire to fall back on, so keep a bench option ready.`;
+  return `<div class="risk" role="note"><span class="bang" aria-hidden="true">!</span>
+    <div><strong>${esc(why)}.</strong> ${plan}</div></div>`;
+}
+
 function renderSwaps() {
-  const mine = DATA.players.filter(p => p.owner === state.me);
-  const free = DATA.players.filter(p => p.owner == null && p.status === "a");
-  const swaps = [];
-  for (const pos of ["GKP", "DEF", "MID", "FWD"]) {
-    const myPos = mine.filter(p => p.pos === pos).sort((a, b) => a.score - b.score);
-    const faPos = free.filter(p => p.pos === pos).sort((a, b) => b.score - a.score);
-    // pair my weakest with the best free agents, one-for-one, while it's an upgrade
-    for (let i = 0; i < Math.min(myPos.length, faPos.length, 2); i++) {
-      if (faPos[i].score - myPos[i].score >= 3) swaps.push({ drop: myPos[i], claim: faPos[i], gain: faPos[i].score - myPos[i].score });
-    }
+  if (!DATA.managers.some(m => m.entry_id === state.me)) {
+    $("swaps").innerHTML = `<div class="empty">Team ${esc(state.me)} isn't listed in this league, so there's nothing to compare. Check the team ID and try again.</div>`;
+    return;
   }
-  swaps.sort((a, b) => b.gain - a.gain);
-  const top = swaps.slice(0, 5);
-  if (!mine.length) {
+  if (!DATA.players.some(p => p.owner === state.me)) {
     $("swaps").innerHTML = `<div class="empty">This team has no players yet. If your draft hasn't happened, check back after it does.</div>`;
     return;
   }
-  $("swaps").innerHTML = top.length ? top.map(s => `
+  // the server works out the swaps (see waiver_targets in app.py); this just draws them
+  $("swaps").innerHTML = DATA.waiver_targets.length ? DATA.waiver_targets.map(s => {
+    const drop = player(s.drop), claim = player(s.claim);
+    return `
     <div class="swap">
-      <div class="side drop"><span class="score">${s.drop.score.toFixed(0)}</span>
-        <div class="who"><div class="verb">Drop</div><div class="pname">${esc(s.drop.name)} <span class="pos">${s.drop.pos}, ${esc(s.drop.team)}</span></div>${fixStrip(s.drop)}</div></div>
+      <div class="side drop"><span class="score">${drop.score.toFixed(0)}</span>
+        <div class="who"><div class="verb">Drop</div><div class="pname">${esc(drop.name)} <span class="pos">${drop.pos}, ${esc(drop.team)}</span></div>${fixStrip(drop)}</div></div>
       <span class="arrow" aria-hidden="true">›</span>
-      <div class="side claim"><span class="score">${s.claim.score.toFixed(0)}</span>
-        <div class="who"><div class="verb">Claim</div><div class="pname">${esc(s.claim.name)} <span class="pos">${s.claim.pos}, ${esc(s.claim.team)}</span></div>${fixStrip(s.claim)}</div></div>
+      <div class="side claim"><span class="score">${claim.score.toFixed(0)}</span>
+        <div class="who"><div class="verb">Claim</div><div class="pname">${esc(claim.name)} <span class="pos">${claim.pos}, ${esc(claim.team)}</span></div>${fixStrip(claim)}</div></div>
       <span class="gain">+${s.gain.toFixed(0)}</span>
-    </div>`).join("")
+      ${riskNote(s)}
+    </div>`;
+  }).join("")
     : `<div class="empty">No clear upgrades on the wire right now. Your squad already rates higher than the best free agents at every position.</div>`;
 }
 
@@ -312,32 +358,43 @@ function renderTable() {
     : `<tr><td colspan="${COLS.length}">No free agents match these filters.</td></tr>`;
 }
 
+function rosterRow(p, cls = "") {
+  return `<div class="${cls}"><span>${esc(p.name)} <span class="pos">${p.pos}, ${esc(p.team)}</span></span><span>${p.score.toFixed(0)}</span></div>`;
+}
+
 function renderStrength() {
-  const teams = DATA.managers.map(m => {
-    const squad = DATA.players.filter(p => p.owner === m.entry_id).sort((a, b) => b.score - a.score);
-    const best11 = squad.slice(0, 11);
-    const avg = best11.length ? best11.reduce((s, p) => s + p.score, 0) / best11.length : 0;
-    return { ...m, squad, avg };
-  }).sort((a, b) => b.avg - a.avg);
-  const max = Math.max(...teams.map(t => t.avg), 1);
-  $("strength").innerHTML = teams.map(t => `
+  const order = { GKP: 0, DEF: 1, MID: 2, FWD: 3 };
+  const teams = [...DATA.managers].sort((a, b) => b.strength - a.strength);
+  const max = Math.max(...teams.map(t => t.strength), 1);
+  $("strength").innerHTML = teams.map(t => {
+    const squad = DATA.players.filter(p => p.owner === t.entry_id).sort((a, b) => b.score - a.score);
+    const xi = squad.filter(p => t.best_xi.includes(p.id)).sort((a, b) => order[a.pos] - order[b.pos] || b.score - a.score);
+    const bench = squad.filter(p => !t.best_xi.includes(p.id));
+    const roster = squad.length
+      ? `<div class="label">Best eleven, ${esc(t.formation)}</div>${xi.map(p => rosterRow(p)).join("")}`
+        + (bench.length ? `<div class="label">Bench</div>${bench.map(p => rosterRow(p, "bench")).join("")}` : "")
+      : "<div>No players yet</div>";
+    const mine = t.entry_id === state.me;
+    return `
     <div>
-      <button class="srow ${t.entry_id === state.me ? "me" : ""}" aria-expanded="false" data-id="${t.entry_id}">
-        <span class="tn">${esc(t.team_name)}</span>
-        <span class="bar"><i style="width:${(t.avg / max * 100).toFixed(1)}%"></i></span>
-        <span class="score">${t.avg.toFixed(0)}</span>
+      <button class="srow ${mine ? "me" : ""}" aria-expanded="${mine}" data-id="${t.entry_id}">
+        <span class="tn">${esc(t.team_name)}${mine ? ' <span class="you">(you)</span>' : ""}</span>
+        <span class="bar"><i style="width:${(t.strength / max * 100).toFixed(1)}%"></i></span>
+        <span class="score">${t.strength.toFixed(0)}</span>
       </button>
-      <div class="roster hidden" id="roster-${t.entry_id}">
-        ${t.squad.map(p => `<div><span>${esc(p.name)} <span class="pos">${p.pos}, ${esc(p.team)}</span></span><span>${p.score.toFixed(0)}</span></div>`).join("") || "<div>No players yet</div>"}
-      </div>
-    </div>`).join("");
+      <div class="roster ${mine ? "" : "hidden"}" id="roster-${t.entry_id}">${roster}</div>
+    </div>`;
+  }).join("");
 }
 
 // events
-$("loadForm").addEventListener("submit", e => { e.preventDefault(); loadLeague($("leagueId").value.trim()); });
-$("meSelect").addEventListener("change", e => {
-  state.me = Number(e.target.value); store("me:" + $("leagueId").value, state.me);
-  renderSwaps(); renderStrength();
+$("loadForm").addEventListener("submit", e => { e.preventDefault(); loadTeam($("teamId").value.trim()); });
+$("leagueSelect").addEventListener("change", e => loadTeam(state.team, e.target.value));
+$("copyLink").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText($("myLink").value); }
+  catch (e) { $("myLink").select(); return; }  // no clipboard access: select it so they can copy by hand
+  $("copyLink").textContent = "Copied";
+  setTimeout(() => { $("copyLink").textContent = "Copy link"; }, 2000);
 });
 $("posTabs").addEventListener("click", e => {
   const b = e.target.closest("button"); if (!b) return;
@@ -359,8 +416,14 @@ $("strength").addEventListener("click", e => {
   b.setAttribute("aria-expanded", open);
 });
 
-const last = recall("leagueId");
-if (last) { $("leagueId").value = last; loadLeague(last); }
+// open straight to a team: from a personal link (?team=...) first, otherwise the last team used here
+const fromLink = new URLSearchParams(location.search);
+const startTeam = fromLink.get("team") || recall("teamId");
+const startLeague = fromLink.get("league");
+if (/^[0-9]+$/.test(startTeam || "")) {
+  $("teamId").value = startTeam;
+  loadTeam(startTeam, /^[0-9]+$/.test(startLeague || "") ? startLeague : null);
+}
 </script>
 </body>
 </html>

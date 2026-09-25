@@ -47,8 +47,11 @@ def fake_api(monkeypatch):
                                  {"element": 3, "owner": None}]}
     fixtures = [{"event": 7, "team_h": 1, "team_a": 2,
                  "team_h_difficulty": 2, "team_a_difficulty": 4}]
+    entry = {"entry": {"id": 100, "name": "My FC", "league_set": [123]}}
 
     def fake_get_json(url):
+        if url.endswith("/entry/100/public"):
+            return entry
         if "draft" in url and "bootstrap" in url:
             return boot
         if url.endswith("/details"):
@@ -179,6 +182,184 @@ def test_fixtures_feed_failure_does_not_break_the_page(fake_api, monkeypatch):
     assert all(p["fixtures"] == [] for p in res.get_json()["players"])
 
 
+# ---------------------------------------------------------------- personal view (team ID)
+
+def test_team_endpoint_finds_the_league_and_marks_me(fake_api, monkeypatch):
+    requested = []
+    fake = app.get_json
+
+    def spy(url):
+        requested.append(url)
+        return fake(url)
+
+    monkeypatch.setattr(app, "get_json", spy)
+    res = app.app.test_client().get("/api/team/100")
+    assert res.status_code == 200
+
+    data = res.get_json()
+    assert data["me"] == 100
+    assert data["league_id"] == 123
+    assert data["league_name"] == "Test League"
+    assert any(u.endswith("/league/123/details") for u in requested)
+
+
+def test_team_in_two_leagues_can_pick_one(fake_api, monkeypatch):
+    fake = app.get_json
+
+    def two_leagues(url):
+        if url.endswith("/entry/100/public"):
+            return {"entry": {"id": 100, "league_set": [123, 456]}}
+        return fake(url)
+
+    monkeypatch.setattr(app, "get_json", two_leagues)
+    client = app.app.test_client()
+
+    first = client.get("/api/team/100").get_json()
+    assert first["league_id"] == 123           # no choice given: first league
+    assert first["my_leagues"] == [123, 456]
+
+    chosen = client.get("/api/team/100?league=456").get_json()
+    assert chosen["league_id"] == 456
+
+    ignored = client.get("/api/team/100?league=999").get_json()
+    assert ignored["league_id"] == 123         # not one of this team's leagues
+
+
+def test_team_with_no_league_gets_a_friendly_message(fake_api, monkeypatch):
+    fake = app.get_json
+
+    def no_league(url):
+        if url.endswith("/entry/100/public"):
+            return {"entry": {"id": 100, "league_set": []}}
+        return fake(url)
+
+    monkeypatch.setattr(app, "get_json", no_league)
+    res = app.app.test_client().get("/api/team/100")
+    assert res.status_code == 400
+    assert "isn't in a Draft league" in res.get_json()["error"]
+
+
+def test_unknown_team_id_gets_a_friendly_message(monkeypatch):
+    def not_found(url):
+        resp = requests.Response()
+        resp.status_code = 404
+        raise requests.HTTPError(response=resp)
+
+    monkeypatch.setattr(app, "get_json", not_found)
+    res = app.app.test_client().get("/api/team/999999")
+    assert res.status_code == 400
+    assert "No Draft team found" in res.get_json()["error"]
+
+
+# ---------------------------------------------------------------- best eleven
+
+def rated(pid, pos, score, owner=None, chance=100):
+    """A player as the page sees it, with only the fields the squad logic uses."""
+    return {"id": pid, "pos": pos, "score": score, "owner": owner, "chance": chance}
+
+
+def full_squad(owner=100):
+    """15 players: 2 GKP, 5 DEF, 5 MID, 3 FWD, like a real Draft squad."""
+    shape = ["GKP"] * 2 + ["DEF"] * 5 + ["MID"] * 5 + ["FWD"] * 3
+    return [rated(i, pos, 50, owner) for i, pos in enumerate(shape, 1)]
+
+
+def positions(xi):
+    return sorted(p["pos"] for p in xi)
+
+
+def test_best_eleven_uses_only_one_keeper():
+    squad = [rated(1, "GKP", 95), rated(2, "GKP", 90), rated(3, "GKP", 85)]
+    squad += [rated(10 + i, pos, 40) for i, pos in enumerate(["DEF"] * 5 + ["MID"] * 5 + ["FWD"] * 3)]
+    xi = app.best_eleven(squad)
+    assert len(xi) == 11
+    assert [p["id"] for p in xi if p["pos"] == "GKP"] == [1]   # the best keeper only
+
+
+def test_best_eleven_always_has_three_defenders():
+    squad = full_squad()
+    for p in squad:
+        p["score"] = 10 if p["pos"] == "DEF" else 80   # defenders are all weak
+    xi = app.best_eleven(squad)
+    assert len(xi) == 11
+    assert positions(xi).count("DEF") == 3
+
+
+def test_best_eleven_never_plays_more_than_three_forwards():
+    squad = full_squad() + [rated(20, "FWD", 50, 100), rated(21, "FWD", 50, 100)]
+    for p in squad:
+        if p["pos"] == "FWD":
+            p["score"] = 99   # five brilliant forwards
+    xi = app.best_eleven(squad)
+    assert positions(xi).count("FWD") == 3
+
+
+def test_best_eleven_with_an_unfinished_squad():
+    xi = app.best_eleven([rated(1, "MID", 60), rated(2, "FWD", 70)])
+    assert {p["id"] for p in xi} == {1, 2}
+    assert app.best_eleven([]) == []
+
+
+def test_squad_strength_reports_formation():
+    squad = full_squad()
+    for p in squad:
+        p["score"] = {"MID": 90, "FWD": 70}.get(p["pos"], 50)
+    result = app.squad_strength(squad, 100)
+    assert result["formation"] == "3-5-2"
+    assert len(result["best_xi"]) == 11
+    assert result["strength"] == round((50 + 3 * 50 + 5 * 90 + 2 * 70) / 11, 1)
+
+
+# ---------------------------------------------------------------- waiver targets
+
+def test_waivers_suggest_a_clear_upgrade():
+    players = [rated(1, "DEF", 40, owner=100), rated(2, "DEF", 60)]
+    targets = app.waiver_targets(players, 100)
+    assert targets == [{"drop": 1, "claim": 2, "gain": 20, "backup": None}]
+
+
+def test_waivers_skip_small_gains():
+    players = [rated(1, "DEF", 40, owner=100), rated(2, "DEF", 42)]
+    assert app.waiver_targets(players, 100) == []
+
+
+def test_doubtful_75_player_is_suggested_with_a_backup():
+    players = [rated(1, "MID", 30, owner=100),
+               rated(2, "MID", 70, chance=75),   # best option, but a doubt
+               rated(3, "MID", 55)]              # fully fit, so the backup
+    targets = app.waiver_targets(players, 100)
+    assert targets[0]["claim"] == 2
+    assert targets[0]["backup"] == 3
+
+
+def test_backup_is_not_a_player_already_suggested():
+    players = [rated(1, "MID", 30, owner=100), rated(2, "MID", 35, owner=100),
+               rated(3, "MID", 70, chance=75), rated(4, "MID", 60), rated(5, "MID", 50)]
+    targets = app.waiver_targets(players, 100)
+    risky = next(t for t in targets if t["claim"] == 3)
+    assert {t["claim"] for t in targets} == {3, 4}
+    assert risky["backup"] == 5          # 4 is already a suggestion of its own
+
+
+def test_risky_claim_without_a_fit_backup():
+    players = [rated(1, "GKP", 20, owner=100), rated(2, "GKP", 60, chance=75)]
+    assert app.waiver_targets(players, 100)[0]["backup"] is None
+
+
+def test_players_under_75_percent_are_not_suggested():
+    players = [rated(1, "FWD", 20, owner=100), rated(2, "FWD", 80, chance=50),
+               rated(3, "FWD", 90, chance=0)]
+    assert app.waiver_targets(players, 100) == []
+
+
+def test_team_endpoint_includes_targets_and_strength(fake_api):
+    data = app.app.test_client().get("/api/team/100").get_json()
+    assert "waiver_targets" in data
+    me = data["managers"][0]
+    assert me["best_xi"] == [1]          # the only player this team owns
+    assert all("chance" in p for p in data["players"])
+
+
 def test_homepage_loads():
     res = app.app.test_client().get("/")
     assert res.status_code == 200
@@ -198,3 +379,16 @@ def test_checker_flags_owner_ids_that_match_no_manager(fake_api):
     data["players"][0]["owner"] = 555  # nobody in the league has this id
     problems = [msg for ok, msg in check_league.check(data) if not ok]
     assert any("555" in msg for msg in problems)
+
+
+def test_checker_confirms_my_team_is_in_the_league(fake_api):
+    data = app.app.test_client().get("/api/team/100").get_json()
+    results = {msg: ok for ok, msg in check_league.check(data)}
+    assert results["your team (My FC) is one of this league's managers"] is True
+
+
+def test_checker_flags_my_team_missing_from_the_league(fake_api):
+    data = app.app.test_client().get("/api/team/100").get_json()
+    data["me"] = 777
+    problems = [msg for ok, msg in check_league.check(data) if not ok]
+    assert any("777" in msg for msg in problems)
