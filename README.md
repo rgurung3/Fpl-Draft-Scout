@@ -42,6 +42,35 @@ starting with `!!` need a look: missing managers, owners that don't match
 anyone in the league, your team not being in the league it found, squads
 that aren't 15 players, missing xGI data, or clubs without fixtures.
 
+## Deploy to Render
+
+Render runs the app on its servers so it has a public address. It deploys
+straight from GitHub and redeploys every time you push to `main`.
+
+1. Sign up at https://render.com with your GitHub account.
+2. In the Render Dashboard click **New** > **Web Service** and pick this repo.
+3. Fill in:
+   - **Language**: Python 3
+   - **Branch**: `main`
+   - **Build command**: `pip install -r requirements.txt`
+   - **Start command**: `gunicorn app:app --workers 1 --threads 4 --timeout 60`
+   - **Instance type**: Free
+4. Click **Deploy Web Service** and watch the log. When it says the service
+   is live, open the `onrender.com` address at the top of the page.
+5. First check: open `/api/team/<your team ID>` on the live address. JSON
+   with your league means it works. An error mentioning 403 means the Draft
+   site is blocking Render's servers.
+
+Notes:
+
+- Render reads the Python version from `.python-version` (3.12, the same as CI).
+- `python app.py` is only for your own computer. On Render, gunicorn runs the
+  app and debug mode stays off.
+- No environment variables are needed yet. If the app ever needs a secret
+  (like an API key), add it under **Environment** in Render, never in the code.
+- On the free plan the app sleeps after 15 minutes without visitors. The first
+  visit after that takes about a minute while it wakes up.
+
 ## How the rating works
 
 Each player gets a 0-100 rating from recent form, points per game, attacking
