@@ -2,14 +2,15 @@
 
 ## Status
 - v1 working: waiver targets, free agents table, league squads
-- Tested against my real league: mostly working
+- Tested against my real league: working
 - check_league.py added to sanity-check a real league from the terminal
 - Friendlier error messages (league not found, team not found, team not in a league, FPL site updating, blocked by the site, server crashed, app.py not running)
-- Personal view built: enter team ID → league found automatically → your waiver targets and squad → bookmarkable link (/?team=276914). Tested with fake data; still needs checking against the real league (`python check_league.py --team 276914`)
+- Personal view built: enter team ID → league found automatically → your waiver targets and squad → bookmarkable link (/?team=276914). Checked against the real league
 - Waiver targets now include players with a 75% chance of playing, marked with a "!" warning and a fully fit backup from the wire
 - Ratings now measure each stat against the 95th percentile of regular players (180+ minutes), capped at 1.0, so one outlier can't drag everyone down
 - League squads now use a legal best eleven (1 keeper, 3-5 DEF, 2-5 MID, 1-3 FWD) and show the formation and bench
 - On GitHub: https://github.com/rgurung3/Fpl-Draft-Scout
+- Deployed to Render (free plan): https://fpl-draft-scout.onrender.com. It redeploys automatically on every push to main. The Draft site accepts requests from Render (checked /api/team/276914 after deploying)
 - Tests (pytest, 43 passing) and CI (GitHub Actions); ruff clean
 
 ## How it works
@@ -21,6 +22,7 @@
 - check_league.py loads a league through the app and prints a health report. Run: python check_league.py <league id> or python check_league.py --team <team id>. Lines with !! need a look.
 - tests/test_app.py uses fake data, so tests never call the real servers.
 - Run locally: python app.py, then open http://127.0.0.1:5000
+- On Render: build command `pip install -r requirements.txt`, start command `gunicorn app:app --workers 1 --threads 4 --timeout 60`. Render picks the Python version from .python-version (3.12). Deploy steps are in README.md.
 
 ## How the rating works
 - Five stats per player: form, points per game, xGI per 90 (0 if under 180 minutes), minutes share, fixture ease over the next 3 GWs (sum of 6 - difficulty; doubles count twice, blanks count zero).
@@ -44,18 +46,22 @@
 - Personal links instead of accounts: no passwords, nothing stored on the server. Anyone with a link sees that team's view, which is fine because it's all public Draft data.
 - Rating scale: 95th percentile rather than the single best player. Trade-off: the top ~5% look the same on a capped stat, but that rarely matters in Draft because elite players are owned; the middle of the pack (where waiver decisions happen) gets spread out properly. Percentile ranks were rejected because they throw away the size of the gaps.
 - Only catch specific exceptions (not except Exception); newer ruff versions flag the blind catch and would fail CI.
+- On Render the app runs under gunicorn, not `python app.py`, so Flask's debug mode is never on in public. One worker (so there's one shared 10-minute cache and it fits the free plan's memory) with 4 threads (so a few people can load at once). Timeout 60s because a league load makes several FPL requests.
+- Python 3.12 everywhere: CI uses it and .python-version tells Render to use it. The file name must start with a dot; downloading it can strip the dot, and Render then silently falls back to its default (3.14).
+- requirements.txt = what the app needs to run (what Render installs). requirements-dev.txt = that plus pytest and ruff (for my computer and CI).
 
 ## Roadmap
-1. Test with real league
-2. Deploy to Render
-3. Personal view: enter team ID → auto-find league, bookmarkable link
+1. Test with real league (done)
+2. Deploy to Render (done)
+3. Personal view: enter team ID → auto-find league, bookmarkable link (done)
 4. Trade analyzer
 5. AI "why this pick?" explanations
 6. Accounts/login (needed for watchlists + limiting AI usage)
 
 ## Known issues / ideas
 - The FPL Draft data feed isn't officially documented and could change.
-- The Draft site sits behind Cloudflare and may block cloud servers (403). Watch for this when deploying to Render.
+- The Draft site sits behind Cloudflare and may block cloud servers (403). It worked from Render at deploy time, but Cloudflare can change its mind; if the live site starts showing the 403 message, that's the cause, not a bug in the app.
+- Free Render plan sleeps after 15 minutes with no visitors; the next visit takes about a minute to wake it up. The in-memory cache is lost when it sleeps (harmless).
 - If several teams have a double gameweek (more than ~5% of regular players), the fixture scale lands on a double value and single-game teams still look weak on fixtures.
 - Ratings are higher overall than before the percentile change, so MIN_GAIN = 3 may need tuning after watching real suggestions for a week or two.
 - The backup for a doubtful claim is taken from the wire, so someone else may claim it first. Could also suggest a bench player as the fallback.
