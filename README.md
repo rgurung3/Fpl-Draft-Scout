@@ -75,7 +75,22 @@ Notes:
 - No environment variables are needed yet. If the app ever needs a secret
   (like an API key), add it under **Environment** in Render, never in the code.
 - On the free plan the app sleeps after 15 minutes without visitors. The first
-  visit after that takes about a minute while it wakes up.
+  visit after that takes about a minute while it wakes up (Render shows a
+  loading page meanwhile). To keep it awake, see below.
+
+### Keeping it awake on the free plan
+
+Set up a free uptime monitor (for example UptimeRobot or cron-job.org) to
+visit `https://<your app>.onrender.com/health` every 10 minutes. `/health`
+just answers `ok`: it doesn't call the FPL servers and uses almost no
+bandwidth. Use `/health`, not a page with league data, which is hundreds of
+KB each time.
+
+Only do this for one service. Render gives each workspace 750 free hours a
+month, and one service that never sleeps uses about 720-744 of them. A
+second always-awake service would run out mid-month and Render would
+suspend both. The alternative is Render's cheapest paid instance, which
+never sleeps and is also faster.
 
 ## How the trade analyzer works
 

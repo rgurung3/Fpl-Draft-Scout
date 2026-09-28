@@ -569,6 +569,16 @@ def test_team_endpoint_includes_targets_and_strength(fake_api):
     assert all("chance" in p and "breakdown" in p for p in data["players"])
 
 
+def test_health_check_is_tiny_and_never_calls_fpl(monkeypatch):
+    def no_fpl(url):
+        raise AssertionError("the health check must not call the FPL servers")
+
+    monkeypatch.setattr(app, "get_json", no_fpl)
+    res = app.app.test_client().get("/health")
+    assert res.status_code == 200
+    assert res.data == b"ok"
+
+
 def test_homepage_loads():
     res = app.app.test_client().get("/")
     assert res.status_code == 200

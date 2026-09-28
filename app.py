@@ -596,6 +596,16 @@ def index():
     return send_from_directory(app.static_folder, "index.html")
 
 
+@app.route("/health")
+def health():
+    """
+    A tiny page for an uptime monitor to visit every 10 minutes, so Render's free
+    plan never puts the app to sleep. It doesn't call the FPL servers and sends
+    back almost nothing, so pinging it uses hardly any bandwidth.
+    """
+    return "ok"
+
+
 @app.route("/api/league/<int:league_id>")
 def league(league_id):
     try:

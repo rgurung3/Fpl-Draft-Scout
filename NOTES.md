@@ -15,7 +15,8 @@
 - Waiver targets now say why: a one-line reason in rating points, plus the one thing the dropped player still does better. Worked out from the numbers, no AI
 - Season view built: a "This week / Rest of season" toggle. Every player has both ratings; the chosen one drives waivers, reasons, squads and trades. check_league.py prints the biggest risers and fallers between the views. Not yet checked against the real league
 - ruff pinned to 0.16.9 in requirements-dev.txt
-- Tests (pytest, 91 passing) and CI (GitHub Actions); ruff clean
+- /health route added for an uptime monitor to keep the free Render plan awake
+- Tests (pytest, 92 passing) and CI (GitHub Actions); ruff clean
 
 ## How it works
 - app.py fetches data from the FPL Draft site (team → league lookup, league details, who owns whom) and the classic FPL site (fixtures + difficulty), then rates every player 0–100.
@@ -72,6 +73,7 @@
 - Personal links instead of accounts: no passwords, nothing stored on the server. Anyone with a link sees that team's view, which is fine because it's all public Draft data.
 - Rating scale: 95th percentile rather than the single best player. Trade-off: the top ~5% look the same on a capped stat, but that rarely matters in Draft because elite players are owned; the middle of the pack (where waiver decisions happen) gets spread out properly. Percentile ranks were rejected because they throw away the size of the gaps.
 - Only catch specific exceptions (not except Exception); newer ruff versions flag the blind catch and would fail CI.
+- Keep-awake pings go to /health, not a league page: it doesn't call FPL and is 2 bytes, so pings use almost none of the free plan's outbound bandwidth (going over it suspends free services if no card is on file).
 - On Render the app runs under gunicorn, not `python app.py`, so Flask's debug mode is never on in public. One worker (so there's one shared 10-minute cache and it fits the free plan's memory) with 4 threads (so a few people can load at once). Timeout 60s because a league load makes several FPL requests.
 - Python 3.12 everywhere: CI uses it and .python-version tells Render to use it. The file name must start with a dot; downloading it can strip the dot, and Render then silently falls back to its default (3.14).
 - Trades are judged on best-eleven strength (same as League squads), so bench players only matter if they'd start. Simple, and it matches how the league table is won.
@@ -93,7 +95,8 @@ Idea for later: trade finder. "I want Joao Pedro and I'll give Fernandes": sugge
 ## Known issues / ideas
 - The FPL Draft data feed isn't officially documented and could change.
 - The Draft site sits behind Cloudflare and may block cloud servers (403). It worked from Render at deploy time, but Cloudflare can change its mind; if the live site starts showing the 403 message, that's the cause, not a bug in the app.
-- Free Render plan sleeps after 15 minutes with no visitors; the next visit takes about a minute to wake it up. The in-memory cache is lost when it sleeps (harmless).
+- Free Render plan sleeps after 15 minutes with no visitors; the next visit takes about a minute to wake it up (Render shows a loading page). The in-memory cache is lost when it sleeps (harmless). Fix: an uptime monitor pings /health every 10 minutes. One always-awake service uses about 720-744 of the workspace's 750 free hours a month, so only ever do this for one service. Render can still restart free services at any time.
+- A league load is about 430 KB of JSON (measured with ~700 fake players, season view). Compressing responses (e.g. flask-compress) would shrink it several times over; worth doing if friends use it on phones.
 - If several teams have a double gameweek (more than ~5% of regular players), the fixture scale lands on a double value and single-game teams still look weak on fixtures.
 - Ratings are higher overall than before the percentile change, so MIN_GAIN = 3 may need tuning after watching real suggestions for a week or two.
 - The backup for a doubtful claim is taken from the wire, so someone else may claim it first. Could also suggest a bench player as the fallback.
