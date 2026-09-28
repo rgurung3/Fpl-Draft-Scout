@@ -272,6 +272,88 @@ def test_unknown_view_falls_back_to_week(fake_api):
     assert data["view"] == "week"
 
 
+# ---------------------------------------------------------------- league history (head-to-head)
+
+def match(gw, a, a_pts, b, b_pts, finished=True):
+    """One head-to-head match. a and b are league entry IDs (10-13 = teams 100-103 below)."""
+    return {"event": gw, "finished": finished, "league_entry_1": a, "league_entry_1_points": a_pts,
+            "league_entry_2": b, "league_entry_2_points": b_pts}
+
+
+def h2h(matches, standings=()):
+    """League details for a 4-team head-to-head league: league entry 10 is team 100, 11 is 101..."""
+    return {"league_entries": [{"id": 10 + i, "entry_id": 100 + i} for i in range(4)],
+            "matches": matches, "standings": list(standings)}
+
+
+TWO_WEEKS = [match(1, 10, 60, 11, 40), match(1, 12, 50, 13, 50),      # 100 beats 101; a draw
+             match(2, 10, 30, 12, 45), match(2, 11, 70, 13, 20),      # 102 beats 100; 101 beats 103
+             match(3, 10, 0, 13, 0, finished=False)]                  # not played yet
+
+
+def test_history_builds_the_league_race():
+    history = app.league_history(h2h(TWO_WEEKS))
+    assert history["gws"] == [1, 2]                          # the unfinished GW3 is left out
+    by_team = {m["entry_id"]: m for m in history["managers"]}
+    assert by_team[100]["points"] == [60, 30]
+    assert by_team[100]["results"] == ["W", "L"]
+    assert by_team[102]["results"] == ["D", "W"]
+    assert by_team[102]["league_points"] == [1, 4]           # 1 for the draw, 3 for the win
+    assert by_team[103]["behind"] == [2, 3]                  # leader had 3, then 4
+    assert history["average"] == [50, pytest.approx(41.2, abs=0.1)]
+
+
+def test_history_is_in_table_order():
+    # 102 has 4 league points; 101 and 100 have 3 each, but 101 scored more (110 v 90)
+    history = app.league_history(h2h(TWO_WEEKS))
+    assert [m["entry_id"] for m in history["managers"]] == [102, 101, 100, 103]
+
+
+def test_history_keeps_the_official_table_total():
+    history = app.league_history(h2h(TWO_WEEKS, standings=[{"league_entry": 12, "total": 4}]))
+    by_team = {m["entry_id"]: m for m in history["managers"]}
+    assert by_team[102]["table_total"] == 4
+    assert by_team[100]["table_total"] is None
+
+
+def test_history_handles_a_missing_opponent():
+    history = app.league_history(h2h([match(1, 10, 55, None, None)]))
+    by_team = {m["entry_id"]: m for m in history["managers"]}
+    assert by_team[100]["points"] == [55]
+    assert by_team[100]["results"] == [None]                 # no score to compare against
+    assert by_team[101]["points"] == [None]
+
+
+@pytest.mark.parametrize("details", [
+    h2h([match(1, 10, 0, 11, 0, finished=False)]),           # nothing finished yet
+    {"league_entries": [{"id": 10, "entry_id": 100}]},       # classic scoring: no matches at all
+])
+def test_no_history_without_finished_matches(details):
+    assert app.league_history(details) is None
+
+
+def test_league_endpoint_includes_history(fake_api, monkeypatch):
+    fake = app.get_json
+
+    def with_matches(url):
+        data = fake(url)
+        if url.endswith("/details"):
+            entries = [{**e, "id": 10} for e in data["league_entries"]]
+            return {**data, "league_entries": entries, "matches": [match(1, 10, 64, None, 50)]}
+        return data
+
+    monkeypatch.setattr(app, "get_json", with_matches)
+    history = app.app.test_client().get("/api/team/100").get_json()["history"]
+    assert history["gws"] == [1]
+    assert history["managers"][0] == {"entry_id": 100, "points": [64], "results": ["W"],
+                                      "league_points": [3], "behind": [0], "scored": 64,
+                                      "table_total": None}
+
+
+def test_league_without_matches_has_no_history(fake_api):
+    assert app.app.test_client().get("/api/league/123").get_json()["history"] is None
+
+
 # ---------------------------------------------------------------- the web route
 
 def test_league_endpoint_returns_players_and_owners(fake_api):
@@ -615,6 +697,25 @@ def test_checker_lists_the_biggest_movers():
     risers, fallers = check_league.movers(players)
     assert [p["name"] for p in risers] == ["Porro", "Riser2"]
     assert [p["name"] for p in fallers] == ["Faller"]
+
+
+def history_data(table_total):
+    return {"managers": [{"entry_id": 100, "team_name": "My FC"}], "players": [],
+            "history": {"gws": [1, 2], "average": [50, 40],
+                        "managers": [{"entry_id": 100, "points": [60, 30], "results": ["W", "W"],
+                                      "league_points": [3, 6], "behind": [0, 0], "scored": 90,
+                                      "table_total": table_total}]}}
+
+
+def test_checker_confirms_league_points_match_the_table():
+    results = {msg: ok for ok, msg in check_league.check(history_data(6))}
+    assert results["league points match the official table"] is True
+    assert results["weekly results found for 1 of 1 managers (GW1-2)"] is True
+
+
+def test_checker_flags_league_points_that_differ_from_the_table():
+    problems = [msg for ok, msg in check_league.check(history_data(9)) if not ok]
+    assert any("My FC" in msg for msg in problems)
 
 
 def test_checker_flags_my_team_missing_from_the_league(fake_api):

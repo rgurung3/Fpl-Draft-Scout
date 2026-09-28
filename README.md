@@ -6,6 +6,7 @@ league, rates every player, and shows you:
 - **Waiver targets**: free agents who rate higher than your weakest player in the same position, each with a one-line reason (for example "easier fixtures +14, better form +12. But Porro has more attacking threat −6"). Players with a 75% chance of playing are included, with a warning and a fully fit backup
 - **Trade analyzer**: pick players from your squad and another manager's, and see how the trade changes both teams' best eleven, and whether it's a fair offer they might accept
 - **Free agents**: a sortable, filterable table of everyone unowned in your league, with both ratings (this week and rest of season) and upcoming fixtures
+- **League race** (head-to-head leagues): a chart of how far each manager is behind the leader in league points after every gameweek, and a grid of everyone's weekly scores shaded against the league average, with each week's W, D or L
 - **This week / Rest of season**: a toggle that switches every rating on the page between the next few gameweeks and a longer-term view
 - **League squads**: how every manager's best legal eleven (one keeper, 3-5 DEF, 2-5 MID, 1-3 FWD) stacks up, with your squad highlighted
 
@@ -47,6 +48,10 @@ that aren't 15 players, missing xGI data, or clubs without fixtures.
 At the end it lists the biggest risers and fallers between the "this week"
 and "rest of season" ratings, e.g. `Pedro Porro (DEF, TOT): 34 -> 62 (+28)`.
 Use it to check the season settings move the right players.
+
+For head-to-head leagues it also checks the weekly results were found for
+every manager and that the league points it works out match the official
+table.
 
 ## Deploy to Render
 

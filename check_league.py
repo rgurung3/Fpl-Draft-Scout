@@ -59,6 +59,22 @@ def check(data):
     msg = f"{len(with_fix)} of {len(clubs)} clubs have upcoming fixtures"
     results.append((not missing, msg + (f" (missing: {', '.join(missing)})" if missing else "")))
 
+    # weekly history (head-to-head leagues): everyone found, and our league
+    # points agree with the official table
+    history = data.get("history")
+    if history:
+        found = sum(1 for m in history["managers"] if any(pt is not None for pt in m["points"]))
+        results.append((found == len(managers),
+                        f"weekly results found for {found} of {len(managers)} managers "
+                        f"(GW{history['gws'][0]}-{history['gws'][-1]})"))
+        wrong = [managers.get(m["entry_id"], m["entry_id"]) for m in history["managers"]
+                 if m["table_total"] is not None and m["league_points"][-1] != m["table_total"]]
+        results.append((not wrong, "league points match the official table" if not wrong else
+                        f"league points differ from the official table for: {', '.join(map(str, wrong))} "
+                        "(normal while a gameweek is being played)"))
+    else:
+        results.append((True, "no weekly results (not a head-to-head league, or no finished gameweek yet)"))
+
     scores = [p["score"] for p in players]
     top = max(scores, default=0)
     results.append((0 < top <= 100, f"ratings run from {min(scores, default=0)} to {top}"))

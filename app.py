@@ -455,6 +455,77 @@ def evaluate_trade(players, me, them, give, get):
             "me": mine, "them": theirs}
 
 
+# ---------------------------------------------------------------- league history (head-to-head)
+
+WIN_POINTS = 3   # head-to-head league points for a win
+DRAW_POINTS = 1  # ... and for a draw
+
+
+def league_history(details):
+    """
+    Week-by-week results for a head-to-head league, worked out from the league's
+    finished matches (already in the league details, so no extra requests).
+    Returns None if no gameweek has finished yet, or if the league isn't
+    head-to-head (classic-scoring leagues have no matches).
+
+    Matches name managers by league entry ID, which league_entries translates
+    into the team IDs (entry_id) the rest of the app uses.
+
+    gws: the finished gameweeks. average: the league's average score each week.
+    managers, in table order, each with:
+      points        their score each week (None if missing)
+      results       "W", "D" or "L" each week (None if there was no opponent's score)
+      league_points running total of league points after each week
+      behind        league points behind the leader after each week
+      scored        total points scored (the table's tie-breaker)
+      table_total   the official table's total, so check_league.py can compare
+    """
+    entry_of = {e.get("id"): e["entry_id"] for e in details.get("league_entries", [])
+                if e.get("entry_id")}
+    finished = [m for m in details.get("matches", []) if m.get("finished") and m.get("event")]
+    gws = sorted({m["event"] for m in finished})
+    if not gws or not entry_of:
+        return None
+
+    weeks = {entry: {} for entry in entry_of.values()}  # team ID -> {gw: (points, result)}
+    for m in finished:
+        sides = ((m.get("league_entry_1"), m.get("league_entry_1_points")),
+                 (m.get("league_entry_2"), m.get("league_entry_2_points")))
+        for (mine, my_pts), (_other, their_pts) in (sides, sides[::-1]):
+            entry = entry_of.get(mine)
+            if entry is None or my_pts is None:
+                continue
+            result = (None if their_pts is None
+                      else "W" if my_pts > their_pts else "L" if my_pts < their_pts else "D")
+            weeks[entry][m["event"]] = (my_pts, result)
+
+    table_total = {entry_of.get(row.get("league_entry")): row.get("total")
+                   for row in details.get("standings", [])}
+
+    managers = []
+    for entry, played in weeks.items():
+        points = [played.get(gw, (None, None))[0] for gw in gws]
+        results = [played.get(gw, (None, None))[1] for gw in gws]
+        running, league_points = 0, []
+        for r in results:
+            running += {"W": WIN_POINTS, "D": DRAW_POINTS}.get(r, 0)
+            league_points.append(running)
+        managers.append({"entry_id": entry, "points": points, "results": results,
+                         "league_points": league_points, "scored": sum(p or 0 for p in points),
+                         "table_total": table_total.get(entry)})
+
+    leader = [max(m["league_points"][i] for m in managers) for i in range(len(gws))]
+    for m in managers:
+        m["behind"] = [top - lp for top, lp in zip(leader, m["league_points"])]
+    managers.sort(key=lambda m: (m["league_points"][-1], m["scored"]), reverse=True)
+
+    average = []
+    for i in range(len(gws)):
+        week = [m["points"][i] for m in managers if m["points"][i] is not None]
+        average.append(round(sum(week) / len(week), 1) if week else None)
+    return {"gws": gws, "average": average, "managers": managers}
+
+
 # ---------------------------------------------------------------- talking to FPL
 
 LEAGUE_NOT_FOUND = "No Draft league found with that ID. Check the number in your league's URL."
@@ -572,6 +643,7 @@ def load_league(league_id, view="week"):
         "lookahead": VIEWS[view]["lookahead"],
         "managers": managers,
         "players": players,
+        "history": league_history(details),
     }
 
 

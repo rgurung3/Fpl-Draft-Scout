@@ -15,8 +15,9 @@
 - Waiver targets now say why: a one-line reason in rating points, plus the one thing the dropped player still does better. Worked out from the numbers, no AI
 - Season view built: a "This week / Rest of season" toggle. Every player has both ratings; the chosen one drives waivers, reasons, squads and trades. check_league.py prints the biggest risers and fallers between the views. Not yet checked against the real league
 - ruff pinned to 0.16.9 in requirements-dev.txt
+- League race built: chart of league points behind the leader per gameweek (you in amber, hover a line for who it is) and a weekly points grid shaded vs the league average with W/D/L. Head-to-head leagues only. Not yet checked against the real league
 - /health route added for an uptime monitor to keep the free Render plan awake
-- Tests (pytest, 92 passing) and CI (GitHub Actions); ruff clean
+- Tests (pytest, 102 passing) and CI (GitHub Actions); ruff clean
 
 ## How it works
 - app.py fetches data from the FPL Draft site (team → league lookup, league details, who owns whom) and the classic FPL site (fixtures + difficulty), then rates every player 0–100.
@@ -44,6 +45,16 @@
 - load_league(league_id, view) rates everyone in both views: week_score and season_score on every player; score, breakdown and fixtures follow the chosen view. Unknown views fall back to "week". All three routes accept ?view=season.
 - The page: toggle in the league bar reloads with ?view=, the link keeps &view=season, the free agents table shows both ratings (chosen one in bold, sorted by it), fixture strips show the view's window, trades send the view.
 
+## How the league race works
+- league_history(details) in app.py, returned as "history" in the league data. Built from details["matches"] (already fetched), so no extra requests.
+- Only matches with finished = true count; future gameweeks are listed with 0 points.
+- Matches (and standings) name managers by league entry ID; league_entries maps it ("id" -> "entry_id") to the team IDs the rest of the app uses.
+- Each week: W = 3 league points (WIN_POINTS), D = 1 (DRAW_POINTS), L = 0. A match with no opponent score gets no result.
+- Per manager: points, results, league_points (running total), behind (vs the leader that week), scored, table_total (the official table's total). Sorted by league points, then points scored. Plus the league's average score each week.
+- None for classic-scoring leagues (no matches) and before any gameweek finishes; the page then shows a short message.
+- The page draws it with plain SVG (no chart library). Lines are nudged a pixel or two apart by table position so tied managers stay visible (visual only). The grid scrolls sideways once there are many gameweeks, newest weeks shown first, team names stay put.
+- check_league.py checks everyone has weekly results and that our league points equal the official table.
+
 ## How suggestions work
 - Per position: my players weakest first vs free agents best first, paired one-for-one, max 2 pairs per position (PAIRS_PER_POSITION).
 - Free agents count if they're at least 75% likely to play (MIN_CHANCE_FOR_WAIVERS). Their rating is already scaled down for the doubt, so a 75% player has to be clearly better to show up.
@@ -69,6 +80,7 @@
 - If a team is in more than one league, the first is used; ?league=<id> picks another and a league dropdown appears. Only valid league IDs for that team are accepted.
 - Season view adds role-specific stats instead of turning up xGI for everyone, so a change aimed at attacking full backs doesn't move every defender with a lucky early xGI. Weights are first guesses; check_league.py's movers list is how we tune them against the real league.
 - The Draft feed has these fields (checked on Porro): creativity, threat, influence, ict_index, expected_goals_conceded, clean_sheets, goals_conceded, defensive_contribution, clearances_blocks_interceptions, recoveries, tackles, starts, set-piece orders, news_return. Events have deadline_time per gameweek.
+- The Ballahulics league is head-to-head (league "scoring": "h"), so the race uses league points (what decides the table), not total FPL points. The weekly grid shows FPL points.
 - Waiver explanations are short and worked out from the numbers, not AI: instant, free, exact, testable. A long AI version was considered and dropped: it would only explain this week's numbers, and the bigger need is a long-term view.
 - Personal links instead of accounts: no passwords, nothing stored on the server. Anyone with a link sees that team's view, which is fine because it's all public Draft data.
 - Rating scale: 95th percentile rather than the single best player. Trade-off: the top ~5% look the same on a capped stat, but that rarely matters in Draft because elite players are owned; the middle of the pack (where waiver decisions happen) gets spread out properly. Percentile ranks were rejected because they throw away the size of the gaps.
@@ -108,5 +120,7 @@ Idea for later: trade finder. "I want Joao Pedro and I'll give Fernandes": sugge
 - Season view: an injured player (0%) with a known return date still rates 0 for the whole window. news_return has the date (empty for doubts like Porro's 75%); next step is to count only the games he'd miss, once we've seen a real news_return value.
 - Season view: minutes share still counts games missed through injury, so a player coming back from a knock rates lower for a while (Porro: 198 of 450 minutes).
 - Season view: with only ~5 gameweeks played, per-90 stats are noisy. Last season's data would help but needs one request per player.
+- League race: classic-scoring leagues get no graphs (they have no matches; weekly points would need one history request per manager, /api/entry/<id>/history).
+- League race: while a gameweek is being played it isn't finished, so the graphs only update once it ends.
 - The league dropdown for multi-league teams shows "League <id>" for leagues that aren't loaded (names would cost an extra request each).
 
