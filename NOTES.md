@@ -67,4 +67,4 @@
 - The backup for a doubtful claim is taken from the wire, so someone else may claim it first. Could also suggest a bench player as the fallback.
 - Doubtful players below 75% (50%, 25%) are never suggested, even if they'd still rate higher.
 - The league dropdown for multi-league teams shows "League <id>" for leagues that aren't loaded (names would cost an extra request each).
-- Pin the ruff version in CI. Ruff 0.16 added a check (ISC004) that flagged a line while building the personal view; an unpinned CI would have failed on it.
+
