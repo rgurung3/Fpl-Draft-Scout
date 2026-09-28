@@ -13,8 +13,9 @@
 - Deployed to Render (free plan): https://fpl-draft-scout.onrender.com. It redeploys automatically on every push to main. The Draft site accepts requests from Render (checked /api/team/276914 after deploying)
 - Trade analyzer built: pick my players and another manager's, see both teams' best eleven and strength before/after, a per-position breakdown (rating points each position gains or loses in the best eleven), and a verdict (good and fair / good but unfair / barely changes / worse). Shortcut from League squads
 - Waiver targets now say why: a one-line reason in rating points, plus the one thing the dropped player still does better. Worked out from the numbers, no AI
+- Season view built: a "This week / Rest of season" toggle. Every player has both ratings; the chosen one drives waivers, reasons, squads and trades. check_league.py prints the biggest risers and fallers between the views. Not yet checked against the real league
 - ruff pinned to 0.16.9 in requirements-dev.txt
-- Tests (pytest, 71 passing) and CI (GitHub Actions); ruff clean
+- Tests (pytest, 91 passing) and CI (GitHub Actions); ruff clean
 
 ## How it works
 - app.py fetches data from the FPL Draft site (team → league lookup, league details, who owns whom) and the classic FPL site (fixtures + difficulty), then rates every player 0–100.
@@ -32,6 +33,15 @@
 - Each stat is divided by its 95th percentile (SCALE_PERCENTILE) among players with 180+ minutes (MIN_MINUTES) and capped at 1.0. Early in the season, before anyone has 180 minutes, the scale uses everyone who has played.
 - Then the stats are combined with position weights (WEIGHTS), times 100, times availability (chance of playing, or 0 if injured/suspended).
 - score_players also returns a breakdown: rating points per piece (form, ppg, xgi, mins, fix = 100 x weight x stat) plus avail (what an injury doubt takes off, 0 or less). The pieces add up to the rating, give or take rounding. Every player on the page carries it.
+
+## How the season view works
+- VIEWS in app.py holds each view's settings: fixture window (LOOKAHEAD 3 / SEASON_LOOKAHEAD 6), weights (WEIGHTS / SEASON_WEIGHTS) and the injury rule.
+- Weights are dicts per position, {piece: weight}, each adding up to 1 (a test checks this). Missing pieces count as 0.
+- New pieces (season only): cs = CS_BASELINE (2.0) minus expected goals conceded per 90, so lower xGC = better; dc = defensive_contribution per 90; crea = creativity per 90. All need MIN_MINUTES, like xGI, and use the same 95th-percentile scale.
+- Season weights: form stays 0.30 everywhere. GKP adds cs; DEF adds cs, dc and crea (creativity for attacking full backs); MID adds dc; FWD is the same as this week. Fixtures get a bit less weight over the longer window.
+- Injuries in the season view: chance >= SEASON_FULL_FROM (75) counts as fully fit; 50% and below are unchanged (50% halves the rating, injured = 0). The player's "chance" field (used for the "!" warning and waiver rules) is always the real next-week chance.
+- load_league(league_id, view) rates everyone in both views: week_score and season_score on every player; score, breakdown and fixtures follow the chosen view. Unknown views fall back to "week". All three routes accept ?view=season.
+- The page: toggle in the league bar reloads with ?view=, the link keeps &view=season, the free agents table shows both ratings (chosen one in bold, sorted by it), fixture strips show the view's window, trades send the view.
 
 ## How suggestions work
 - Per position: my players weakest first vs free agents best first, paired one-for-one, max 2 pairs per position (PAIRS_PER_POSITION).
@@ -56,6 +66,8 @@
 - Ownership: element-status owner is the manager's entry_id (not the league entry id). Confirmed against the real API.
 - Team ID = that same entry_id (the number after /entry/ on the Draft site). Its league comes from /api/entry/<id>/public → entry.league_set.
 - If a team is in more than one league, the first is used; ?league=<id> picks another and a league dropdown appears. Only valid league IDs for that team are accepted.
+- Season view adds role-specific stats instead of turning up xGI for everyone, so a change aimed at attacking full backs doesn't move every defender with a lucky early xGI. Weights are first guesses; check_league.py's movers list is how we tune them against the real league.
+- The Draft feed has these fields (checked on Porro): creativity, threat, influence, ict_index, expected_goals_conceded, clean_sheets, goals_conceded, defensive_contribution, clearances_blocks_interceptions, recoveries, tackles, starts, set-piece orders, news_return. Events have deadline_time per gameweek.
 - Waiver explanations are short and worked out from the numbers, not AI: instant, free, exact, testable. A long AI version was considered and dropped: it would only explain this week's numbers, and the bigger need is a long-term view.
 - Personal links instead of accounts: no passwords, nothing stored on the server. Anyone with a link sees that team's view, which is fine because it's all public Draft data.
 - Rating scale: 95th percentile rather than the single best player. Trade-off: the top ~5% look the same on a capped stat, but that rarely matters in Draft because elite players are owned; the middle of the pack (where waiver decisions happen) gets spread out properly. Percentile ranks were rejected because they throw away the size of the gaps.
@@ -72,7 +84,7 @@
 3. Personal view: enter team ID → auto-find league, bookmarkable link (done)
 4. Trade analyzer (done)
 5. "Why this pick?" explanations: short, from the numbers (done). AI long version dropped
-6. Season view: a rest-of-season rating alongside this week's, so players like Porro (poor form, but an attacking full back) aren't dropped too early (next)
+6. Season view: a rest-of-season rating alongside this week's, so players like Porro (poor form, but an attacking full back) aren't dropped too early (built; tune weights against the real league next)
 7. One AI feature where AI writes words and Python does the maths (ideas: trade pitch message, weekly league recap)
 8. Accounts/login (needed for watchlists + limiting AI usage)
 
@@ -90,5 +102,8 @@ Idea for later: trade finder. "I want Joao Pedro and I'll give Fernandes": sugge
 - Trade verdicts use short-term ratings (form, next 3 GWs), but a trade lasts all season. An injured star rates near 0 now even if he's back in two weeks. A longer fixture window just for trades could help.
 - TRADE_MIN_GAIN and FAIR_MARGIN (both 0.5) are first guesses; tune after trying real trades.
 - "Fair" only looks at their best eleven. Real managers also judge on names and total points (shown in the lists), so a fair verdict isn't a guaranteed yes.
+- Season view: an injured player (0%) with a known return date still rates 0 for the whole window. news_return has the date (empty for doubts like Porro's 75%); next step is to count only the games he'd miss, once we've seen a real news_return value.
+- Season view: minutes share still counts games missed through injury, so a player coming back from a knock rates lower for a while (Porro: 198 of 450 minutes).
+- Season view: with only ~5 gameweeks played, per-90 stats are noisy. Last season's data would help but needs one request per player.
 - The league dropdown for multi-league teams shows "League <id>" for leagues that aren't loaded (names would cost an extra request each).
 

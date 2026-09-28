@@ -13,12 +13,13 @@ import check_league
 # ---------------------------------------------------------------- fake data
 
 def make_player(pid, team=1, pos=3, form="5.0", ppg="5.0", minutes=540,
-                xgi="2.0", status="a", chance=None):
+                xgi="2.0", status="a", chance=None, creativity="20.0", xgc="6.0", dc=30):
     return {
         "id": pid, "web_name": f"Player{pid}", "team": team, "element_type": pos,
         "form": form, "points_per_game": ppg, "total_points": 30,
         "minutes": minutes, "expected_goal_involvements": xgi,
         "status": status, "news": "", "chance_of_playing_next_round": chance,
+        "creativity": creativity, "expected_goals_conceded": xgc, "defensive_contribution": dc,
     }
 
 
@@ -168,6 +169,107 @@ def test_scale_works_before_anyone_has_180_minutes():
                   make_player(3, form="0.0", minutes=0)]
     scores = app.score_players(first_week, {}, current_gw=1)
     assert scores[1]["score"] > scores[2]["score"] > 0
+
+
+# ---------------------------------------------------------------- season view
+
+def test_availability_in_the_season_view():
+    assert app.availability({"chance_of_playing_next_round": 75}, full_from=75) == 1.0
+    assert app.availability({"chance_of_playing_next_round": 50}, full_from=75) == 0.5
+    assert app.availability({"chance_of_playing_next_round": 75}) == 0.75   # this week: unchanged
+
+
+def test_season_view_treats_75_percent_as_fit():
+    fit, doubt = make_player(1), make_player(2, status="d", chance=75)
+    week = app.score_players([fit, doubt], {}, current_gw=6)
+    season = app.score_players([fit, doubt], {}, current_gw=6, view="season")
+    assert week[2]["score"] < week[1]["score"]
+    assert season[2]["score"] == season[1]["score"]
+
+
+@pytest.mark.parametrize("status,chance,share", [("d", 50, 0.5), ("d", 25, 0.25),
+                                                 ("i", 0, 0.0), ("i", None, 0.0)])
+def test_season_view_keeps_bigger_doubts(status, chance, share):
+    fit, hurt = make_player(1), make_player(2, status=status, chance=chance)
+    season = app.score_players([fit, hurt], {}, current_gw=6, view="season")
+    assert season[2]["score"] == pytest.approx(season[1]["score"] * share, abs=0.1)
+
+
+def test_season_window_covers_six_gameweeks(monkeypatch):
+    fixtures = [{"event": gw, "team_h": 1, "team_a": 2, "team_h_difficulty": 2,
+                 "team_a_difficulty": 4} for gw in (7, 9, 12, 13)]
+    monkeypatch.setattr(app, "get_json", lambda url: {"teams": TEAMS} if "bootstrap" in url else fixtures)
+    week = app.upcoming_fixtures(TEAMS, 7)
+    season = app.upcoming_fixtures(TEAMS, 7, app.SEASON_LOOKAHEAD)
+    assert [f["gw"] for f in week[1]] == [7, 9]            # GW7-9
+    assert [f["gw"] for f in season[1]] == [7, 9, 12]      # GW7-12
+
+
+def defenders(**changes):
+    """20 ordinary defenders, plus player 99 who differs in the stats given."""
+    return [make_player(i, pos=2) for i in range(1, 21)] + [make_player(99, pos=2, **changes)]
+
+
+@pytest.mark.parametrize("changes,piece", [
+    ({"creativity": "0.0"}, "crea"),    # creates nothing, unlike an attacking full back
+    ({"xgc": "12.0"}, "cs"),            # concedes 2 expected goals per 90: no clean-sheet chance
+    ({"dc": 0}, "dc"),                  # no tackles, blocks or interceptions
+])
+def test_season_view_uses_the_new_stats(changes, piece):
+    # player 99 is weaker than the other defenders on one new stat. (Testing a
+    # standout instead wouldn't work: with the 95th-percentile cap, ordinary
+    # players here are already at the top of the scale.)
+    players = defenders(**changes)
+    week = app.score_players(players, {}, current_gw=6)
+    season = app.score_players(players, {}, current_gw=6, view="season")
+    assert week[99]["score"] == week[1]["score"]           # this week ignores these stats
+    assert season[99]["score"] < season[1]["score"]
+    assert season[99]["breakdown"][piece] < season[1]["breakdown"][piece]
+
+
+def test_new_stats_need_180_minutes():
+    cameo = make_player(1, pos=2, minutes=90, creativity="50.0", xgc="0.0", dc=40)
+    breakdown = app.score_players([cameo], {}, current_gw=6, view="season")[1]["breakdown"]
+    assert breakdown["crea"] == breakdown["cs"] == breakdown["dc"] == 0
+
+
+def test_forwards_only_change_through_fixtures_and_fitness():
+    forwards = [make_player(i, pos=4, form=str(i), creativity=str(10 * i)) for i in range(1, 8)]
+    week = app.score_players(forwards, {}, current_gw=6)
+    season = app.score_players(forwards, {}, current_gw=6, view="season")
+    assert all(week[i]["score"] == season[i]["score"] for i in week)
+
+
+def test_season_breakdown_adds_up_to_the_rating():
+    players = defenders(creativity="80.0") + [make_player(50, pos=1, status="d", chance=50)]
+    scores = app.score_players(players, {}, current_gw=6, view="season")
+    for s in scores.values():
+        assert sum(s["breakdown"].values()) == pytest.approx(s["score"], abs=0.5)
+
+
+@pytest.mark.parametrize("view", list(app.VIEWS))
+def test_each_positions_weights_add_up_to_one(view):
+    for weights in app.VIEWS[view]["weights"].values():
+        assert sum(weights.values()) == pytest.approx(1.0)
+        assert set(weights) <= set(app.PIECES)
+
+
+def test_team_endpoint_season_view(fake_api):
+    client = app.app.test_client()
+    season = client.get("/api/team/100?view=season").get_json()
+    assert season["view"] == "season"
+    assert season["lookahead"] == app.SEASON_LOOKAHEAD
+    assert all(p["score"] == p["season_score"] for p in season["players"])
+
+    week = client.get("/api/team/100").get_json()
+    assert week["view"] == "week"
+    assert week["lookahead"] == app.LOOKAHEAD
+    assert all(p["score"] == p["week_score"] for p in week["players"])
+
+
+def test_unknown_view_falls_back_to_week(fake_api):
+    data = app.app.test_client().get("/api/team/100?view=banana").get_json()
+    assert data["view"] == "week"
 
 
 # ---------------------------------------------------------------- the web route
@@ -438,6 +540,13 @@ def test_many_tiny_differences_still_give_one_reason():
     assert [r["text"] for r in app.swap_reasons(drop, claim)["reasons"]] == ["better form"]
 
 
+def test_reasons_use_the_season_pieces():
+    drop = rated(1, "DEF", 30, owner=100, breakdown=piece(crea=2, cs=5))
+    claim = rated(2, "DEF", 45, breakdown=piece(crea=12, cs=10))
+    reasons = app.swap_reasons(drop, claim)["reasons"]
+    assert [r["text"] for r in reasons] == ["more creativity", "better clean-sheet chances"]
+
+
 @pytest.mark.parametrize("chance,text", [(50, "P1 is 50% to play"), (0, "P1 is out")])
 def test_drop_injury_doubt_is_a_reason(chance, text):
     drop = rated(1, "DEF", 20, owner=100, chance=chance, breakdown=piece(form=40, avail=-20))
@@ -485,6 +594,17 @@ def test_checker_confirms_my_team_is_in_the_league(fake_api):
     data = app.app.test_client().get("/api/team/100").get_json()
     results = {msg: ok for ok, msg in check_league.check(data)}
     assert results["your team (My FC) is one of this league's managers"] is True
+
+
+def test_checker_lists_the_biggest_movers():
+    players = [{"name": "Porro", "week_score": 34, "season_score": 62},
+               {"name": "Riser2", "week_score": 50, "season_score": 55},
+               {"name": "Faller", "week_score": 70, "season_score": 50},
+               {"name": "Bench", "week_score": 10, "season_score": 30},    # under 40 in both
+               {"name": "Steady", "week_score": 60, "season_score": 60}]
+    risers, fallers = check_league.movers(players)
+    assert [p["name"] for p in risers] == ["Porro", "Riser2"]
+    assert [p["name"] for p in fallers] == ["Faller"]
 
 
 def test_checker_flags_my_team_missing_from_the_league(fake_api):
@@ -635,6 +755,11 @@ def test_trade_endpoint_analyzes_a_trade(two_managers):
     assert data["me"]["leaves_xi"] == [1]
     assert data["message"] == app.TRADE_MESSAGES["worse"]
     assert set(data["me"]["by_position"]) == {"GKP", "DEF", "MID", "FWD"}
+
+
+def test_trade_endpoint_follows_the_view(two_managers):
+    res = app.app.test_client().get("/api/team/100/trade?with=200&give=1&get=2&view=season")
+    assert res.status_code == 200
 
 
 @pytest.mark.parametrize("query,text", [

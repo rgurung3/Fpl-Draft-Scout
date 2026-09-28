@@ -13,7 +13,8 @@ DRAFT = "https://draft.premierleague.com/api"
 CLASSIC = "https://fantasy.premierleague.com/api"
 HEADERS = {"User-Agent": "Mozilla/5.0 (DraftScout personal tool)"}
 CACHE_SECONDS = 600
-LOOKAHEAD = 3  # how many upcoming gameweeks count toward fixture ease
+LOOKAHEAD = 3         # how many upcoming gameweeks count toward fixture ease (this week view)
+SEASON_LOOKAHEAD = 6  # the same for the rest of season view
 MIN_MINUTES = 180       # players need this many minutes for xGI/90 and to set the rating scale
 SCALE_PERCENTILE = 95   # each stat is measured against this percentile of regular players
 
@@ -42,10 +43,10 @@ def num(x, default=0.0):
 
 # ---------------------------------------------------------------- fixtures
 
-def upcoming_fixtures(draft_teams, from_gw):
+def upcoming_fixtures(draft_teams, from_gw, lookahead=LOOKAHEAD):
     """
     Returns {draft_team_id: [ {gw, opp, home, difficulty}, ... ]} for the next
-    LOOKAHEAD gameweeks. Uses the classic FPL fixtures feed (it has difficulty
+    `lookahead` gameweeks. Uses the classic FPL fixtures feed (it has difficulty
     ratings) and matches clubs by short name, so team ids never get crossed.
     """
     result = {t["id"]: [] for t in draft_teams}
@@ -58,7 +59,7 @@ def upcoming_fixtures(draft_teams, from_gw):
     by_short = {t["short_name"]: t["id"] for t in draft_teams}
     classic_to_draft = {t["id"]: by_short.get(t["short_name"]) for t in classic_teams}
     short_of = {t["id"]: t["short_name"] for t in draft_teams}
-    last_gw = from_gw + LOOKAHEAD - 1
+    last_gw = from_gw + lookahead - 1
 
     for f in fixtures:
         gw = f.get("event")
@@ -85,19 +86,60 @@ def fixture_ease(fixtures):
 
 AVAIL_BY_STATUS = {"a": 1.0, "d": 0.5, "i": 0.0, "s": 0.0, "u": 0.0, "n": 0.0}
 
-# weights per position: form, points-per-game, attacking threat, minutes, fixtures
+# The rating pieces and the stat each one is built from:
+#   form, ppg        recent form and points per game
+#   xgi              attacking threat: expected goal involvements per 90
+#   mins             share of minutes played (already 0-1)
+#   fix              fixture ease over the view's window
+#   cs               clean-sheet chances: CS_BASELINE minus expected goals conceded per 90
+#   dc               defensive contribution (tackles, blocks, interceptions...) per 90
+#   crea             creativity per 90 (chance creation, crosses)
+PIECE_STATS = {"form": "form", "ppg": "ppg", "xgi": "xgi90", "mins": "mins", "fix": "fix",
+               "cs": "cs", "dc": "dc90", "crea": "crea90"}
+PIECES = tuple(PIECE_STATS)
+SCALED_STATS = ("form", "ppg", "xgi90", "fix", "cs", "dc90", "crea90")  # minutes share is already 0-1
+CS_BASELINE = 2.0  # conceding this many expected goals per 90 counts as no clean-sheet chance at all
+
+# this week: weights per position. Each position's weights add up to 1.
 WEIGHTS = {
-    1: (0.30, 0.25, 0.00, 0.20, 0.25),  # GKP
-    2: (0.30, 0.20, 0.10, 0.15, 0.25),  # DEF
-    3: (0.30, 0.20, 0.20, 0.15, 0.15),  # MID
-    4: (0.30, 0.20, 0.25, 0.10, 0.15),  # FWD
+    1: {"form": 0.30, "ppg": 0.25, "xgi": 0.00, "mins": 0.20, "fix": 0.25},  # GKP
+    2: {"form": 0.30, "ppg": 0.20, "xgi": 0.10, "mins": 0.15, "fix": 0.25},  # DEF
+    3: {"form": 0.30, "ppg": 0.20, "xgi": 0.20, "mins": 0.15, "fix": 0.15},  # MID
+    4: {"form": 0.30, "ppg": 0.20, "xgi": 0.25, "mins": 0.10, "fix": 0.15},  # FWD
+}
+
+# rest of season: form keeps its weight, fixtures (over a longer window) count a
+# bit less, and new stats aimed at particular roles get a share: clean-sheet
+# chances for keepers and defenders, defensive actions for defenders and
+# midfielders, creativity for defenders (attacking full backs). Forwards only
+# change through the longer fixture window and the lighter injury rule.
+SEASON_WEIGHTS = {
+    1: {"form": 0.30, "ppg": 0.20, "mins": 0.20, "fix": 0.15, "cs": 0.15},                  # GKP
+    2: {"form": 0.30, "ppg": 0.15, "xgi": 0.10, "mins": 0.10, "fix": 0.10,
+        "cs": 0.10, "dc": 0.05, "crea": 0.10},                                             # DEF
+    3: {"form": 0.30, "ppg": 0.20, "xgi": 0.20, "mins": 0.10, "fix": 0.15, "dc": 0.05},     # MID
+    4: {"form": 0.30, "ppg": 0.20, "xgi": 0.25, "mins": 0.10, "fix": 0.15},                 # FWD
+}
+SEASON_FULL_FROM = 75  # rest of season: players at least this likely to play count as fully fit
+
+VIEWS = {
+    "week": {"lookahead": LOOKAHEAD, "weights": WEIGHTS, "full_from": None},
+    "season": {"lookahead": SEASON_LOOKAHEAD, "weights": SEASON_WEIGHTS,
+               "full_from": SEASON_FULL_FROM},
 }
 
 
-def availability(el):
+def availability(el, full_from=None):
+    """
+    How likely a player is to play, 0-1. If full_from is set (the season view),
+    a chance of at least full_from% counts as fully fit; lower chances don't.
+    """
     chance = el.get("chance_of_playing_next_round")
     if chance is not None:
-        return num(chance, 100) / 100
+        chance = num(chance, 100)
+        if full_from is not None and chance >= full_from:
+            return 1.0
+        return chance / 100
     return AVAIL_BY_STATUS.get(el.get("status", "a"), 1.0)
 
 
@@ -115,10 +157,6 @@ def percentile(values, pct):
     return ordered[low] + (ordered[high] - ordered[low]) * (pos - low)
 
 
-SCALED_STATS = ("form", "ppg", "xgi90", "fix")  # minutes share is already 0-1
-PIECES = ("form", "ppg", "xgi", "mins", "fix")  # the five rating pieces, in the same order as WEIGHTS
-
-
 def stat_scales(raw, minutes):
     """
     The number each stat gets divided by: its SCALE_PERCENTILE among regular
@@ -130,19 +168,32 @@ def stat_scales(raw, minutes):
     return {k: percentile([r[k] for r in pool], SCALE_PERCENTILE) or 1 for k in SCALED_STATS}
 
 
-def score_players(elements, fixtures_by_team, current_gw):
+def per90(total, mins):
+    """A season total per 90 minutes, or 0 for players under MIN_MINUTES (too few to trust)."""
+    return total / mins * 90 if mins >= MIN_MINUTES else 0.0
+
+
+def score_players(elements, fixtures_by_team, current_gw, view="week"):
+    """
+    Rate every player 0-100 for one view ("week" or "season", see VIEWS).
+    fixtures_by_team should cover that view's fixture window.
+    """
+    settings = VIEWS[view]
     raw, minutes = [], []
     games_so_far = max(current_gw, 1)
     for el in elements:
         mins = num(el.get("minutes"))
-        xgi = num(el.get("expected_goal_involvements"))
         minutes.append(mins)
+        xgc90 = per90(num(el.get("expected_goals_conceded")), mins)
         raw.append({
             "form": max(num(el.get("form")), 0),
             "ppg": max(num(el.get("points_per_game")), 0),
-            "xgi90": (xgi / mins * 90) if mins >= MIN_MINUTES else 0.0,
+            "xgi90": per90(num(el.get("expected_goal_involvements")), mins),
             "mins": min(mins / (games_so_far * 90), 1.0),
             "fix": fixture_ease(fixtures_by_team.get(el["team"], [])),
+            "cs": max(CS_BASELINE - xgc90, 0) if mins >= MIN_MINUTES else 0.0,
+            "dc90": per90(num(el.get("defensive_contribution")), mins),
+            "crea90": per90(num(el.get("creativity")), mins),
         })
 
     # measure each stat against the 95th percentile of regular players, capped at 1.0,
@@ -151,15 +202,14 @@ def score_players(elements, fixtures_by_team, current_gw):
 
     scores = {}
     for el, r in zip(elements, raw):
-        w = WEIGHTS.get(el["element_type"], WEIGHTS[3])
-        parts = [min(r["form"] / scale["form"], 1.0), min(r["ppg"] / scale["ppg"], 1.0),
-                 min(r["xgi90"] / scale["xgi90"], 1.0), r["mins"],
-                 min(r["fix"] / scale["fix"], 1.0)]
-        base = sum(wi * pi for wi, pi in zip(w, parts))
-        avail = availability(el)
+        weights = settings["weights"].get(el["element_type"], settings["weights"][3])
+        values = {piece: r[stat] if stat == "mins" else min(r[stat] / scale[stat], 1.0)
+                  for piece, stat in PIECE_STATS.items()}
+        base = sum(w * values[piece] for piece, w in weights.items())
+        avail = availability(el, settings["full_from"])
         # the rating split into rating points per piece, plus what an injury doubt
         # takes off (0 or less). The pieces add up to the rating, give or take rounding.
-        breakdown = {name: round(100 * wi * pi, 1) for name, wi, pi in zip(PIECES, w, parts)}
+        breakdown = {piece: round(100 * w * values[piece], 1) for piece, w in weights.items()}
         breakdown["avail"] = round(100 * base * (avail - 1), 1)
         scores[el["id"]] = {
             "score": round(100 * base * avail, 1),
@@ -217,6 +267,9 @@ REASON_LABELS = {  # what it means when the claim beats the drop on each piece
     "xgi": "more attacking threat",
     "mins": "more minutes",
     "fix": "easier fixtures",
+    "cs": "better clean-sheet chances",
+    "dc": "more defensive actions",
+    "crea": "more creativity",
 }
 MAX_REASONS = 3
 MIN_REASON = 1.0  # rating points; smaller differences aren't worth mentioning
@@ -231,7 +284,7 @@ def swap_reasons(drop, claim):
     against: the biggest piece in the drop's favour, or None. Worth knowing:
     the drop might still be the better long-term player on that measure.
     """
-    diffs = [(round(claim["breakdown"][k] - drop["breakdown"][k], 1), label)
+    diffs = [(round(claim["breakdown"].get(k, 0) - drop["breakdown"].get(k, 0), 1), label)
              for k, label in REASON_LABELS.items()]
 
     # the drop's injury doubt counts in the claim's favour. (The claim's own
@@ -451,8 +504,14 @@ def fetch(url, not_found):
                        "Check your internet connection.") from e
 
 
-def load_league(league_id):
-    """Fetch a league from the Draft site and build everything the page needs."""
+def load_league(league_id, view="week"):
+    """
+    Fetch a league from the Draft site and build everything the page needs.
+    Every player gets both ratings (week_score, season_score); "score",
+    "breakdown" and "fixtures" follow the chosen view, so waivers, squads and
+    trades all use it.
+    """
+    view = view if view in VIEWS else "week"
     boot = fetch(f"{DRAFT}/bootstrap-static", LEAGUE_NOT_FOUND)
     details = fetch(f"{DRAFT}/league/{league_id}/details", LEAGUE_NOT_FOUND)
     status = fetch(f"{DRAFT}/league/{league_id}/element-status", LEAGUE_NOT_FOUND)
@@ -466,14 +525,14 @@ def load_league(league_id):
     positions = {p["id"]: p["singular_name_short"] for p in boot["element_types"]}
     elements = boot["elements"]
 
-    fixtures = upcoming_fixtures(teams, next_gw)
-    scores = score_players(elements, fixtures, current_gw)
+    fixtures = {v: upcoming_fixtures(teams, next_gw, VIEWS[v]["lookahead"]) for v in VIEWS}
+    ratings = {v: score_players(elements, fixtures[v], current_gw, v) for v in VIEWS}
 
     owner_of = {s["element"]: s.get("owner") for s in status.get("element_status", [])}
 
     players = []
     for el in elements:
-        s = scores[el["id"]]
+        s = ratings[view][el["id"]]
         players.append({
             "id": el["id"],
             "name": el.get("web_name"),
@@ -482,15 +541,17 @@ def load_league(league_id):
             "pos_id": el["element_type"],
             "owner": owner_of.get(el["id"]),
             "score": s["score"],
+            "week_score": ratings["week"][el["id"]]["score"],
+            "season_score": ratings["season"][el["id"]]["score"],
             "form": num(el.get("form")),
             "ppg": num(el.get("points_per_game")),
             "total": int(num(el.get("total_points"))),
             "xgi90": s["xgi90"],
             "mins_share": s["mins_share"],
             "status": el.get("status", "a"),
-            "chance": round(availability(el) * 100),
+            "chance": round(availability(el) * 100),  # the real chance for next week, in both views
             "news": el.get("news") or "",
-            "fixtures": fixtures.get(el["team"], []),
+            "fixtures": fixtures[view].get(el["team"], []),
             "breakdown": s["breakdown"],
         })
 
@@ -507,23 +568,25 @@ def load_league(league_id):
         "league_name": details.get("league", {}).get("name", f"League {league_id}"),
         "current_gw": current_gw,
         "next_gw": next_gw,
-        "lookahead": LOOKAHEAD,
+        "view": view,
+        "lookahead": VIEWS[view]["lookahead"],
         "managers": managers,
         "players": players,
     }
 
 
-def league_for_team(entry_id, wanted=None):
+def league_for_team(entry_id, wanted=None, view="week"):
     """
     Find the league a team plays in and load it. If the team is in more than one
     league, `wanted` picks one (it's ignored unless it's one of the team's leagues).
+    `view` is "week" or "season" (see VIEWS).
     Returns (the league data, the team's league IDs).
     """
     entry = fetch(f"{DRAFT}/entry/{entry_id}/public", TEAM_NOT_FOUND).get("entry") or {}
     leagues = entry.get("league_set") or []
     if not leagues:
         raise FplError(NO_LEAGUE_YET, 400)
-    return load_league(wanted if wanted in leagues else leagues[0]), leagues
+    return load_league(wanted if wanted in leagues else leagues[0], view), leagues
 
 
 # ---------------------------------------------------------------- routes
@@ -536,7 +599,7 @@ def index():
 @app.route("/api/league/<int:league_id>")
 def league(league_id):
     try:
-        return jsonify(load_league(league_id))
+        return jsonify(load_league(league_id, request.args.get("view", "week")))
     except FplError as e:
         return jsonify({"error": e.message}), e.status
 
@@ -546,9 +609,11 @@ def team(entry_id):
     """
     Look up which league a team plays in, then load that league with the team
     marked as "me". If the team is in more than one league, ?league=<id> picks one.
+    ?view=season rates everyone for the rest of the season instead of this week.
     """
     try:
-        data, leagues = league_for_team(entry_id, request.args.get("league", type=int))
+        data, leagues = league_for_team(entry_id, request.args.get("league", type=int),
+                                        request.args.get("view", "week"))
     except FplError as e:
         return jsonify({"error": e.message}), e.status
 
@@ -562,14 +627,15 @@ def team(entry_id):
 def trade(entry_id):
     """
     Analyze a trade, e.g. /api/team/276914/trade?with=12345&give=301,302&get=415,420
-    (with = the other manager's team ID, give/get = player IDs). ?league= works as above.
+    (with = the other manager's team ID, give/get = player IDs). ?league= and ?view= work as above.
     """
     try:
         them = request.args.get("with", type=int)
         give, get = id_list(request.args.get("give")), id_list(request.args.get("get"))
         if them is None:
             raise TradeError("Pick a manager to trade with.")
-        data, _leagues = league_for_team(entry_id, request.args.get("league", type=int))
+        data, _leagues = league_for_team(entry_id, request.args.get("league", type=int),
+                                         request.args.get("view", "week"))
         if them != entry_id and them not in {m["entry_id"] for m in data["managers"]}:
             raise TradeError("That manager isn't in your league.")
         return jsonify(evaluate_trade(data["players"], entry_id, them, give, get))

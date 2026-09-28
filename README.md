@@ -5,7 +5,8 @@ league, rates every player, and shows you:
 
 - **Waiver targets**: free agents who rate higher than your weakest player in the same position, each with a one-line reason (for example "easier fixtures +14, better form +12. But Porro has more attacking threat −6"). Players with a 75% chance of playing are included, with a warning and a fully fit backup
 - **Trade analyzer**: pick players from your squad and another manager's, and see how the trade changes both teams' best eleven, and whether it's a fair offer they might accept
-- **Free agents**: a sortable, filterable table of everyone unowned in your league, with upcoming fixtures
+- **Free agents**: a sortable, filterable table of everyone unowned in your league, with both ratings (this week and rest of season) and upcoming fixtures
+- **This week / Rest of season**: a toggle that switches every rating on the page between the next few gameweeks and a longer-term view
 - **League squads**: how every manager's best legal eleven (one keeper, 3-5 DEF, 2-5 MID, 1-3 FWD) stacks up, with your squad highlighted
 
 ## Run it
@@ -42,6 +43,10 @@ It loads the league through the app and prints a short report. Lines
 starting with `!!` need a look: missing managers, owners that don't match
 anyone in the league, your team not being in the league it found, squads
 that aren't 15 players, missing xGI data, or clubs without fixtures.
+
+At the end it lists the biggest risers and fallers between the "this week"
+and "rest of season" ratings, e.g. `Pedro Porro (DEF, TOT): 34 -> 62 (+28)`.
+Use it to check the season settings move the right players.
 
 ## Deploy to Render
 
@@ -114,7 +119,22 @@ into piece-by-piece differences. The "Why" line under each swap names the
 biggest ones in rating points, plus the biggest thing the player you'd drop
 still does better.
 
-You can tweak the weights in `WEIGHTS`, the fixture window in `LOOKAHEAD`,
+### Rest of season
+
+The toggle at the top switches to a longer-term rating. It's built the same
+way, with these differences:
+
+- Fixtures count over the next 6 gameweeks instead of 3, with a little less weight.
+- A 75% injury doubt counts as fully fit. 50% and below are handled as before.
+- Three more stats count for the positions they matter to: clean-sheet chances
+  (expected goals conceded per 90) for keepers and defenders, defensive actions
+  (tackles, blocks, interceptions per 90) for defenders and midfielders, and
+  creativity per 90 for defenders, so attacking full backs get credit.
+- Form keeps its weight. Forwards only change through fixtures and injuries.
+
+Your choice goes into your link (`&view=season`), so a bookmark remembers it.
+
+You can tweak the weights in `WEIGHTS` and `SEASON_WEIGHTS`, the fixture windows in `LOOKAHEAD` and `SEASON_LOOKAHEAD`,
 the scale in `SCALE_PERCENTILE` and `MIN_MINUTES`, and the trade verdict
 thresholds in `TRADE_MIN_GAIN` and `FAIR_MARGIN`, all at the top of `app.py`.
 

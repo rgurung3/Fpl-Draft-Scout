@@ -50,6 +50,8 @@
   .leaguebar .name { font-family: var(--display); font-size: 1.9rem; font-weight: 600; }
   .leaguebar .gw { color: var(--muted); }
   .leaguebar select { padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+  .viewtabs button { padding: 7px 14px; }
+  td.alt { color: var(--muted); font-variant-numeric: tabular-nums; }
   .leaguebar .myteam { font-weight: 600; border-left: 5px solid var(--amber); padding-left: 10px; }
   .mylink { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; margin-bottom: 32px; color: var(--muted); font-size: .9rem; }
   .mylink input { flex: 1 1 240px; max-width: 340px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px;
@@ -196,6 +198,10 @@
       <span class="name" id="leagueName"></span>
       <span class="gw" id="gwInfo"></span>
       <span class="myteam" id="myTeam"></span>
+      <div class="tabs viewtabs" id="viewTabs" role="group" aria-label="Rate players for">
+        <button type="button" data-view="week" aria-pressed="true">This week</button>
+        <button type="button" data-view="season" aria-pressed="false">Rest of season</button>
+      </div>
       <label id="leaguePick" class="hidden">League
         <select id="leagueSelect"></select>
       </label>
@@ -263,12 +269,13 @@
 <script>
 const $ = id => document.getElementById(id);
 let DATA = null;
-let state = { pos: "", q: "", hideFlagged: true, sortKey: "score", sortDir: -1, me: null, team: null,
+let state = { pos: "", q: "", hideFlagged: true, sortKey: null, sortDir: -1, me: null, team: null, view: "week",
   tradeWith: null, give: new Set(), get: new Set() };
 const POS_ORDER = { GKP: 0, DEF: 1, MID: 2, FWD: 3 };
 
 const COLS = [
-  { key: "score", label: "Rating", n: true },
+  { key: "week_score", label: "Week", n: true },
+  { key: "season_score", label: "Season", n: true },
   { key: "name", label: "Player" },
   { key: "team", label: "Club" },
   { key: "pos", label: "Pos" },
@@ -296,19 +303,22 @@ function fixStrip(p) {
   return `<span class="fx">${out.join("")}</span>`;
 }
 
-// the part after "?" in a personal link, e.g. team=276914 (plus league=... only if it matters)
+// the part after "?" in a personal link, e.g. team=276914 (plus league=... and view=season only if they matter)
 function linkQuery() {
   const params = new URLSearchParams({ team: state.team });
   if (DATA.my_leagues.length > 1 && DATA.league_id !== DATA.my_leagues[0]) params.set("league", DATA.league_id);
+  if (DATA.view === "season") params.set("view", "season");
   return "?" + params;
 }
 
-async function loadTeam(id, league) {
+async function loadTeam(id, league, view = state.view) {
   $("loadBtn").disabled = true; $("loadBtn").textContent = "Loading…";
   $("error").classList.add("hidden");
   try {
     let r;
-    try { r = await fetch(`/api/team/${id}` + (league ? `?league=${league}` : "")); }
+    const query = new URLSearchParams({ view });
+    if (league) query.set("league", league);
+    try { r = await fetch(`/api/team/${id}?${query}`); }
     catch (e) { throw new Error("Can't reach Draft Scout. Is app.py still running in your terminal?"); }
     let j = null;
     try { j = await r.json(); } catch (e) { /* not JSON, e.g. a crash page */ }
@@ -332,6 +342,10 @@ function render() {
   $("gwInfo").textContent = `Gameweek ${DATA.current_gw}, fixtures shown for GW${DATA.next_gw}–${DATA.next_gw + DATA.lookahead - 1}`;
 
   state.me = DATA.me;
+  state.view = DATA.view;
+  document.querySelectorAll("#viewTabs button").forEach(b => b.setAttribute("aria-pressed", b.dataset.view === state.view));
+  // the free agents table sorts by the chosen view's rating unless you picked another column
+  if (!state.sortKey || state.sortKey.endsWith("_score")) { state.sortKey = state.view + "_score"; state.sortDir = -1; }
   const me = DATA.managers.find(m => m.entry_id === state.me);
   $("myTeam").textContent = me ? `${me.team_name} (${me.manager})` : `Team ${state.me}`;
 
@@ -342,7 +356,11 @@ function render() {
 
   $("myLink").value = location.origin + location.pathname + linkQuery();
 
-  $("scoreNote").textContent = "Rating is 0–100, built from recent form, points per game, attacking threat (xGI per 90), share of minutes played and fixture difficulty over the next " + DATA.lookahead + " gameweeks, then scaled down for injury doubts. Each stat is measured against the top 5% of regular players, so one standout week doesn't skew everyone else. It's a guide, not a prediction.";
+  $("scoreNote").textContent = "Rating is 0–100, built from recent form, points per game, attacking threat (xGI per 90), share of minutes played and fixture difficulty over the next " + DATA.lookahead + " gameweeks, then scaled down for injury doubts. "
+    + (DATA.view === "season"
+      ? "In the rest of season view, clean-sheet chances, defensive actions and creativity also count for the positions they matter to, and a 75% doubt counts as fit. "
+      : "Switch to Rest of season for a longer-term view. ")
+    + "Each stat is measured against the top 5% of regular players, so one standout week doesn't skew everyone else. It's a guide, not a prediction.";
 
   resetTrade();
   renderSwaps(); renderTrade(); renderTable(); renderStrength();
@@ -474,7 +492,7 @@ async function analyzeTrade() {
   const btn = $("tradeBtn");
   btn.disabled = true; btn.textContent = "Analyzing…";
   const params = new URLSearchParams({ "with": state.tradeWith, give: [...state.give].join(","),
-    get: [...state.get].join(","), league: DATA.league_id });
+    get: [...state.get].join(","), league: DATA.league_id, view: DATA.view });
   try {
     let r;
     try { r = await fetch(`/api/team/${state.team}/trade?${params}`); }
@@ -511,7 +529,9 @@ function renderTable() {
 
   $("faBody").innerHTML = rows.length ? rows.map(p => `
     <tr>
-      <td class="n"><span class="score">${p.score.toFixed(0)}</span></td>
+      ${["week", "season"].map(v => v === state.view
+        ? `<td class="n"><span class="score">${p[v + "_score"].toFixed(0)}</span></td>`
+        : `<td class="n alt">${p[v + "_score"].toFixed(0)}</td>`).join("")}
       <td>${esc(p.name)}${p.news ? `<span class="flag">${esc(p.news)}</span>` : ""}</td>
       <td>${esc(p.team)}</td><td class="pos">${p.pos}</td>
       <td class="n">${p.form.toFixed(1)}</td><td class="n">${p.ppg.toFixed(1)}</td><td class="n">${p.total}</td>
@@ -554,6 +574,11 @@ function renderStrength() {
 // events
 $("loadForm").addEventListener("submit", e => { e.preventDefault(); loadTeam($("teamId").value.trim()); });
 $("leagueSelect").addEventListener("change", e => loadTeam(state.team, e.target.value));
+$("viewTabs").addEventListener("click", e => {
+  const b = e.target.closest("button");
+  if (!b || !DATA || b.dataset.view === DATA.view) return;
+  loadTeam(state.team, DATA.league_id, b.dataset.view);
+});
 $("copyLink").addEventListener("click", async () => {
   try { await navigator.clipboard.writeText($("myLink").value); }
   catch (e) { $("myLink").select(); return; }  // no clipboard access: select it so they can copy by hand
@@ -604,6 +629,7 @@ $("strength").addEventListener("click", e => {
 const fromLink = new URLSearchParams(location.search);
 const startTeam = fromLink.get("team") || recall("teamId");
 const startLeague = fromLink.get("league");
+state.view = fromLink.get("view") === "season" ? "season" : "week";
 if (/^[0-9]+$/.test(startTeam || "")) {
   $("teamId").value = startTeam;
   loadTeam(startTeam, /^[0-9]+$/.test(startLeague || "") ? startLeague : null);

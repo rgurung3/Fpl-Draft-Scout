@@ -5,7 +5,9 @@ Run:  python check_league.py 12345           (a league ID)
  or:  python check_league.py --team 276914   (your team ID, like the browser uses)
 
 It loads the league through the app exactly like the browser does, then
-prints a short report. Lines starting with "!!" need a look.
+prints a short report. Lines starting with "!!" need a look. At the end it
+lists the players whose rating changes most between the "this week" and
+"rest of season" views, to check the season settings make sense.
 """
 import sys
 from collections import Counter
@@ -13,6 +15,8 @@ from collections import Counter
 import app
 
 SQUAD_SIZE = 15  # every Draft squad has 15 players once the draft is done
+MOVER_MIN_RATING = 40  # only list movers who rate at least this in one of the views
+MOVERS_SHOWN = 8
 
 
 def check(data):
@@ -61,6 +65,30 @@ def check(data):
     return results
 
 
+def movers(players, n=MOVERS_SHOWN):
+    """
+    The players who rise most and fall most from the week view to the season
+    view, ignoring anyone who rates under MOVER_MIN_RATING in both.
+    """
+    relevant = [p for p in players if max(p["week_score"], p["season_score"]) >= MOVER_MIN_RATING]
+    change = {id(p): p["season_score"] - p["week_score"] for p in relevant}
+    risers = sorted((p for p in relevant if change[id(p)] > 0), key=lambda p: -change[id(p)])
+    fallers = sorted((p for p in relevant if change[id(p)] < 0), key=lambda p: change[id(p)])
+    return risers[:n], fallers[:n]
+
+
+def print_movers(players):
+    risers, fallers = movers(players)
+    for title, group in (("Biggest risers", risers), ("Biggest fallers", fallers)):
+        print(f"\n{title} in the rest of season view (this week -> season):")
+        for p in group:
+            change = p["season_score"] - p["week_score"]
+            print(f"   {p['name']} ({p['pos']}, {p['team']}): "
+                  f"{p['week_score']:.0f} -> {p['season_score']:.0f} ({change:+.0f})")
+        if not group:
+            print("   none")
+
+
 def main():
     args = sys.argv[1:]
     if len(args) == 2 and args[0] == "--team" and args[1].isdigit():
@@ -96,6 +124,7 @@ def main():
         print(f"\n{problems} thing(s) to look at. Paste this output into the chat.")
     else:
         print("\nAll checks passed.")
+    print_movers(data["players"])
     return 1 if problems else 0
 
 
