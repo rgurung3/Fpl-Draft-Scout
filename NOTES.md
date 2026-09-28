@@ -12,8 +12,9 @@
 - On GitHub: https://github.com/rgurung3/Fpl-Draft-Scout
 - Deployed to Render (free plan): https://fpl-draft-scout.onrender.com. It redeploys automatically on every push to main. The Draft site accepts requests from Render (checked /api/team/276914 after deploying)
 - Trade analyzer built: pick my players and another manager's, see both teams' best eleven and strength before/after, a per-position breakdown (rating points each position gains or loses in the best eleven), and a verdict (good and fair / good but unfair / barely changes / worse). Shortcut from League squads
+- Waiver targets now say why: a one-line reason in rating points, plus the one thing the dropped player still does better. Worked out from the numbers, no AI
 - ruff pinned to 0.16.9 in requirements-dev.txt
-- Tests (pytest, 64 passing) and CI (GitHub Actions); ruff clean
+- Tests (pytest, 71 passing) and CI (GitHub Actions); ruff clean
 
 ## How it works
 - app.py fetches data from the FPL Draft site (team → league lookup, league details, who owns whom) and the classic FPL site (fixtures + difficulty), then rates every player 0–100.
@@ -30,6 +31,7 @@
 - Five stats per player: form, points per game, xGI per 90 (0 if under 180 minutes), minutes share, fixture ease over the next 3 GWs (sum of 6 - difficulty; doubles count twice, blanks count zero).
 - Each stat is divided by its 95th percentile (SCALE_PERCENTILE) among players with 180+ minutes (MIN_MINUTES) and capped at 1.0. Early in the season, before anyone has 180 minutes, the scale uses everyone who has played.
 - Then the stats are combined with position weights (WEIGHTS), times 100, times availability (chance of playing, or 0 if injured/suspended).
+- score_players also returns a breakdown: rating points per piece (form, ppg, xgi, mins, fix = 100 x weight x stat) plus avail (what an injury doubt takes off, 0 or less). The pieces add up to the rating, give or take rounding. Every player on the page carries it.
 
 ## How suggestions work
 - Per position: my players weakest first vs free agents best first, paired one-for-one, max 2 pairs per position (PAIRS_PER_POSITION).
@@ -37,6 +39,7 @@
 - A doubtful claim gets a "!" warning and a backup: the best fully fit free agent in the same position that isn't already one of the suggestions.
 - A pair only shows if the free agent rates at least 3 points higher (MIN_GAIN).
 - Top 5 pairs by gain are shown (MAX_TARGETS).
+- Each pair has a "why" (swap_reasons): claim breakdown minus drop breakdown, piece by piece. Up to 3 reasons (MAX_REASONS) of at least 1 point (MIN_REASON), biggest first; if none are that big, the single biggest. The drop's injury doubt counts as a reason ("Porro is 50% to play"); the claim's own doubt isn't repeated because it has the "!" row. "against" = the biggest piece in the drop's favour ("But Porro has more attacking threat -6").
 - League squads = average rating of each team's best legal eleven: take the minimum at each position (1 GKP, 3 DEF, 2 MID, 1 FWD), then fill the last 4 places with the best players left without breaking a maximum (1 GKP, 5 DEF, 5 MID, 3 FWD). My squad is opened and highlighted, with formation and bench.
 
 ## How the trade analyzer works
@@ -53,6 +56,7 @@
 - Ownership: element-status owner is the manager's entry_id (not the league entry id). Confirmed against the real API.
 - Team ID = that same entry_id (the number after /entry/ on the Draft site). Its league comes from /api/entry/<id>/public → entry.league_set.
 - If a team is in more than one league, the first is used; ?league=<id> picks another and a league dropdown appears. Only valid league IDs for that team are accepted.
+- Waiver explanations are short and worked out from the numbers, not AI: instant, free, exact, testable. A long AI version was considered and dropped: it would only explain this week's numbers, and the bigger need is a long-term view.
 - Personal links instead of accounts: no passwords, nothing stored on the server. Anyone with a link sees that team's view, which is fine because it's all public Draft data.
 - Rating scale: 95th percentile rather than the single best player. Trade-off: the top ~5% look the same on a capped stat, but that rarely matters in Draft because elite players are owned; the middle of the pack (where waiver decisions happen) gets spread out properly. Percentile ranks were rejected because they throw away the size of the gaps.
 - Only catch specific exceptions (not except Exception); newer ruff versions flag the blind catch and would fail CI.
@@ -67,8 +71,10 @@
 2. Deploy to Render (done)
 3. Personal view: enter team ID → auto-find league, bookmarkable link (done)
 4. Trade analyzer (done)
-5. AI "why this pick?" explanations
-6. Accounts/login (needed for watchlists + limiting AI usage)
+5. "Why this pick?" explanations: short, from the numbers (done). AI long version dropped
+6. Season view: a rest-of-season rating alongside this week's, so players like Porro (poor form, but an attacking full back) aren't dropped too early (next)
+7. One AI feature where AI writes words and Python does the maths (ideas: trade pitch message, weekly league recap)
+8. Accounts/login (needed for watchlists + limiting AI usage)
 
 Idea for later: trade finder. "I want Joao Pedro and I'll give Fernandes": suggest which of their players makes the best filler, so the positions match, it helps me, and it still looks fair to them.
 

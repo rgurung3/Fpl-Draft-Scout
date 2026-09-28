@@ -118,6 +118,15 @@ def test_low_minutes_players_get_no_xgi_boost():
     assert scores[1]["xgi90"] == 0
 
 
+def test_breakdown_adds_up_to_the_rating():
+    players = regulars() + [make_player(99, form="8.0", status="d", chance=75)]
+    scores = app.score_players(players, {}, current_gw=6)
+    for s in scores.values():
+        assert sum(s["breakdown"].values()) == pytest.approx(s["score"], abs=0.5)
+    assert scores[1]["breakdown"]["avail"] == 0           # fully fit: nothing taken off
+    assert scores[99]["breakdown"]["avail"] < 0           # 75% to play: a quarter taken off
+
+
 # ---------------------------------------------------------------- rating scale (95th percentile)
 
 def test_percentile():
@@ -296,9 +305,18 @@ def test_unknown_team_id_gets_a_friendly_message(monkeypatch):
 
 # ---------------------------------------------------------------- best eleven
 
-def rated(pid, pos, score, owner=None, chance=100):
-    """A player as the page sees it, with only the fields the squad logic uses."""
-    return {"id": pid, "pos": pos, "score": score, "owner": owner, "chance": chance}
+def piece(**values):
+    """A rating breakdown: every piece 0 except the ones given, e.g. piece(form=12, fix=8)."""
+    return {k: values.get(k, 0) for k in (*app.PIECES, "avail")}
+
+
+def rated(pid, pos, score, owner=None, chance=100, breakdown=None):
+    """
+    A player as the page sees it, with only the fields the squad logic uses.
+    Unless a breakdown is given, the whole rating counts as form.
+    """
+    return {"id": pid, "name": f"P{pid}", "pos": pos, "score": score, "owner": owner,
+            "chance": chance, "breakdown": breakdown or piece(form=score)}
 
 
 def full_squad(owner=100):
@@ -358,7 +376,7 @@ def test_squad_strength_reports_formation():
 def test_waivers_suggest_a_clear_upgrade():
     players = [rated(1, "DEF", 40, owner=100), rated(2, "DEF", 60)]
     targets = app.waiver_targets(players, 100)
-    assert targets == [{"drop": 1, "claim": 2, "gain": 20, "backup": None}]
+    assert [(t["drop"], t["claim"], t["gain"], t["backup"]) for t in targets] == [(1, 2, 20, None)]
 
 
 def test_waivers_skip_small_gains():
@@ -395,12 +413,51 @@ def test_players_under_75_percent_are_not_suggested():
     assert app.waiver_targets(players, 100) == []
 
 
+def test_reasons_name_the_biggest_differences_first():
+    drop = rated(1, "DEF", 30, owner=100, breakdown=piece(form=10, fix=5, xgi=15))
+    claim = rated(2, "DEF", 60, breakdown=piece(form=22, fix=19, mins=10, xgi=9))
+    why = app.swap_reasons(drop, claim)
+    assert why["reasons"] == [{"text": "easier fixtures", "points": 14},
+                              {"text": "better form", "points": 12},
+                              {"text": "more minutes", "points": 10}]
+    # the one thing the dropped player still does better
+    assert why["against"] == {"text": "P1 has more attacking threat", "points": -6}
+
+
+def test_small_differences_are_left_out():
+    drop = rated(1, "MID", 20, owner=100, breakdown=piece(form=10, ppg=10))
+    claim = rated(2, "MID", 24.5, breakdown=piece(form=14, ppg=10.5))
+    why = app.swap_reasons(drop, claim)
+    assert [r["text"] for r in why["reasons"]] == ["better form"]   # ppg +0.5 is too small
+    assert why["against"] is None
+
+
+def test_many_tiny_differences_still_give_one_reason():
+    drop = rated(1, "MID", 20, owner=100, breakdown=piece())
+    claim = rated(2, "MID", 3, breakdown=piece(form=0.8, ppg=0.7, xgi=0.6, mins=0.5, fix=0.4))
+    assert [r["text"] for r in app.swap_reasons(drop, claim)["reasons"]] == ["better form"]
+
+
+@pytest.mark.parametrize("chance,text", [(50, "P1 is 50% to play"), (0, "P1 is out")])
+def test_drop_injury_doubt_is_a_reason(chance, text):
+    drop = rated(1, "DEF", 20, owner=100, chance=chance, breakdown=piece(form=40, avail=-20))
+    claim = rated(2, "DEF", 40, breakdown=piece(form=40))
+    assert app.swap_reasons(drop, claim)["reasons"] == [{"text": text, "points": 20}]
+
+
+def test_waiver_targets_come_with_reasons():
+    players = [rated(1, "DEF", 40, owner=100, breakdown=piece(form=20, fix=20)),
+               rated(2, "DEF", 60, breakdown=piece(form=20, fix=40))]
+    target = app.waiver_targets(players, 100)[0]
+    assert target["why"]["reasons"] == [{"text": "easier fixtures", "points": 20}]
+
+
 def test_team_endpoint_includes_targets_and_strength(fake_api):
     data = app.app.test_client().get("/api/team/100").get_json()
     assert "waiver_targets" in data
     me = data["managers"][0]
     assert me["best_xi"] == [1]          # the only player this team owns
-    assert all("chance" in p for p in data["players"])
+    assert all("chance" in p and "breakdown" in p for p in data["players"])
 
 
 def test_homepage_loads():

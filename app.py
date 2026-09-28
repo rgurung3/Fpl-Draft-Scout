@@ -116,6 +116,7 @@ def percentile(values, pct):
 
 
 SCALED_STATS = ("form", "ppg", "xgi90", "fix")  # minutes share is already 0-1
+PIECES = ("form", "ppg", "xgi", "mins", "fix")  # the five rating pieces, in the same order as WEIGHTS
 
 
 def stat_scales(raw, minutes):
@@ -155,10 +156,16 @@ def score_players(elements, fixtures_by_team, current_gw):
                  min(r["xgi90"] / scale["xgi90"], 1.0), r["mins"],
                  min(r["fix"] / scale["fix"], 1.0)]
         base = sum(wi * pi for wi, pi in zip(w, parts))
+        avail = availability(el)
+        # the rating split into rating points per piece, plus what an injury doubt
+        # takes off (0 or less). The pieces add up to the rating, give or take rounding.
+        breakdown = {name: round(100 * wi * pi, 1) for name, wi, pi in zip(PIECES, w, parts)}
+        breakdown["avail"] = round(100 * base * (avail - 1), 1)
         scores[el["id"]] = {
-            "score": round(100 * base * availability(el), 1),
+            "score": round(100 * base * avail, 1),
             "xgi90": round(r["xgi90"], 2),
             "mins_share": round(r["mins"] * 100),
+            "breakdown": breakdown,
         }
     return scores
 
@@ -204,6 +211,46 @@ def squad_strength(players, entry_id):
     }
 
 
+REASON_LABELS = {  # what it means when the claim beats the drop on each piece
+    "form": "better form",
+    "ppg": "more points per game",
+    "xgi": "more attacking threat",
+    "mins": "more minutes",
+    "fix": "easier fixtures",
+}
+MAX_REASONS = 3
+MIN_REASON = 1.0  # rating points; smaller differences aren't worth mentioning
+
+
+def swap_reasons(drop, claim):
+    """
+    Why a claim rates higher than a drop, in a few words. Each rating is the sum
+    of its breakdown pieces, so the gain splits into piece-by-piece differences.
+
+    reasons: up to MAX_REASONS pieces in the claim's favour, biggest first.
+    against: the biggest piece in the drop's favour, or None. Worth knowing:
+    the drop might still be the better long-term player on that measure.
+    """
+    diffs = [(round(claim["breakdown"][k] - drop["breakdown"][k], 1), label)
+             for k, label in REASON_LABELS.items()]
+
+    # the drop's injury doubt counts in the claim's favour. (The claim's own
+    # doubt isn't repeated here; it already gets its "!" warning.)
+    doubt = round(claim["breakdown"]["avail"] - drop["breakdown"]["avail"], 1)
+    if doubt > 0:
+        status = "is out" if drop["chance"] == 0 else f"is {drop['chance']}% to play"
+        diffs.append((doubt, f"{drop['name']} {status}"))
+
+    positives = sorted((d for d in diffs if d[0] > 0), reverse=True)
+    reasons = [d for d in positives if d[0] >= MIN_REASON][:MAX_REASONS] or positives[:1]
+    worst = min(diffs[:len(REASON_LABELS)])
+    return {
+        "reasons": [{"text": text, "points": pts} for pts, text in reasons],
+        "against": ({"text": f"{drop['name']} has {worst[1]}", "points": worst[0]}
+                    if worst[0] <= -MIN_REASON else None),
+    }
+
+
 def waiver_targets(players, me):
     """
     Suggested drop/claim swaps for one manager, best gain first.
@@ -237,7 +284,8 @@ def waiver_targets(players, me):
                            and p["chance"] == 100 and p["id"] not in claimed)
             backup = fit[0]["id"] if fit else None
         targets.append({"drop": s["drop"]["id"], "claim": claim["id"],
-                        "gain": s["gain"], "backup": backup})
+                        "gain": s["gain"], "backup": backup,
+                        "why": swap_reasons(s["drop"], claim)})
     return targets
 
 
@@ -443,6 +491,7 @@ def load_league(league_id):
             "chance": round(availability(el) * 100),
             "news": el.get("news") or "",
             "fixtures": fixtures.get(el["team"], []),
+            "breakdown": s["breakdown"],
         })
 
     managers = [{

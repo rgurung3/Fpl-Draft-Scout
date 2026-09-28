@@ -76,6 +76,10 @@
   .swap .claim .score { color: var(--pitch); }
   .swap .arrow { color: var(--muted); font-size: 1.3rem; }
   .gain { font-family: var(--display); font-weight: 700; font-size: 1.3rem; color: var(--amber); white-space: nowrap; }
+  .swap .why { grid-column: 1 / -1; font-size: .9rem; color: var(--muted); }
+  .swap .why strong { color: var(--ink); }
+  .swap .why b { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .swap .why .up { color: var(--pitch); } .swap .why .down { color: var(--rival); }
   .empty { background: var(--pitch-soft); padding: 14px 16px; border-radius: 4px; }
   .swap .risk { grid-column: 1 / -1; display: flex; gap: 10px; align-items: flex-start;
     background: var(--amber-soft); border-radius: 4px; padding: 8px 10px; font-size: .9rem; }
@@ -204,7 +208,7 @@
 
     <section>
       <h2>Waiver targets</h2>
-      <p class="sub">Free agents who rate higher than your weakest player in the same position. Players with a small injury doubt (75% chance of playing) are included, with a backup in case they're ruled out.</p>
+      <p class="sub">Free agents who rate higher than your weakest player in the same position, with the main reasons in rating points. Players with a small injury doubt (75% chance of playing) are included, with a backup in case they're ruled out.</p>
       <div class="swaps" id="swaps"></div>
     </section>
 
@@ -359,6 +363,17 @@ function riskNote(s) {
     <div><strong>${esc(why)}.</strong> ${plan}</div></div>`;
 }
 
+// one line under a swap: the biggest reasons the claim rates higher, and the one thing
+// the dropped player still does better (worked out by swap_reasons in app.py)
+function whyNote(s) {
+  if (!s.why) return "";
+  const pts = v => `${v > 0 ? "+" : "−"}${Math.abs(v).toFixed(0)}`;
+  const reasons = s.why.reasons.map(r => `${esc(r.text)} <b class="up">${pts(r.points)}</b>`).join(", ");
+  const against = s.why.against
+    ? ` But ${esc(s.why.against.text)} <b class="down">${pts(s.why.against.points)}</b>.` : "";
+  return `<div class="why"><strong>Why:</strong> ${reasons}.${against}</div>`;
+}
+
 function renderSwaps() {
   if (!DATA.managers.some(m => m.entry_id === state.me)) {
     $("swaps").innerHTML = `<div class="empty">Team ${esc(state.me)} isn't listed in this league, so there's nothing to compare. Check the team ID and try again.</div>`;
@@ -379,6 +394,7 @@ function renderSwaps() {
       <div class="side claim"><span class="score">${claim.score.toFixed(0)}</span>
         <div class="who"><div class="verb">Claim</div><div class="pname">${esc(claim.name)} <span class="pos">${claim.pos}, ${esc(claim.team)}</span></div>${fixStrip(claim)}</div></div>
       <span class="gain">+${s.gain.toFixed(0)}</span>
+      ${whyNote(s)}
       ${riskNote(s)}
     </div>`;
   }).join("")

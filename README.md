@@ -3,7 +3,7 @@
 A small helper app for FPL Draft leagues. Enter your team ID and it finds your
 league, rates every player, and shows you:
 
-- **Waiver targets**: free agents who rate higher than your weakest player in the same position. Players with a 75% chance of playing are included, with a warning and a fully fit backup
+- **Waiver targets**: free agents who rate higher than your weakest player in the same position, each with a one-line reason (for example "easier fixtures +14, better form +12. But Porro has more attacking threat −6"). Players with a 75% chance of playing are included, with a warning and a fully fit backup
 - **Trade analyzer**: pick players from your squad and another manager's, and see how the trade changes both teams' best eleven, and whether it's a fair offer they might accept
 - **Free agents**: a sortable, filterable table of everyone unowned in your league, with upcoming fixtures
 - **League squads**: how every manager's best legal eleven (one keeper, 3-5 DEF, 2-5 MID, 1-3 FWD) stacks up, with your squad highlighted
@@ -108,6 +108,11 @@ players with at least 180 minutes and capped there, so one standout week
 doesn't skew everyone else's rating. Weights differ by position (fixtures matter more for
 keepers and defenders, xGI matters more for forwards). The total is then
 scaled down if the player is flagged as doubtful or injured.
+
+Because a rating is the sum of those pieces, the gain in a waiver swap splits
+into piece-by-piece differences. The "Why" line under each swap names the
+biggest ones in rating points, plus the biggest thing the player you'd drop
+still does better.
 
 You can tweak the weights in `WEIGHTS`, the fixture window in `LOOKAHEAD`,
 the scale in `SCALE_PERCENTILE` and `MIN_MINUTES`, and the trade verdict
