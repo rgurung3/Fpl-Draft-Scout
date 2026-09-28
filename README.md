@@ -4,6 +4,7 @@ A small helper app for FPL Draft leagues. Enter your team ID and it finds your
 league, rates every player, and shows you:
 
 - **Waiver targets**: free agents who rate higher than your weakest player in the same position. Players with a 75% chance of playing are included, with a warning and a fully fit backup
+- **Trade analyzer**: pick players from your squad and another manager's, and see how the trade changes both teams' best eleven, and whether it's a fair offer they might accept
 - **Free agents**: a sortable, filterable table of everyone unowned in your league, with upcoming fixtures
 - **League squads**: how every manager's best legal eleven (one keeper, 3-5 DEF, 2-5 MID, 1-3 FWD) stacks up, with your squad highlighted
 
@@ -71,6 +72,33 @@ Notes:
 - On the free plan the app sleeps after 15 minutes without visitors. The first
   visit after that takes about a minute while it wakes up.
 
+## How the trade analyzer works
+
+Pick a manager, tick the players you'd give and the players you'd get, and
+press **Analyze trade**. Both sides need the same positions (one DEF for one
+DEF, say), because every Draft squad keeps 2 GKP, 5 DEF, 5 MID and 3 FWD.
+You can also open any team in League squads and press **Build a trade with
+this team**.
+
+The analyzer works out both teams' best legal eleven before and after the
+trade and compares their strength (the same number League squads shows). It
+also shows where the change comes from: how many rating points each position
+gains or loses in the best eleven. For example, giving a midfielder and a
+forward for a better forward and a weaker midfielder might show `MID −25` and
+`FWD +25`. If the weaker midfielder doesn't make your eleven, one of your own
+players takes his place, and the breakdown and formation show that too.
+
+Then it gives one of four verdicts:
+
+- **Good for you and fair**: your team gets stronger and theirs doesn't lose much. Worth offering.
+- **Good for you, but they lose out**: expect a no unless they badly need what you're offering.
+- **Barely changes your team**: probably not worth the hassle.
+- **Makes your team weaker.**
+
+Bench players don't count toward strength, so swapping bench players shows as
+"barely changes". Ratings look at recent form and the next few fixtures, so an
+injured star rates low even if he's back soon. Use the verdict as a guide.
+
 ## How the rating works
 
 Each player gets a 0-100 rating from recent form, points per game, attacking
@@ -82,7 +110,8 @@ keepers and defenders, xGI matters more for forwards). The total is then
 scaled down if the player is flagged as doubtful or injured.
 
 You can tweak the weights in `WEIGHTS`, the fixture window in `LOOKAHEAD`,
-and the scale in `SCALE_PERCENTILE` and `MIN_MINUTES` at the top of `app.py`.
+the scale in `SCALE_PERCENTILE` and `MIN_MINUTES`, and the trade verdict
+thresholds in `TRADE_MIN_GAIN` and `FAIR_MARGIN`, all at the top of `app.py`.
 
 ## Notes
 

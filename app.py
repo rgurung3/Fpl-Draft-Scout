@@ -4,6 +4,7 @@ Draft Scout - a helper app for FPL Draft leagues.
 Run:  python app.py   then open http://127.0.0.1:5000
 """
 import time
+from collections import Counter
 
 import requests
 from flask import Flask, jsonify, request, send_from_directory
@@ -240,6 +241,119 @@ def waiver_targets(players, me):
     return targets
 
 
+# ---------------------------------------------------------------- trades
+
+TRADE_MIN_GAIN = 0.5  # my best-eleven strength must rise this much for a trade to count as better
+FAIR_MARGIN = 0.5     # a trade is fair if their best-eleven strength drops by no more than this
+
+TRADE_MESSAGES = {
+    "good_and_fair": "Good for you and fair: worth offering.",
+    "good_but_unfair": ("Good for you, but their team gets weaker. Expect a no unless "
+                        "they badly need what you're offering."),
+    "no_change": "Barely changes your team. Probably not worth the hassle.",
+    "worse": "Makes your team weaker.",
+}
+
+
+class TradeError(Exception):
+    """A trade the Draft site wouldn't allow, with a message saying why."""
+
+    status = 400
+
+    def __init__(self, message):
+        super().__init__(message)
+        self.message = message
+
+
+def id_list(text):
+    """Turn '12,34' from a link into [12, 34]. Anything that isn't a number is a TradeError."""
+    parts = [s.strip() for s in (text or "").split(",") if s.strip()]
+    if not all(s.isdigit() for s in parts):
+        raise TradeError("Player IDs must be numbers, for example give=12,34.")
+    return [int(s) for s in parts]
+
+
+def describe_positions(count):
+    """Counter({'MID': 2, 'DEF': 1}) -> '1 DEF, 2 MID' (in squad order)."""
+    return ", ".join(f"{count[pos]} {pos}" for pos in FORMATION if count[pos])
+
+
+def xi_by_position(players, entry_id):
+    """Total rating of each position in a manager's best eleven, e.g. {"GKP": 60, "DEF": 210, ...}."""
+    xi = best_eleven([p for p in players if p["owner"] == entry_id])
+    return {pos: sum(p["score"] for p in xi if p["pos"] == pos) for pos in FORMATION}
+
+
+def trade_side(before, after, entry_id):
+    """
+    How one manager's best eleven changes: strength, formation, who moves in or
+    out, and by_position: how many rating points each position gains or loses
+    in the best eleven (e.g. MID -25, FWD +25), so you can see where the change
+    comes from.
+    """
+    old, new = squad_strength(before, entry_id), squad_strength(after, entry_id)
+    old_pos, new_pos = xi_by_position(before, entry_id), xi_by_position(after, entry_id)
+    return {
+        "before": old["strength"],
+        "after": new["strength"],
+        "change": round(new["strength"] - old["strength"], 1),
+        "formation_before": old["formation"],
+        "formation_after": new["formation"],
+        "joins_xi": [pid for pid in new["best_xi"] if pid not in old["best_xi"]],
+        "leaves_xi": [pid for pid in old["best_xi"] if pid not in new["best_xi"]],
+        "by_position": {pos: round(new_pos[pos] - old_pos[pos], 1) for pos in FORMATION},
+    }
+
+
+def evaluate_trade(players, me, them, give, get):
+    """
+    What a trade does to both teams: I give manager `them` the players in
+    `give` (player IDs) and get the players in `get` back.
+
+    First it checks the Draft rules: every player in give is mine, every player
+    in get is theirs, and both sides have the same positions (squads always stay
+    2 GKP, 5 DEF, 5 MID, 3 FWD). Then it swaps the owners on a copy of the
+    players and compares each manager's best eleven before and after.
+    """
+    give, get = list(dict.fromkeys(give)), list(dict.fromkeys(get))  # drop repeats
+    if me == them:
+        raise TradeError("Pick another manager to trade with.")
+    if not give or not get:
+        raise TradeError("Pick at least one player on each side of the trade.")
+
+    by_id = {p["id"]: p for p in players}
+    for ids, owner, whose in ((give, me, "your"), (get, them, "their")):
+        for pid in ids:
+            p = by_id.get(pid)
+            if p is None or p["owner"] != owner:
+                name = (p or {}).get("name") or f"Player {pid}"
+                raise TradeError(f"{name} isn't in {whose} squad. Reload the page and try again.")
+
+    give_pos = Counter(by_id[pid]["pos"] for pid in give)
+    get_pos = Counter(by_id[pid]["pos"] for pid in get)
+    if give_pos != get_pos:
+        raise TradeError("Both sides need the same positions, because every Draft squad keeps "
+                         "2 GKP, 5 DEF, 5 MID and 3 FWD. You'd give "
+                         f"{describe_positions(give_pos)} but get {describe_positions(get_pos)}.")
+
+    # the "after" picture: a copy of the players with the traded ones' owners swapped.
+    # The original list is never changed.
+    new_owner = {pid: them for pid in give} | {pid: me for pid in get}
+    after = [{**p, "owner": new_owner[p["id"]]} if p["id"] in new_owner else p for p in players]
+
+    mine, theirs = trade_side(players, after, me), trade_side(players, after, them)
+    if mine["change"] <= -TRADE_MIN_GAIN:
+        verdict = "worse"
+    elif mine["change"] < TRADE_MIN_GAIN:
+        verdict = "no_change"
+    elif theirs["change"] >= -FAIR_MARGIN:
+        verdict = "good_and_fair"
+    else:
+        verdict = "good_but_unfair"
+    return {"give": give, "get": get, "verdict": verdict, "message": TRADE_MESSAGES[verdict],
+            "me": mine, "them": theirs}
+
+
 # ---------------------------------------------------------------- talking to FPL
 
 LEAGUE_NOT_FOUND = "No Draft league found with that ID. Check the number in your league's URL."
@@ -249,7 +363,7 @@ NO_LEAGUE_YET = "That team isn't in a Draft league yet. Join or create a league 
 
 
 class FplError(Exception):
-    """A problem talking to the FPL servers, with a message a person can act on."""
+    """A problem getting data from the FPL servers, with a message a person can act on."""
 
     def __init__(self, message, status=502):
         super().__init__(message)
@@ -350,6 +464,19 @@ def load_league(league_id):
     }
 
 
+def league_for_team(entry_id, wanted=None):
+    """
+    Find the league a team plays in and load it. If the team is in more than one
+    league, `wanted` picks one (it's ignored unless it's one of the team's leagues).
+    Returns (the league data, the team's league IDs).
+    """
+    entry = fetch(f"{DRAFT}/entry/{entry_id}/public", TEAM_NOT_FOUND).get("entry") or {}
+    leagues = entry.get("league_set") or []
+    if not leagues:
+        raise FplError(NO_LEAGUE_YET, 400)
+    return load_league(wanted if wanted in leagues else leagues[0]), leagues
+
+
 # ---------------------------------------------------------------- routes
 
 @app.route("/")
@@ -372,12 +499,7 @@ def team(entry_id):
     marked as "me". If the team is in more than one league, ?league=<id> picks one.
     """
     try:
-        entry = fetch(f"{DRAFT}/entry/{entry_id}/public", TEAM_NOT_FOUND).get("entry") or {}
-        leagues = entry.get("league_set") or []
-        if not leagues:
-            return jsonify({"error": NO_LEAGUE_YET}), 400
-        wanted = request.args.get("league", type=int)
-        data = load_league(wanted if wanted in leagues else leagues[0])
+        data, leagues = league_for_team(entry_id, request.args.get("league", type=int))
     except FplError as e:
         return jsonify({"error": e.message}), e.status
 
@@ -385,6 +507,25 @@ def team(entry_id):
     data["my_leagues"] = leagues
     data["waiver_targets"] = waiver_targets(data["players"], entry_id)
     return jsonify(data)
+
+
+@app.route("/api/team/<int:entry_id>/trade")
+def trade(entry_id):
+    """
+    Analyze a trade, e.g. /api/team/276914/trade?with=12345&give=301,302&get=415,420
+    (with = the other manager's team ID, give/get = player IDs). ?league= works as above.
+    """
+    try:
+        them = request.args.get("with", type=int)
+        give, get = id_list(request.args.get("give")), id_list(request.args.get("get"))
+        if them is None:
+            raise TradeError("Pick a manager to trade with.")
+        data, _leagues = league_for_team(entry_id, request.args.get("league", type=int))
+        if them != entry_id and them not in {m["entry_id"] for m in data["managers"]}:
+            raise TradeError("That manager isn't in your league.")
+        return jsonify(evaluate_trade(data["players"], entry_id, them, give, get))
+    except (FplError, TradeError) as e:
+        return jsonify({"error": e.message}), e.status
 
 
 if __name__ == "__main__":

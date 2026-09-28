@@ -11,11 +11,13 @@
 - League squads now use a legal best eleven (1 keeper, 3-5 DEF, 2-5 MID, 1-3 FWD) and show the formation and bench
 - On GitHub: https://github.com/rgurung3/Fpl-Draft-Scout
 - Deployed to Render (free plan): https://fpl-draft-scout.onrender.com. It redeploys automatically on every push to main. The Draft site accepts requests from Render (checked /api/team/276914 after deploying)
-- Tests (pytest, 43 passing) and CI (GitHub Actions); ruff clean
+- Trade analyzer built: pick my players and another manager's, see both teams' best eleven and strength before/after, a per-position breakdown (rating points each position gains or loses in the best eleven), and a verdict (good and fair / good but unfair / barely changes / worse). Shortcut from League squads
+- ruff pinned to 0.16.9 in requirements-dev.txt
+- Tests (pytest, 64 passing) and CI (GitHub Actions); ruff clean
 
 ## How it works
 - app.py fetches data from the FPL Draft site (team → league lookup, league details, who owns whom) and the classic FPL site (fixtures + difficulty), then rates every player 0–100.
-- Two API routes: /api/team/<team id> (what the browser uses) and /api/league/<league id> (used by check_league.py and tests). Both build the page data with load_league().
+- Three API routes: /api/team/<team id> (what the browser uses), /api/team/<team id>/trade (the trade analyzer) and /api/league/<league id> (used by check_league.py and tests). They all build the page data with load_league(); the two team routes find the league with league_for_team().
 - All requests to the Draft site go through fetch(), which turns failures into an FplError with a friendly message. The routes just catch FplError.
 - app.py also works out the waiver suggestions (waiver_targets) and each squad's best eleven and strength (best_eleven, squad_strength), so that logic is covered by tests.
 - static/index.html is the page you see in the browser. It reads ?team= from the address, loads that team, and puts the personal link back in the address bar. It draws what the server worked out.
@@ -37,6 +39,14 @@
 - Top 5 pairs by gain are shown (MAX_TARGETS).
 - League squads = average rating of each team's best legal eleven: take the minimum at each position (1 GKP, 3 DEF, 2 MID, 1 FWD), then fill the last 4 places with the best players left without breaking a maximum (1 GKP, 5 DEF, 5 MID, 3 FWD). My squad is opened and highlighted, with formation and bench.
 
+## How the trade analyzer works
+- evaluate_trade(players, me, them, give, get) in app.py. Route: /api/team/<me>/trade?with=<them>&give=12,34&get=56&league=<id>.
+- Checks first (TradeError, shown as a 400 with a friendly message): not trading with myself, at least one player each side, give are all mine, get are all theirs, same positions on both sides. Repeated IDs are dropped.
+- Then it copies the player list with the traded owners swapped (the real list is never changed) and runs squad_strength for both managers before and after.
+- Each side reports strength before/after/change, formation before/after, who joins or leaves the best eleven, and by_position: the change in total rating of each position in the best eleven (xi_by_position). Totals, not averages, so "MID -25, FWD +25" reads as one swap cancelling the other. A formation shift shows up here too (e.g. DEF +50 when a defender takes a midfield spot).
+- Verdict: my change <= -TRADE_MIN_GAIN (0.5) = worse; under +0.5 = no change; otherwise good_and_fair if their change >= -FAIR_MARGIN (0.5), else good_but_unfair. 0.5 strength is roughly one starter improving by 5-6 rating points.
+- The page ticks players, sends the IDs, and draws the verdict and both panels. It sends ?league= so the server uses the same league as the page.
+
 ## Decisions
 - Flask backend, because the Draft site blocks requests made directly from a browser page.
 - Weights differ by position and live in WEIGHTS in app.py; the fixture window is LOOKAHEAD.
@@ -48,15 +58,19 @@
 - Only catch specific exceptions (not except Exception); newer ruff versions flag the blind catch and would fail CI.
 - On Render the app runs under gunicorn, not `python app.py`, so Flask's debug mode is never on in public. One worker (so there's one shared 10-minute cache and it fits the free plan's memory) with 4 threads (so a few people can load at once). Timeout 60s because a league load makes several FPL requests.
 - Python 3.12 everywhere: CI uses it and .python-version tells Render to use it. The file name must start with a dot; downloading it can strip the dot, and Render then silently falls back to its default (3.14).
+- Trades are judged on best-eleven strength (same as League squads), so bench players only matter if they'd start. Simple, and it matches how the league table is won.
+- Trades must swap the same positions on both sides, because Draft squads always stay 2 GKP, 5 DEF, 5 MID, 3 FWD. Confirmed on the Draft site (it doesn't allow a MID for a DEF). Uneven-looking deals still work as long as positions match, e.g. MID + FWD for FWD + MID, where the weaker player is a filler.
 - requirements.txt = what the app needs to run (what Render installs). requirements-dev.txt = that plus pytest and ruff (for my computer and CI).
 
 ## Roadmap
 1. Test with real league (done)
 2. Deploy to Render (done)
 3. Personal view: enter team ID → auto-find league, bookmarkable link (done)
-4. Trade analyzer
+4. Trade analyzer (done)
 5. AI "why this pick?" explanations
 6. Accounts/login (needed for watchlists + limiting AI usage)
+
+Idea for later: trade finder. "I want Joao Pedro and I'll give Fernandes": suggest which of their players makes the best filler, so the positions match, it helps me, and it still looks fair to them.
 
 ## Known issues / ideas
 - The FPL Draft data feed isn't officially documented and could change.
@@ -66,5 +80,9 @@
 - Ratings are higher overall than before the percentile change, so MIN_GAIN = 3 may need tuning after watching real suggestions for a week or two.
 - The backup for a doubtful claim is taken from the wire, so someone else may claim it first. Could also suggest a bench player as the fallback.
 - Doubtful players below 75% (50%, 25%) are never suggested, even if they'd still rate higher.
+- Trade analyzer ignores depth: bench players don't count, so injury cover has no value.
+- Trade verdicts use short-term ratings (form, next 3 GWs), but a trade lasts all season. An injured star rates near 0 now even if he's back in two weeks. A longer fixture window just for trades could help.
+- TRADE_MIN_GAIN and FAIR_MARGIN (both 0.5) are first guesses; tune after trying real trades.
+- "Fair" only looks at their best eleven. Real managers also judge on names and total points (shown in the lists), so a fair verdict isn't a guaranteed yes.
 - The league dropdown for multi-league teams shows "League <id>" for leagues that aren't loaded (names would cost an extra request each).
 

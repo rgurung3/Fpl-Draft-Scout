@@ -435,3 +435,158 @@ def test_checker_flags_my_team_missing_from_the_league(fake_api):
     data["me"] = 777
     problems = [msg for ok, msg in check_league.check(data) if not ok]
     assert any("777" in msg for msg in problems)
+
+
+# ---------------------------------------------------------------- trade analyzer
+
+def trade_league():
+    """
+    Two full squads: mine (manager 100, players 1-15) and theirs (manager 200,
+    players 101-115). Same shape as full_squad: 1-2 GKP, 3-7 DEF, 8-12 MID, 13-15 FWD.
+    Everyone rates 50 until a test changes it.
+    """
+    return full_squad(100) + [dict(p, id=p["id"] + 100) for p in full_squad(200)]
+
+
+def with_scores(players, changes):
+    """Give some players a different rating, e.g. {8: 30, 108: 80}."""
+    for p in players:
+        p["score"] = changes.get(p["id"], p["score"])
+    return players
+
+
+def test_trade_good_for_both_sides_is_good_and_fair():
+    # I have two great keepers but only one can play; they have two poor keepers.
+    # I give my spare keeper and a midfielder for their keeper and their best midfielder.
+    players = with_scores(trade_league(), {1: 80, 2: 80, 101: 30, 102: 30, 108: 80})
+    result = app.evaluate_trade(players, 100, 200, give=[2, 9], get=[102, 108])
+    assert result["me"]["change"] > 0
+    assert result["them"]["change"] > 0          # my spare keeper walks into their eleven
+    assert result["verdict"] == "good_and_fair"
+    assert result["me"]["joins_xi"] == [108]
+    assert result["me"]["leaves_xi"] == [9]
+
+
+def test_trade_that_guts_their_team_is_flagged():
+    players = with_scores(trade_league(), {8: 30, 108: 80})   # my bench MID for their star
+    result = app.evaluate_trade(players, 100, 200, give=[8], get=[108])
+    assert result["me"]["change"] >= app.TRADE_MIN_GAIN
+    assert result["them"]["change"] < -app.FAIR_MARGIN
+    assert result["verdict"] == "good_but_unfair"
+
+
+def test_giving_away_my_star_makes_me_weaker():
+    players = with_scores(trade_league(), {8: 80, 108: 30})
+    result = app.evaluate_trade(players, 100, 200, give=[8], get=[108])
+    assert result["verdict"] == "worse"
+
+
+def test_bench_swap_barely_changes_either_team():
+    # both second-choice keepers sit on the bench before and after
+    players = with_scores(trade_league(), {1: 70, 2: 40, 101: 70, 102: 45})
+    result = app.evaluate_trade(players, 100, 200, give=[2], get=[102])
+    assert result["me"]["change"] == 0
+    assert result["them"]["change"] == 0
+    assert result["me"]["joins_xi"] == [] and result["me"]["leaves_xi"] == []
+    assert result["verdict"] == "no_change"
+
+
+def test_trade_reports_a_formation_change():
+    changes = {pid: 70 for pid in range(8, 13)}            # my five midfielders are strong...
+    changes.update({13: 40, 14: 40, 15: 40, 108: 30})       # ...my forwards are weak
+    players = with_scores(trade_league(), changes)
+    result = app.evaluate_trade(players, 100, 200, give=[12], get=[108])
+    assert result["me"]["formation_before"] == "4-5-1"
+    assert result["me"]["formation_after"] == "5-4-1"      # a defender takes the MID spot
+
+
+def test_trade_shows_where_the_change_comes_from():
+    # Fernandes (MID 80) and Delap (FWD 60) for Joao Pedro (FWD 85) and Anderson (MID 55):
+    # midfield loses 25 points, attack gains 25, so overall it barely changes
+    players = with_scores(trade_league(), {8: 80, 13: 60, 113: 85, 108: 55})
+    result = app.evaluate_trade(players, 100, 200, give=[8, 13], get=[113, 108])
+    assert result["me"]["by_position"] == {"GKP": 0, "DEF": 0, "MID": -25, "FWD": 25}
+    assert result["me"]["change"] == 0
+    assert result["verdict"] == "no_change"
+
+
+def test_filler_who_does_not_start_shows_up_in_the_breakdown():
+    # my other midfielders (65) are better than the filler (40), so he sits on the
+    # bench and a defender takes the fifth midfield spot: 4-5-1 becomes 5-4-1
+    changes = {8: 80, 13: 60, 113: 85, 108: 40}
+    changes.update({pid: 65 for pid in range(9, 13)})
+    players = with_scores(trade_league(), changes)
+    result = app.evaluate_trade(players, 100, 200, give=[8, 13], get=[113, 108])
+    assert 108 not in result["me"]["joins_xi"]
+    assert result["me"]["formation_before"] == "4-5-1"
+    assert result["me"]["formation_after"] == "5-4-1"
+    assert result["me"]["by_position"] == {"GKP": 0, "DEF": 50, "MID": -80, "FWD": 25}
+
+
+def test_trade_does_not_change_the_real_owners():
+    players = trade_league()
+    app.evaluate_trade(players, 100, 200, give=[8], get=[108])
+    owners = {p["id"]: p["owner"] for p in players}
+    assert owners[8] == 100 and owners[108] == 200
+
+
+@pytest.mark.parametrize("them,give,get,text", [
+    (100, [8], [9], "another manager"),
+    (200, [], [108], "at least one player on each side"),
+    (200, [101], [108], "isn't in your squad"),
+    (200, [8], [9], "isn't in their squad"),
+    (200, [8], [999], "isn't in their squad"),
+    (200, [3], [108], "same positions"),
+    (200, [8, 8], [108, 109], "same positions"),   # a repeated ID doesn't count twice
+])
+def test_trade_rules(them, give, get, text):
+    with pytest.raises(app.TradeError, match=text):
+        app.evaluate_trade(trade_league(), 100, them, give, get)
+
+
+def test_position_mismatch_message_says_what_is_wrong():
+    with pytest.raises(app.TradeError, match="You'd give 1 DEF but get 1 MID"):
+        app.evaluate_trade(trade_league(), 100, 200, give=[3], get=[108])
+
+
+@pytest.fixture
+def two_managers(fake_api, monkeypatch):
+    """The fake league plus a second manager (200) who owns players 2 (MID) and 3 (FWD)."""
+    fake = app.get_json
+
+    def with_rival(url):
+        data = fake(url)
+        if url.endswith("/details"):
+            rival = {"entry_id": 200, "entry_name": "Rival FC",
+                     "player_first_name": "Alex", "player_last_name": "Kim"}
+            return {**data, "league_entries": data["league_entries"] + [rival]}
+        if url.endswith("/element-status"):
+            return {"element_status": [{"element": 1, "owner": 100},
+                                       {"element": 2, "owner": 200},
+                                       {"element": 3, "owner": 200}]}
+        return data
+
+    monkeypatch.setattr(app, "get_json", with_rival)
+
+
+def test_trade_endpoint_analyzes_a_trade(two_managers):
+    res = app.app.test_client().get("/api/team/100/trade?with=200&give=1&get=2&league=123")
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["verdict"] == "worse"              # player 2 has much worse form than player 1
+    assert data["me"]["joins_xi"] == [2]
+    assert data["me"]["leaves_xi"] == [1]
+    assert data["message"] == app.TRADE_MESSAGES["worse"]
+    assert set(data["me"]["by_position"]) == {"GKP", "DEF", "MID", "FWD"}
+
+
+@pytest.mark.parametrize("query,text", [
+    ("give=1&get=2", "Pick a manager to trade with"),
+    ("with=999&give=1&get=2", "isn't in your league"),
+    ("with=200&give=1&get=3", "same positions"),
+    ("with=200&give=abc&get=2", "must be numbers"),
+])
+def test_trade_endpoint_explains_bad_trades(two_managers, query, text):
+    res = app.app.test_client().get(f"/api/team/100/trade?{query}")
+    assert res.status_code == 400
+    assert text in res.get_json()["error"]
