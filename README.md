@@ -153,7 +153,7 @@ way as Next 5, with these differences:
   (tackles, blocks, interceptions per 90) for defenders and midfielders, and
   creativity per 90 for defenders, so attacking full backs get credit.
 - Recent form counts half as much (0.15 instead of 0.30), so fixtures and the underlying stats count for more.
-- A player who is out but has a return date only loses the gameweeks of the window he'd miss, instead of rating 0 for all of it.
+- A player who is out but has a return date only loses the gameweeks of the window he'd miss, instead of rating 0 for all of it (this applies to Next 5 as well, so a one-match ban doesn't rate 0 over five gameweeks).
 
 Your choice goes into your link (`&view=season`), so a bookmark remembers it.
 

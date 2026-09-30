@@ -18,7 +18,9 @@
 - League race built: chart of each manager's league points climbing from 0 (you in amber with a dot per week, hover a line for who it is) and a weekly points grid shaded vs the league average with W/D/L. Head-to-head leagues only. Not yet checked against the real league
 - /health route added for an uptime monitor to keep the free Render plan awake
 - Free agents table shows the top 15 with a "Show more" button (up to 60); search and position filters look through everyone
-- Tests (pytest, 118 passing) and CI (GitHub Actions); ruff clean
+- Waiver swaps show a "Fitness:" line above the "Why:" line when the dropped player is injured, suspended or doubtful (swap_reasons returns it as "availability", separate from the performance reasons)
+- Return dates now work on real data: the feed's news_return is empty, so return_date() reads "Expected back 10 Oct" / "Suspended until 17 Oct" from the news text (year = next such date after news_added). Both views use them, so a one-match ban no longer rates 0 over five gameweeks
+- Tests (pytest, 127 passing) and CI (GitHub Actions); ruff clean
 
 ## How it works
 - app.py fetches data from the FPL Draft site (team → league lookup, league details, who owns whom) and the classic FPL site (fixtures + difficulty), then rates every player 0–100.
@@ -121,7 +123,7 @@ Idea for later: trade finder. "I want Joao Pedro and I'll give Fernandes": sugge
 - Trade verdicts use short-term ratings (form, next 3 GWs), but a trade lasts all season. An injured star rates near 0 now even if he's back in two weeks. A longer fixture window just for trades could help.
 - TRADE_MIN_GAIN and FAIR_MARGIN (both 0.5) are first guesses; tune after trying real trades.
 - "Fair" only looks at their best eleven. Real managers also judge on names and total points (shown in the lists), so a fair verdict isn't a guaranteed yes.
-- Season view: the return-date logic is built but not checked against real data. No player had a news_return value when it was built (the field was empty for everyone), so the date format is assumed to be ISO like the deadlines. A return date that has already passed while the player is still flagged injured would count him as fully available. Check once a real injury with a return date shows up.
+- Return dates: only "Expected back <date>" and "Suspended until <date>" are read. "Unknown return date" (about half of injuries) still rates 0. A return date that has already passed while the player is still flagged injured counts him as fully available, and the "Expected back" date is the club's guess.
 - Season view: minutes share still counts games missed through injury, so a player coming back from a knock rates lower for a while (Porro: 198 of 450 minutes).
 - Season view: with only ~5 gameweeks played, per-90 stats are noisy. Last season's data would help but needs one request per player.
 - League race: lines are plain league points now, so tied managers overlap (a small vertical nudge by table position keeps them visible); the gap to the leader is in the caption and your end label.
