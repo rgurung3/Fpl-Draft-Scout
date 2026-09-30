@@ -442,7 +442,10 @@ function whyNote(s) {
     ? `<div class="why avail"><strong>Fitness:</strong> ${esc(s.why.availability.text)} <b class="up">${pts(s.why.availability.points)}</b></div>` : "";
   const why = reasons ? `<div class="why"><strong>Why:</strong> ${reasons}. ${against}</div>`
     : against ? `<div class="why">${against}</div>` : "";
-  return fit + why;
+  // players on few minutes: their numbers could change quickly (either side of the swap)
+  const few = (s.small_sample || []).map(p => `${esc(p.name)} has only ${p.minutes} minutes (${p.starts} ${p.starts === 1 ? "start" : "starts"})`);
+  const small = few.length ? `<div class="why small"><strong>Small sample:</strong> ${few.join(", ")}. Their numbers could change quickly.</div>` : "";
+  return fit + why + small;
 }
 
 function renderSwaps() {

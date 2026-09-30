@@ -323,6 +323,7 @@ MIN_CHANCE_FOR_WAIVERS = 75  # suggest doubtful players only if at least this li
 MIN_GAIN = 3                 # a swap has to be worth at least this many rating points
 PAIRS_PER_POSITION = 2
 MAX_TARGETS = 5
+SMALL_SAMPLE_MINUTES = 300   # a player with fewer minutes than this gets a "too early to trust" note
 
 
 def by_score(players):
@@ -403,6 +404,12 @@ def swap_reasons(drop, claim):
     }
 
 
+def small_samples(players):
+    """The players here with under SMALL_SAMPLE_MINUTES played: their numbers could still change fast."""
+    return [{"id": p["id"], "name": p["name"], "minutes": p["minutes"], "starts": p.get("starts", 0)}
+            for p in players if p.get("minutes", SMALL_SAMPLE_MINUTES) < SMALL_SAMPLE_MINUTES]
+
+
 def waiver_targets(players, me):
     """
     Suggested drop/claim swaps for one manager, best gain first.
@@ -437,7 +444,8 @@ def waiver_targets(players, me):
             backup = fit[0]["id"] if fit else None
         targets.append({"drop": s["drop"]["id"], "claim": claim["id"],
                         "gain": s["gain"], "backup": backup,
-                        "why": swap_reasons(s["drop"], claim)})
+                        "why": swap_reasons(s["drop"], claim),
+                        "small_sample": small_samples([s["drop"], claim])})
     return targets
 
 
@@ -724,6 +732,8 @@ def load_league(league_id, view="week"):
             "total": int(num(el.get("total_points"))),
             "xgi90": s["xgi90"],
             "mins_share": s["mins_share"],
+            "minutes": int(num(el.get("minutes"))),
+            "starts": int(num(el.get("starts"))),
             "status": el.get("status", "a"),
             "chance": round(availability(el) * 100),  # the real chance for next week, in both views
             "news": el.get("news") or "",

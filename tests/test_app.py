@@ -775,6 +775,25 @@ def test_no_availability_line_when_the_drop_is_fit():
     assert app.swap_reasons(drop, claim)["availability"] is None
 
 
+def test_small_samples_name_players_on_few_minutes():
+    new = {**rated(1, "MID", 30), "minutes": 168, "starts": 2}
+    regular = {**rated(2, "MID", 60), "minutes": 500, "starts": 5}
+    assert app.small_samples([new, regular]) == [{"id": 1, "name": "P1", "minutes": 168, "starts": 2}]
+    assert app.small_samples([rated(3, "MID", 50)]) == []      # no minutes known: nothing to say
+
+
+def test_waiver_targets_flag_small_samples():
+    drop = {**rated(1, "DEF", 40, owner=100, breakdown=piece(form=40)), "minutes": 168, "starts": 2}
+    claim = {**rated(2, "DEF", 60, breakdown=piece(form=60)), "minutes": 236, "starts": 2}
+    target = app.waiver_targets([drop, claim], me=100)[0]
+    assert [p["id"] for p in target["small_sample"]] == [1, 2]
+
+
+def test_players_carry_minutes_and_starts(fake_api):
+    players = app.app.test_client().get("/api/team/100").get_json()["players"]
+    assert all("minutes" in p and "starts" in p for p in players)
+
+
 def test_waiver_targets_come_with_reasons():
     players = [rated(1, "DEF", 40, owner=100, breakdown=piece(form=20, fix=20)),
                rated(2, "DEF", 60, breakdown=piece(form=20, fix=40))]
