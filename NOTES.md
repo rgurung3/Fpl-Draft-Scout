@@ -13,11 +13,12 @@
 - Deployed to Render (free plan): https://fpl-draft-scout.onrender.com. It redeploys automatically on every push to main. The Draft site accepts requests from Render (checked /api/team/276914 after deploying)
 - Trade analyzer built: pick my players and another manager's, see both teams' best eleven and strength before/after, a per-position breakdown (rating points each position gains or loses in the best eleven), and a verdict (good and fair / good but unfair / barely changes / worse). Shortcut from League squads
 - Waiver targets now say why: a one-line reason in rating points, plus the one thing the dropped player still does better. Worked out from the numbers, no AI
-- Season view built: a "This week / Rest of season" toggle. Every player has both ratings; the chosen one drives waivers, reasons, squads and trades. check_league.py prints the biggest risers and fallers between the views. Not yet checked against the real league
+- Views renamed and reshaped: "Next 5" (5 gameweeks) and "Until the break" (up to the next international break, worked out from the gameweek deadlines; 3-10 gameweeks). Until the break counts form half as much and uses injury return dates. The internal view keys are still "week" and "season". Season view details: a toggle. Every player has both ratings; the chosen one drives waivers, reasons, squads and trades. check_league.py prints the biggest risers and fallers between the views. Not yet checked against the real league
 - ruff pinned to 0.16.9 in requirements-dev.txt
-- League race built: chart of league points behind the leader per gameweek (you in amber, hover a line for who it is) and a weekly points grid shaded vs the league average with W/D/L. Head-to-head leagues only. Not yet checked against the real league
+- League race built: chart of each manager's league points climbing from 0 (you in amber with a dot per week, hover a line for who it is) and a weekly points grid shaded vs the league average with W/D/L. Head-to-head leagues only. Not yet checked against the real league
 - /health route added for an uptime monitor to keep the free Render plan awake
-- Tests (pytest, 102 passing) and CI (GitHub Actions); ruff clean
+- Free agents table shows the top 15 with a "Show more" button (up to 60); search and position filters look through everyone
+- Tests (pytest, 118 passing) and CI (GitHub Actions); ruff clean
 
 ## How it works
 - app.py fetches data from the FPL Draft site (team → league lookup, league details, who owns whom) and the classic FPL site (fixtures + difficulty), then rates every player 0–100.
@@ -37,11 +38,13 @@
 - score_players also returns a breakdown: rating points per piece (form, ppg, xgi, mins, fix = 100 x weight x stat) plus avail (what an injury doubt takes off, 0 or less). The pieces add up to the rating, give or take rounding. Every player on the page carries it.
 
 ## How the season view works
-- VIEWS in app.py holds each view's settings: fixture window (LOOKAHEAD 3 / SEASON_LOOKAHEAD 6), weights (WEIGHTS / SEASON_WEIGHTS) and the injury rule.
+- VIEWS in app.py holds each view's settings: weights (WEIGHTS / SEASON_WEIGHTS), the injury rule and whether return dates are used. The window length comes from view_windows(): "week" = LOOKAHEAD (5); "season" = break_window().
+- break_window(deadlines, next_gw): the first gameweek g from next_gw where the deadline of g+1 is more than BREAK_GAP_DAYS (10) after g's means a break after g, so the window is next_gw..g. Kept between BREAK_MIN_WEEKS (3) and BREAK_MAX_WEEKS (10), never past GW38; SEASON_LOOKAHEAD (8) if no break is found. Deadlines come from boot events data (gameweek_deadlines). Checked on the real calendar: from GW6 the window is GW6-10 (15 days between the GW10 and GW11 deadlines).
+- The league data also has "windows": {view: {from, to}}, which the page uses for the button labels.
 - Weights are dicts per position, {piece: weight}, each adding up to 1 (a test checks this). Missing pieces count as 0.
 - New pieces (season only): cs = CS_BASELINE (2.0) minus expected goals conceded per 90, so lower xGC = better; dc = defensive_contribution per 90; crea = creativity per 90. All need MIN_MINUTES, like xGI, and use the same 95th-percentile scale.
-- Season weights: form stays 0.30 everywhere. GKP adds cs; DEF adds cs, dc and crea (creativity for attacking full backs); MID adds dc; FWD is the same as this week. Fixtures get a bit less weight over the longer window.
-- Injuries in the season view: chance >= SEASON_FULL_FROM (75) counts as fully fit; 50% and below are unchanged (50% halves the rating, injured = 0). The player's "chance" field (used for the "!" warning and waiver rules) is always the real next-week chance.
+- Season weights: form drops to 0.15 everywhere (Next 5 has 0.30), and the freed weight goes to fixtures, xGI and clean sheets. GKP adds cs; DEF adds cs, dc and crea (creativity for attacking full backs); MID adds dc; FWD leans more on xGI and fixtures. All first guesses. Fixtures get a bit less weight over the longer window.
+- Injuries in the season view: chance >= SEASON_FULL_FROM (75) counts as fully fit; 50% and below are unchanged (50% halves the rating). A player at 0% who has a news_return date counts as available for the share of the window's gameweeks whose deadline is on or after that date (availability() with window_deadlines); no date, or a doubt above 0%, works as before. Waiver suggestions still use the real next-week chance, so an injured player isn't suggested. The player's "chance" field (used for the "!" warning and waiver rules) is always the real next-week chance.
 - load_league(league_id, view) rates everyone in both views: week_score and season_score on every player; score, breakdown and fixtures follow the chosen view. Unknown views fall back to "week". All three routes accept ?view=season.
 - The page: toggle in the league bar reloads with ?view=, the link keeps &view=season, the free agents table shows both ratings (chosen one in bold, sorted by it), fixture strips show the view's window, trades send the view.
 
@@ -78,6 +81,7 @@
 - Ownership: element-status owner is the manager's entry_id (not the league entry id). Confirmed against the real API.
 - Team ID = that same entry_id (the number after /entry/ on the Draft site). Its league comes from /api/entry/<id>/public → entry.league_set.
 - If a team is in more than one league, the first is used; ?league=<id> picks another and a league dropdown appears. Only valid league IDs for that team are accepted.
+- Until the break counts form half as much because a few games of form say less about a longer stretch. The windows stopped overlapping so much: Next 5 is form-led, Until the break ends at a real calendar event.
 - Season view adds role-specific stats instead of turning up xGI for everyone, so a change aimed at attacking full backs doesn't move every defender with a lucky early xGI. Weights are first guesses; check_league.py's movers list is how we tune them against the real league.
 - The Draft feed has these fields (checked on Porro): creativity, threat, influence, ict_index, expected_goals_conceded, clean_sheets, goals_conceded, defensive_contribution, clearances_blocks_interceptions, recoveries, tackles, starts, set-piece orders, news_return. Events have deadline_time per gameweek.
 - The Ballahulics league is head-to-head (league "scoring": "h"), so the race uses league points (what decides the table), not total FPL points. The weekly grid shows FPL points.
@@ -98,7 +102,7 @@
 3. Personal view: enter team ID → auto-find league, bookmarkable link (done)
 4. Trade analyzer (done)
 5. "Why this pick?" explanations: short, from the numbers (done). AI long version dropped
-6. Season view: a rest-of-season rating alongside this week's, so players like Porro (poor form, but an attacking full back) aren't dropped too early (built; tune weights against the real league next)
+6. Season view (now "Until the break"): a longer-term rating alongside Next 5, so players like Porro (poor form, but an attacking full back) aren't dropped too early (built; tune weights against the real league next)
 7. One AI feature where AI writes words and Python does the maths (ideas: trade pitch message, weekly league recap)
 8. Accounts/login (needed for watchlists + limiting AI usage)
 
@@ -117,9 +121,10 @@ Idea for later: trade finder. "I want Joao Pedro and I'll give Fernandes": sugge
 - Trade verdicts use short-term ratings (form, next 3 GWs), but a trade lasts all season. An injured star rates near 0 now even if he's back in two weeks. A longer fixture window just for trades could help.
 - TRADE_MIN_GAIN and FAIR_MARGIN (both 0.5) are first guesses; tune after trying real trades.
 - "Fair" only looks at their best eleven. Real managers also judge on names and total points (shown in the lists), so a fair verdict isn't a guaranteed yes.
-- Season view: an injured player (0%) with a known return date still rates 0 for the whole window. news_return has the date (empty for doubts like Porro's 75%); next step is to count only the games he'd miss, once we've seen a real news_return value.
+- Season view: the return-date logic is built but not checked against real data. No player had a news_return value when it was built (the field was empty for everyone), so the date format is assumed to be ISO like the deadlines. A return date that has already passed while the player is still flagged injured would count him as fully available. Check once a real injury with a return date shows up.
 - Season view: minutes share still counts games missed through injury, so a player coming back from a knock rates lower for a while (Porro: 198 of 450 minutes).
 - Season view: with only ~5 gameweeks played, per-90 stats are noisy. Last season's data would help but needs one request per player.
+- League race: lines are plain league points now, so tied managers overlap (a small vertical nudge by table position keeps them visible); the gap to the leader is in the caption and your end label.
 - League race: classic-scoring leagues get no graphs (they have no matches; weekly points would need one history request per manager, /api/entry/<id>/history).
 - League race: while a gameweek is being played it isn't finished, so the graphs only update once it ends.
 - The league dropdown for multi-league teams shows "League <id>" for leagues that aren't loaded (names would cost an extra request each).

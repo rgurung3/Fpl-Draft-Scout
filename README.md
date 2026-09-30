@@ -5,9 +5,9 @@ league, rates every player, and shows you:
 
 - **Waiver targets**: free agents who rate higher than your weakest player in the same position, each with a one-line reason (for example "easier fixtures +14, better form +12. But Porro has more attacking threat −6"). Players with a 75% chance of playing are included, with a warning and a fully fit backup
 - **Trade analyzer**: pick players from your squad and another manager's, and see how the trade changes both teams' best eleven, and whether it's a fair offer they might accept
-- **Free agents**: a sortable, filterable table of everyone unowned in your league, with both ratings (this week and rest of season) and upcoming fixtures
-- **League race** (head-to-head leagues): a chart of how far each manager is behind the leader in league points after every gameweek, and a grid of everyone's weekly scores shaded against the league average, with each week's W, D or L
-- **This week / Rest of season**: a toggle that switches every rating on the page between the next few gameweeks and a longer-term view
+- **Free agents**: a sortable, filterable table of everyone unowned in your league, with both ratings (next 5 and until the break) and upcoming fixtures. It shows the top 15 at first, with a button for more
+- **League race** (head-to-head leagues): a chart of each manager's league points climbing from 0 after every gameweek (a dot on your line for each week), and a grid of everyone's weekly scores shaded against the league average, with each week's W, D or L
+- **Next 5 / Until the break**: a toggle that switches every rating on the page between the next 5 gameweeks and everything up to the next international break
 - **League squads**: how every manager's best legal eleven (one keeper, 3-5 DEF, 2-5 MID, 1-3 FWD) stacks up, with your squad highlighted
 
 ## Run it
@@ -45,8 +45,8 @@ starting with `!!` need a look: missing managers, owners that don't match
 anyone in the league, your team not being in the league it found, squads
 that aren't 15 players, missing xGI data, or clubs without fixtures.
 
-At the end it lists the biggest risers and fallers between the "this week"
-and "rest of season" ratings, e.g. `Pedro Porro (DEF, TOT): 34 -> 62 (+28)`.
+At the end it lists the biggest risers and fallers between the "next 5"
+and "until the break" ratings, e.g. `Pedro Porro (DEF, TOT): 34 -> 62 (+28)`.
 Use it to check the season settings move the right players.
 
 For head-to-head leagues it also checks the weekly results were found for
@@ -139,18 +139,21 @@ into piece-by-piece differences. The "Why" line under each swap names the
 biggest ones in rating points, plus the biggest thing the player you'd drop
 still does better.
 
-### Rest of season
+### Until the break
 
-The toggle at the top switches to a longer-term rating. It's built the same
-way, with these differences:
+The toggle at the top switches to a rating that looks ahead to the next
+international break (the page shows the gameweeks, e.g. "GW6–10"). It's found
+from the gameweek deadlines: a gap of more than 10 days between two deadlines
+is a break. The window is always 3 to 10 gameweeks long. It's built the same
+way as Next 5, with these differences:
 
-- Fixtures count over the next 6 gameweeks instead of 3, with a little less weight.
 - A 75% injury doubt counts as fully fit. 50% and below are handled as before.
 - Three more stats count for the positions they matter to: clean-sheet chances
   (expected goals conceded per 90) for keepers and defenders, defensive actions
   (tackles, blocks, interceptions per 90) for defenders and midfielders, and
   creativity per 90 for defenders, so attacking full backs get credit.
-- Form keeps its weight. Forwards only change through fixtures and injuries.
+- Recent form counts half as much (0.15 instead of 0.30), so fixtures and the underlying stats count for more.
+- A player who is out but has a return date only loses the gameweeks of the window he'd miss, instead of rating 0 for all of it.
 
 Your choice goes into your link (`&view=season`), so a bookmark remembers it.
 

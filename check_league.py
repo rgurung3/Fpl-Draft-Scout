@@ -6,8 +6,8 @@ Run:  python check_league.py 12345           (a league ID)
 
 It loads the league through the app exactly like the browser does, then
 prints a short report. Lines starting with "!!" need a look. At the end it
-lists the players whose rating changes most between the "this week" and
-"rest of season" views, to check the season settings make sense.
+lists the players whose rating changes most between the "next 5" and
+"until the break" views, to check the season settings make sense.
 """
 import sys
 from collections import Counter
@@ -83,8 +83,8 @@ def check(data):
 
 def movers(players, n=MOVERS_SHOWN):
     """
-    The players who rise most and fall most from the week view to the season
-    view, ignoring anyone who rates under MOVER_MIN_RATING in both.
+    The players who rise most and fall most from the "next 5" view to the
+    "until the break" view, ignoring anyone who rates under MOVER_MIN_RATING in both.
     """
     relevant = [p for p in players if max(p["week_score"], p["season_score"]) >= MOVER_MIN_RATING]
     change = {id(p): p["season_score"] - p["week_score"] for p in relevant}
@@ -96,7 +96,7 @@ def movers(players, n=MOVERS_SHOWN):
 def print_movers(players):
     risers, fallers = movers(players)
     for title, group in (("Biggest risers", risers), ("Biggest fallers", fallers)):
-        print(f"\n{title} in the rest of season view (this week -> season):")
+        print(f"\n{title} in the until-the-break view (next 5 -> break):")
         for p in group:
             change = p["season_score"] - p["week_score"]
             print(f"   {p['name']} ({p['pos']}, {p['team']}): "
@@ -124,8 +124,10 @@ def main():
         return 1
 
     last_gw = data["next_gw"] + data["lookahead"] - 1
+    season = data["windows"]["season"]
     print(f"League: {data['league_name']} (ID {data['league_id']}, "
-          f"gameweek {data['current_gw']}, fixtures GW{data['next_gw']}-{last_gw})")
+          f"gameweek {data['current_gw']}, fixtures GW{data['next_gw']}-{last_gw}, "
+          f"until-the-break view GW{season['from']}-{season['to']})")
     if len(data.get("my_leagues", [])) > 1:
         print(f"This team is in several leagues: {data['my_leagues']}. "
               "Showing the first one.")

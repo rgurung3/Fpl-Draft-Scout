@@ -4,6 +4,8 @@ FPL servers and always give the same result.
 
 Run with:  pytest -v
 """
+from datetime import timedelta
+
 import pytest
 import requests
 
@@ -195,14 +197,102 @@ def test_season_view_keeps_bigger_doubts(status, chance, share):
     assert season[2]["score"] == pytest.approx(season[1]["score"] * share, abs=0.1)
 
 
-def test_season_window_covers_six_gameweeks(monkeypatch):
+def test_fixture_window_follows_the_length_given(monkeypatch):
     fixtures = [{"event": gw, "team_h": 1, "team_a": 2, "team_h_difficulty": 2,
-                 "team_a_difficulty": 4} for gw in (7, 9, 12, 13)]
+                 "team_a_difficulty": 4} for gw in (7, 9, 11, 12, 13)]
     monkeypatch.setattr(app, "get_json", lambda url: {"teams": TEAMS} if "bootstrap" in url else fixtures)
-    week = app.upcoming_fixtures(TEAMS, 7)
-    season = app.upcoming_fixtures(TEAMS, 7, app.SEASON_LOOKAHEAD)
-    assert [f["gw"] for f in week[1]] == [7, 9]            # GW7-9
-    assert [f["gw"] for f in season[1]] == [7, 9, 12]      # GW7-12
+    week = app.upcoming_fixtures(TEAMS, 7)                  # the next 5 is the default
+    longer = app.upcoming_fixtures(TEAMS, 7, 7)
+    assert app.LOOKAHEAD == 5
+    assert [f["gw"] for f in week[1]] == [7, 9, 11]         # GW7-11
+    assert [f["gw"] for f in longer[1]] == [7, 9, 11, 12, 13]   # GW7-13
+
+
+# ---------------------------------------------------------------- the break window
+
+def deadlines_with_gap(after, gap_days=21, first=1):
+    """Weekly deadlines for GW1-38, with gap_days between the deadlines of GW `after` and `after + 1`."""
+    start, out = app.parse_time("2026-08-15T10:00:00Z"), {}
+    when = start
+    for gw in range(first, 39):
+        out[gw] = when
+        when += timedelta(days=gap_days if gw == after else 7)
+    return out
+
+
+def test_window_ends_at_the_next_break():
+    # the break comes after GW11, so from GW7 the window is GW7-11
+    assert app.break_window(deadlines_with_gap(after=11), next_gw=7) == 5
+
+
+def test_window_ignores_a_break_that_already_happened():
+    assert app.break_window(deadlines_with_gap(after=6), next_gw=7) == app.SEASON_LOOKAHEAD
+
+
+def test_window_is_never_shorter_than_the_minimum():
+    assert app.break_window(deadlines_with_gap(after=7), next_gw=7) == app.BREAK_MIN_WEEKS
+
+
+def test_window_is_never_longer_than_the_maximum():
+    assert app.break_window(deadlines_with_gap(after=30), next_gw=7) == app.BREAK_MAX_WEEKS
+
+
+def test_window_without_deadlines_uses_the_fallback():
+    assert app.break_window({}, next_gw=7) == app.SEASON_LOOKAHEAD
+
+
+def test_window_stops_at_the_last_gameweek():
+    assert app.break_window({}, next_gw=36) == 3
+    assert app.break_window({}, next_gw=38) == 1
+
+
+def test_view_windows_reads_the_events():
+    events = {"data": [{"id": gw, "deadline_time": d.strftime("%Y-%m-%dT%H:%M:%SZ")}
+                       for gw, d in deadlines_with_gap(after=10).items()]}
+    assert app.view_windows(events, 7) == {"week": 5, "season": 4}
+    assert app.view_windows({}, 7) == {"week": 5, "season": app.SEASON_LOOKAHEAD}
+
+
+@pytest.mark.parametrize("text", [None, "", "soon", 5])
+def test_parse_time_gives_none_for_bad_dates(text):
+    assert app.parse_time(text) is None
+
+
+# ---------------------------------------------------------------- return dates
+
+WINDOW = [app.parse_time(f"2026-10-{day}T10:00:00Z") for day in ("03", "10", "17", "24")]
+
+
+def injured(back):
+    return {"status": "i", "chance_of_playing_next_round": 0, "news_return": back}
+
+
+def test_a_returning_player_only_loses_the_games_he_misses():
+    # back on 12 October: he misses GW1-2 of the window and plays GW3-4
+    assert app.availability(injured("2026-10-12T00:00:00Z"), 75, WINDOW) == 0.5
+    assert app.availability(injured("2026-10-01T00:00:00Z"), 75, WINDOW) == 1.0   # back before it starts
+    assert app.availability(injured("2026-12-01T00:00:00Z"), 75, WINDOW) == 0.0   # back after it ends
+
+
+def test_return_dates_are_ignored_without_a_window_or_a_date():
+    assert app.availability(injured("2026-10-12T00:00:00Z"), 75) == 0.0           # this view doesn't use them
+    assert app.availability(injured(None), 75, WINDOW) == 0.0                     # no date known
+    assert app.availability(injured("rubbish"), 75, WINDOW) == 0.0
+
+
+def test_a_doubt_keeps_its_chance_even_with_a_return_date():
+    doubt = {"status": "d", "chance_of_playing_next_round": 50, "news_return": "2026-10-12T00:00:00Z"}
+    assert app.availability(doubt, 75, WINDOW) == 0.5
+
+
+def test_only_the_until_the_break_view_uses_return_dates():
+    fit, hurt = make_player(1), make_player(2, status="i", chance=0)
+    hurt["news_return"] = "2026-10-12T00:00:00Z"
+    week = app.score_players([fit, hurt], {}, current_gw=6, window_deadlines=WINDOW)
+    season = app.score_players([fit, hurt], {}, current_gw=6, view="season", window_deadlines=WINDOW)
+    assert week[2]["score"] == 0
+    assert season[2]["score"] == pytest.approx(season[1]["score"] * 0.5, abs=0.1)
+    assert sum(season[2]["breakdown"].values()) == pytest.approx(season[2]["score"], abs=0.5)
 
 
 def defenders(**changes):
@@ -233,11 +323,15 @@ def test_new_stats_need_180_minutes():
     assert breakdown["crea"] == breakdown["cs"] == breakdown["dc"] == 0
 
 
-def test_forwards_only_change_through_fixtures_and_fitness():
+def test_forwards_ignore_the_defensive_pieces():
     forwards = [make_player(i, pos=4, form=str(i), creativity=str(10 * i)) for i in range(1, 8)]
-    week = app.score_players(forwards, {}, current_gw=6)
     season = app.score_players(forwards, {}, current_gw=6, view="season")
-    assert all(week[i]["score"] == season[i]["score"] for i in week)
+    for s in season.values():
+        assert not {"cs", "dc", "crea"} & set(s["breakdown"])
+
+
+def test_until_the_break_counts_form_less_than_next_5():
+    assert all(app.SEASON_WEIGHTS[pos]["form"] < app.WEIGHTS[pos]["form"] for pos in app.WEIGHTS)
 
 
 def test_season_breakdown_adds_up_to_the_rating():
@@ -258,7 +352,8 @@ def test_team_endpoint_season_view(fake_api):
     client = app.app.test_client()
     season = client.get("/api/team/100?view=season").get_json()
     assert season["view"] == "season"
-    assert season["lookahead"] == app.SEASON_LOOKAHEAD
+    assert season["lookahead"] == app.SEASON_LOOKAHEAD     # the fake data has no deadlines
+    assert season["windows"] == {"week": {"from": 7, "to": 11}, "season": {"from": 7, "to": 14}}
     assert all(p["score"] == p["season_score"] for p in season["players"])
 
     week = client.get("/api/team/100").get_json()
