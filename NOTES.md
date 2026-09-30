@@ -22,7 +22,9 @@
 - Return dates now work on real data: the feed's news_return is empty, so return_date() reads "Expected back 10 Oct" / "Suspended until 17 Oct" from the news text (year = next such date after news_added). Both views use them, so a one-match ban no longer rates 0 over five gameweeks
 - Smarter swaps: a "Small sample" line when a player has under 300 minutes, a Keep button (protects a player from being suggested as a drop, saved in the link as &keep=), a "Your best eleven" line (does the drop start, and strength before/after), and a "Minutes, GW2-5" line with each player's last four gameweeks
 - Per-90 stats no longer have a cliff at 180 minutes: they count in proportion below it (Barcola on 168 minutes had xGI counted as 0)
-- Tests (pytest, 140 passing) and CI (GitHub Actions); ruff clean
+- Trade analyzer moved to its own page (/trade) so the main page is less cluttered. Links on the main page carry team, league and view across ("Build a trade with this team" adds &with=). Shared styles now live in static/common.css
+- League banter page (/banter?league=<id>, for sharing with the league): hot match of the week, Battle for 3rd, Wooden spoon watch, and up to 5 facts (2 shown, rest behind Show more). This season only for now. Checked against the real league (league 52607); layout checked in the browser
+- Tests (pytest, 167 passing) and CI (GitHub Actions); ruff clean
 
 ## How it works
 - app.py fetches data from the FPL Draft site (team → league lookup, league details, who owns whom) and the classic FPL site (fixtures + difficulty), then rates every player 0–100.
@@ -73,6 +75,11 @@
 - Each pair has a "why" (swap_reasons): claim breakdown minus drop breakdown, piece by piece. Up to 3 reasons (MAX_REASONS) of at least 1 point (MIN_REASON), biggest first; if none are that big, the single biggest. The drop's injury doubt counts as a reason ("Porro is 50% to play"); the claim's own doubt isn't repeated because it has the "!" row. "against" = the biggest piece in the drop's favour ("But Porro has more attacking threat -6").
 - League squads = average rating of each team's best legal eleven: take the minimum at each position (1 GKP, 3 DEF, 2 MID, 1 FWD), then fill the last 4 places with the best players left without breaking a maximum (1 GKP, 5 DEF, 5 MID, 3 FWD). My squad is opened and highlighted, with formation and bench.
 
+## How the pages fit together
+- static/index.html (main), static/trade.html (/trade), static/banter.html (/banter). Shared styles are in static/common.css; each page keeps its own script.
+- trade.html loads /api/team/<id>?swaps=0 (players and managers only: no waiver suggestions and none of their per-player minute requests), then uses the same trade route as before.
+- banter.html takes ?league=<id> only, so the link works for anyone in the league. It calls /api/league/<id>/banter.
+
 ## How the trade analyzer works
 - evaluate_trade(players, me, them, give, get) in app.py. Route: /api/team/<me>/trade?with=<them>&give=12,34&get=56&league=<id>.
 - Checks first (TradeError, shown as a 400 with a friendly message): not trading with myself, at least one player each side, give are all mine, get are all theirs, same positions on both sides. Repeated IDs are dropped.
@@ -80,6 +87,12 @@
 - Each side reports strength before/after/change, formation before/after, who joins or leaves the best eleven, and by_position: the change in total rating of each position in the best eleven (xi_by_position). Totals, not averages, so "MID -25, FWD +25" reads as one swap cancelling the other. A formation shift shows up here too (e.g. DEF +50 when a defender takes a midfield spot).
 - Verdict: my change <= -TRADE_MIN_GAIN (0.5) = worse; under +0.5 = no change; otherwise good_and_fair if their change >= -FAIR_MARGIN (0.5), else good_but_unfair. 0.5 strength is roughly one starter improving by 5-6 rating points.
 - The page ticks players, sends the IDs, and draws the verdict and both panels. It sends ?league= so the server uses the same league as the page.
+
+## How league banter works
+- league_banter(details) in app.py, route /api/league/<id>/banter. Built from the league details (matches and league_history's table), so no extra requests. None until a gameweek has finished or if the league has no matches.
+- hot_match: among the next unplayed gameweek's matches, the pair with the lowest table places added together, then the smallest gap in league points. battles: Battle for 3rd (places 3 and 4) and Wooden spoon watch (last two); needs 4 and 5 managers. Each says how far apart they are and whether they meet again.
+- facts (in this order, first FACT_COUNT = 5 that apply): luck (table place at least LUCK_MIN_GAP = 2 below points-scored place), harsh (highest score that still lost), streak (current winning or losing run of STREAK_MIN = 3 or more), thrashing, closest, low, high. The page shows 2, the rest behind "Show more". Text is written from the numbers, mild teasing, no AI.
+- Last season's facts (head-to-head records between managers across seasons, finish vs last year) are not built yet: they need last season's league ID and a way to match managers across seasons (entry IDs may change). Next step is a script to check what the Draft site still returns for the old league.
 
 ## Decisions
 - Flask backend, because the Draft site blocks requests made directly from a browser page.
@@ -109,12 +122,14 @@
 4. Trade analyzer (done)
 5. "Why this pick?" explanations: short, from the numbers (done). AI long version dropped
 6. Season view (now "Until the break"): a longer-term rating alongside Next 5, so players like Porro (poor form, but an attacking full back) aren't dropped too early (built; tune weights against the real league next)
-7. One AI feature where AI writes words and Python does the maths (ideas: trade pitch message, weekly league recap)
-8. Accounts/login (needed for watchlists + limiting AI usage)
+7. Banter with last season's league (head-to-head records between managers, places gained or lost)
+8. One AI feature where AI writes words and Python does the maths (ideas: trade pitch message, weekly league recap)
+9. Accounts/login (needed for watchlists + limiting AI usage)
 
 Idea for later: trade finder. "I want Joao Pedro and I'll give Fernandes": suggest which of their players makes the best filler, so the positions match, it helps me, and it still looks fair to them.
 
 ## Known issues / ideas
+- Banter: facts use team names, and two teams with the same name would be confusing. Before any gameweek finishes there's nothing to show. The hot match ignores squad strength (only the table).
 - The FPL Draft data feed isn't officially documented and could change.
 - The Draft site sits behind Cloudflare and may block cloud servers (403). It worked from Render at deploy time, but Cloudflare can change its mind; if the live site starts showing the 403 message, that's the cause, not a bug in the app.
 - Free Render plan sleeps after 15 minutes with no visitors; the next visit takes about a minute to wake it up (Render shows a loading page). The in-memory cache is lost when it sleeps (harmless). Fix: an uptime monitor pings /health every 10 minutes. One always-awake service uses about 720-744 of the workspace's 750 free hours a month, so only ever do this for one service. Render can still restart free services at any time.

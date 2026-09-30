@@ -4,7 +4,8 @@ A small helper app for FPL Draft leagues. Enter your team ID and it finds your
 league, rates every player, and shows you:
 
 - **Waiver targets**: free agents who rate higher than your weakest player in the same position, each with a one-line reason (for example "easier fixtures +14, better form +12. But Porro has more attacking threat −6"). Each swap also says if the player you'd drop starts for you, what it does to your best eleven, how many minutes both players have played lately, and warns when a player has few minutes so far. A "Keep" button protects a player from being suggested as a drop (it's saved in your link). Players with a 75% chance of playing are included, with a warning and a fully fit backup
-- **Trade analyzer**: pick players from your squad and another manager's, and see how the trade changes both teams' best eleven, and whether it's a fair offer they might accept
+- **Trade analyzer** (its own page, `/trade`): pick players from your squad and another manager's, and see how the trade changes both teams' best eleven, and whether it's a fair offer they might accept
+- **League banter** (its own page, `/banter?league=<league id>`, made to share with the whole league): the hot match of the week, a "Battle for 3rd" and a "Wooden spoon watch" card, and facts to argue about (unluckiest manager, harshest loss, winning and losing runs, biggest beating, closest match, lowest and best scores). Two facts show at first, with a button for the rest. Mild teasing, all worked out from the numbers
 - **Free agents**: a sortable, filterable table of everyone unowned in your league, with both ratings (next 5 and until the break) and upcoming fixtures. It shows the top 15 at first, with a button for more
 - **League race** (head-to-head leagues): a chart of each manager's league points climbing from 0 after every gameweek (a dot on your line for each week), and a grid of everyone's weekly scores shaded against the league average, with each week's W, D or L
 - **Next 5 / Until the break**: a toggle that switches every rating on the page between the next 5 gameweeks and everything up to the next international break
@@ -102,8 +103,9 @@ never sleeps and is also faster.
 Pick a manager, tick the players you'd give and the players you'd get, and
 press **Analyze trade**. Both sides need the same positions (one DEF for one
 DEF, say), because every Draft squad keeps 2 GKP, 5 DEF, 5 MID and 3 FWD.
-You can also open any team in League squads and press **Build a trade with
-this team**.
+The analyzer is its own page: press **Trade analyzer** under the league bar on
+the main page. You can also open any team in League squads and press **Build a
+trade with this team**, which opens the analyzer with that manager picked.
 
 The analyzer works out both teams' best legal eleven before and after the
 trade and compares their strength (the same number League squads shows). It
