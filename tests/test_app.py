@@ -280,19 +280,40 @@ def test_return_dates_are_ignored_without_a_window_or_a_date():
     assert app.availability(injured("rubbish"), 75, WINDOW) == 0.0
 
 
+@pytest.mark.parametrize("news,year,expected", [
+    ("Hamstring injury - Expected back 10 Oct", 2026, "2026-10-10"),
+    ("Suspended until 17 Oct", 2026, "2026-10-17"),
+    ("Knee injury - Expected back 3 Jan", 2026, "2027-01-03"),      # a date before the news means next year
+])
+def test_return_date_is_read_from_the_news_text(news, year, expected):
+    el = {"news": news, "news_added": f"{year}-09-20T10:00:00Z"}
+    assert app.return_date(el).strftime("%Y-%m-%d") == expected
+
+
+@pytest.mark.parametrize("news", ["Back injury - Unknown return date", "75% chance of playing", "", None])
+def test_return_date_is_none_when_the_news_has_no_date(news):
+    assert app.return_date({"news": news, "news_added": "2026-09-20T10:00:00Z"}) is None
+
+
+def test_a_suspended_player_misses_only_the_ban():
+    banned = {"status": "s", "chance_of_playing_next_round": 0, "news": "Suspended until 8 Oct",
+              "news_added": "2026-10-01T10:00:00Z"}
+    assert app.availability(banned, None, WINDOW) == 0.75      # misses the first of four gameweeks
+
+
 def test_a_doubt_keeps_its_chance_even_with_a_return_date():
     doubt = {"status": "d", "chance_of_playing_next_round": 50, "news_return": "2026-10-12T00:00:00Z"}
     assert app.availability(doubt, 75, WINDOW) == 0.5
 
 
-def test_only_the_until_the_break_view_uses_return_dates():
+def test_both_views_use_return_dates():
     fit, hurt = make_player(1), make_player(2, status="i", chance=0)
     hurt["news_return"] = "2026-10-12T00:00:00Z"
     week = app.score_players([fit, hurt], {}, current_gw=6, window_deadlines=WINDOW)
     season = app.score_players([fit, hurt], {}, current_gw=6, view="season", window_deadlines=WINDOW)
-    assert week[2]["score"] == 0
-    assert season[2]["score"] == pytest.approx(season[1]["score"] * 0.5, abs=0.1)
-    assert sum(season[2]["breakdown"].values()) == pytest.approx(season[2]["score"], abs=0.5)
+    for scores in (week, season):
+        assert scores[2]["score"] == pytest.approx(scores[1]["score"] * 0.5, abs=0.1)
+        assert sum(scores[2]["breakdown"].values()) == pytest.approx(scores[2]["score"], abs=0.5)
 
 
 def defenders(**changes):
@@ -725,10 +746,18 @@ def test_reasons_use_the_season_pieces():
 
 
 @pytest.mark.parametrize("chance,text", [(50, "P1 is 50% to play"), (0, "P1 is out")])
-def test_drop_injury_doubt_is_a_reason(chance, text):
+def test_drop_injury_doubt_gets_its_own_line(chance, text):
     drop = rated(1, "DEF", 20, owner=100, chance=chance, breakdown=piece(form=40, avail=-20))
     claim = rated(2, "DEF", 40, breakdown=piece(form=40))
-    assert app.swap_reasons(drop, claim)["reasons"] == [{"text": text, "points": 20}]
+    why = app.swap_reasons(drop, claim)
+    assert why["availability"] == {"text": text, "points": 20}
+    assert why["reasons"] == []        # it isn't mixed in with the performance reasons
+
+
+def test_no_availability_line_when_the_drop_is_fit():
+    drop = rated(1, "DEF", 20, owner=100, breakdown=piece(form=20))
+    claim = rated(2, "DEF", 40, breakdown=piece(form=40))
+    assert app.swap_reasons(drop, claim)["availability"] is None
 
 
 def test_waiver_targets_come_with_reasons():

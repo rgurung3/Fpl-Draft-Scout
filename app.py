@@ -3,6 +3,7 @@ Draft Scout - a helper app for FPL Draft leagues.
 
 Run:  python app.py   then open http://127.0.0.1:5000
 """
+import re
 import time
 from collections import Counter
 from datetime import datetime, timezone
@@ -58,6 +59,30 @@ def parse_time(text):
     except ValueError:
         return None
     return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
+NEWS_RETURN = re.compile(r"(?:Expected back|Suspended until) (\d{1,2}) ([A-Z][a-z]{2})")
+
+
+def return_date(el):
+    """
+    When an injured or suspended player is expected back, or None. The Draft feed's
+    news_return field is empty, but the news text says "Expected back 10 Oct" or
+    "Suspended until 17 Oct" (no year: it's the next such date after news_added).
+    """
+    back = parse_time(el.get("news_return"))
+    if back:
+        return back
+    found = NEWS_RETURN.search(el.get("news") or "")
+    if not found:
+        return None
+    added = parse_time(el.get("news_added")) or datetime.now(timezone.utc)
+    try:
+        back = datetime.strptime(f"{found[1]} {found[2]} {added.year}", "%d %b %Y")
+        back = back.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return back if back >= added else back.replace(year=back.year + 1)
 
 
 def gameweek_deadlines(events):
@@ -173,9 +198,10 @@ SEASON_WEIGHTS = {
 SEASON_FULL_FROM = 75  # until the break: players at least this likely to play count as fully fit
 
 # Each view's settings. "return_dates": a player who is out now but has a known
-# return date only loses the gameweeks of the window he'd miss.
+# return date only loses the gameweeks of the window he'd miss (a one-match ban
+# shouldn't rate 0 over five gameweeks).
 VIEWS = {
-    "week": {"weights": WEIGHTS, "full_from": None, "return_dates": False},
+    "week": {"weights": WEIGHTS, "full_from": None, "return_dates": True},
     "season": {"weights": SEASON_WEIGHTS, "full_from": SEASON_FULL_FROM, "return_dates": True},
 }
 
@@ -194,8 +220,8 @@ def availability(el, full_from=None, window_deadlines=None):
         value = 1.0 if full_from is not None and chance >= full_from else chance / 100
     else:
         value = AVAIL_BY_STATUS.get(el.get("status", "a"), 1.0)
-    back = parse_time(el.get("news_return"))
-    if value == 0 and back and window_deadlines:
+    back = return_date(el) if value == 0 and window_deadlines else None
+    if back:
         return sum(d >= back for d in window_deadlines) / len(window_deadlines)
     return value
 
@@ -339,6 +365,9 @@ def swap_reasons(drop, claim):
     Why a claim rates higher than a drop, in a few words. Each rating is the sum
     of its breakdown pieces, so the gain splits into piece-by-piece differences.
 
+    availability: if the drop is injured, suspended or doubtful, what that is
+    worth to the claim ({"text", "points"}), or None. The page shows it on its
+    own line above the reasons, because it's about fitness, not performance.
     reasons: up to MAX_REASONS pieces in the claim's favour, biggest first.
     against: the biggest piece in the drop's favour, or None. Worth knowing:
     the drop might still be the better long-term player on that measure.
@@ -348,15 +377,17 @@ def swap_reasons(drop, claim):
 
     # the drop's injury doubt counts in the claim's favour. (The claim's own
     # doubt isn't repeated here; it already gets its "!" warning.)
+    availability = None
     doubt = round(claim["breakdown"]["avail"] - drop["breakdown"]["avail"], 1)
     if doubt > 0:
         status = "is out" if drop["chance"] == 0 else f"is {drop['chance']}% to play"
-        diffs.append((doubt, f"{drop['name']} {status}"))
+        availability = {"text": f"{drop['name']} {status}", "points": doubt}
 
     positives = sorted((d for d in diffs if d[0] > 0), reverse=True)
     reasons = [d for d in positives if d[0] >= MIN_REASON][:MAX_REASONS] or positives[:1]
     worst = min(diffs[:len(REASON_LABELS)])
     return {
+        "availability": availability,
         "reasons": [{"text": text, "points": pts} for pts, text in reasons],
         "against": ({"text": f"{drop['name']} has {worst[1]}", "points": worst[0]}
                     if worst[0] <= -MIN_REASON else None),
