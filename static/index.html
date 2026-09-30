@@ -82,6 +82,10 @@
   .swap .why strong { color: var(--ink); }
   .swap .why b { font-weight: 600; font-variant-numeric: tabular-nums; }
   .swap .why .up { color: var(--pitch); } .swap .why .down { color: var(--rival); }
+  .keepbar { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin: 0 0 12px; font-size: .9rem; }
+  .keepbar button, .swap .keep { font: inherit; font-size: .8rem; background: transparent; color: var(--pitch);
+    border: 1px solid var(--pitch); border-radius: 999px; padding: 1px 10px; cursor: pointer; }
+  .swap .keep { margin-top: 4px; }
   .empty { background: var(--pitch-soft); padding: 14px 16px; border-radius: 4px; }
   .swap .risk { grid-column: 1 / -1; display: flex; gap: 10px; align-items: flex-start;
     background: var(--amber-soft); border-radius: 4px; padding: 8px 10px; font-size: .9rem; }
@@ -243,6 +247,7 @@
     <section>
       <h2>Waiver targets</h2>
       <p class="sub">Free agents who rate higher than your weakest player in the same position, with the main reasons in rating points. Players with a small injury doubt (75% chance of playing) are included, with a backup in case they're ruled out.</p>
+      <div class="keepbar hidden" id="keepBar"></div>
       <div class="swaps" id="swaps"></div>
     </section>
 
@@ -312,7 +317,7 @@
 const $ = id => document.getElementById(id);
 let DATA = null;
 const FA_SHOWN = 15, FA_MAX = 60;  // free agents shown at first, and the most "Show more" reveals
-let state = { showAllFa: false, pos: "", q: "", hideFlagged: true, sortKey: null, sortDir: -1, me: null, team: null, view: "week",
+let state = { keep: new Set(), showAllFa: false, pos: "", q: "", hideFlagged: true, sortKey: null, sortDir: -1, me: null, team: null, view: "week",
   tradeWith: null, give: new Set(), get: new Set() };
 const POS_ORDER = { GKP: 0, DEF: 1, MID: 2, FWD: 3 };
 
@@ -351,6 +356,7 @@ function linkQuery() {
   const params = new URLSearchParams({ team: state.team });
   if (DATA.my_leagues.length > 1 && DATA.league_id !== DATA.my_leagues[0]) params.set("league", DATA.league_id);
   if (DATA.view === "season") params.set("view", "season");
+  if (DATA.keep.length) params.set("keep", DATA.keep.join(","));
   return "?" + params;
 }
 
@@ -361,6 +367,7 @@ async function loadTeam(id, league, view = state.view) {
     let r;
     const query = new URLSearchParams({ view });
     if (league) query.set("league", league);
+    if (state.keep.size) query.set("keep", [...state.keep].join(","));
     try { r = await fetch(`/api/team/${id}?${query}`); }
     catch (e) { throw new Error("Can't reach Draft Scout. Is app.py still running in your terminal?"); }
     let j = null;
@@ -429,15 +436,39 @@ function riskNote(s) {
     <div><strong>${esc(why)}.</strong> ${plan}</div></div>`;
 }
 
-// one line under a swap: the biggest reasons the claim rates higher, and the one thing
-// the dropped player still does better (worked out by swap_reasons in app.py)
+// lines under a swap: fitness of the dropped player first, then the biggest reasons the claim rates
+// higher and the one thing the dropped player still does better (worked out by swap_reasons in app.py)
 function whyNote(s) {
   if (!s.why) return "";
   const pts = v => `${v > 0 ? "+" : "−"}${Math.abs(v).toFixed(0)}`;
   const reasons = s.why.reasons.map(r => `${esc(r.text)} <b class="up">${pts(r.points)}</b>`).join(", ");
   const against = s.why.against
-    ? ` But ${esc(s.why.against.text)} <b class="down">${pts(s.why.against.points)}</b>.` : "";
-  return `<div class="why"><strong>Why:</strong> ${reasons}.${against}</div>`;
+    ? `But ${esc(s.why.against.text)} <b class="down">${pts(s.why.against.points)}</b>.` : "";
+  // fitness (the dropped player is injured, suspended or doubtful) gets its own line above the rest
+  const fit = s.why.availability
+    ? `<div class="why avail"><strong>Fitness:</strong> ${esc(s.why.availability.text)} <b class="up">${pts(s.why.availability.points)}</b></div>` : "";
+  const why = reasons ? `<div class="why"><strong>Why:</strong> ${reasons}. ${against}</div>`
+    : against ? `<div class="why">${against}</div>` : "";
+  // players on few minutes: their numbers could change quickly (either side of the swap)
+  const few = (s.small_sample || []).map(p => `${esc(p.name)} has only ${p.minutes} minutes (${p.starts} ${p.starts === 1 ? "start" : "starts"})`);
+  const small = few.length ? `<div class="why small"><strong>Small sample:</strong> ${few.join(", ")}. Their numbers could change quickly.</div>` : "";
+  return fit + why + small;
+}
+
+// minutes in the last few gameweeks for the two players in a swap, to show who is actually playing
+function recentNote(s, drop, claim) {
+  const r = DATA.recent, mins = id => r.minutes[id];
+  const line = p => mins(p.id) ? `${esc(p.name)} <b>${mins(p.id).join(", ")}</b>` : "";
+  const parts = [line(drop), line(claim)].filter(Boolean);
+  return parts.length ? `<div class="why recent"><strong>Minutes, GW${r.gws[0]}–${r.gws.at(-1)}:</strong> ${parts.join(" · ")}</div>` : "";
+}
+
+// does the player you'd drop start for you, and what does the swap do to your best eleven?
+function xiNote(s, drop) {
+  const change = s.xi_after - s.xi_before;
+  const sign = change > 0 ? "+" : change < 0 ? "−" : "";
+  return `<div class="why xi"><strong>Your best eleven:</strong> ${esc(drop.name)} ${s.drop_in_xi ? "starts for you" : "is on your bench"}. `
+    + `Strength ${s.xi_before.toFixed(1)} → ${s.xi_after.toFixed(1)} (${sign}${Math.abs(change).toFixed(1)}).</div>`;
 }
 
 function renderSwaps() {
@@ -449,18 +480,26 @@ function renderSwaps() {
     $("swaps").innerHTML = `<div class="empty">This team has no players yet. If your draft hasn't happened, check back after it does.</div>`;
     return;
   }
+  // players you've chosen to keep: the server skips them when picking who to drop
+  const kept = DATA.keep.map(player);
+  $("keepBar").classList.toggle("hidden", !kept.length);
+  $("keepBar").innerHTML = kept.length ? "Keeping (never suggested as a drop): "
+    + kept.map(p => `<button type="button" data-unkeep="${p.id}" title="Stop keeping ${esc(p.name)}">${esc(p.name)} ✕</button>`).join("") : "";
   // the server works out the swaps (see waiver_targets in app.py); this just draws them
   $("swaps").innerHTML = DATA.waiver_targets.length ? DATA.waiver_targets.map(s => {
     const drop = player(s.drop), claim = player(s.claim);
     return `
     <div class="swap">
       <div class="side drop"><span class="score">${drop.score.toFixed(0)}</span>
-        <div class="who"><div class="verb">Drop</div><div class="pname">${esc(drop.name)} <span class="pos">${drop.pos}, ${esc(drop.team)}</span></div>${fixStrip(drop)}</div></div>
+        <div class="who"><div class="verb">Drop</div><div class="pname">${esc(drop.name)} <span class="pos">${drop.pos}, ${esc(drop.team)}</span></div>${fixStrip(drop)}
+          <button class="keep" type="button" data-keep="${drop.id}" title="Keep ${esc(drop.name)} and suggest dropping someone else instead">Keep ${esc(drop.name)}</button></div></div>
       <span class="arrow" aria-hidden="true">›</span>
       <div class="side claim"><span class="score">${claim.score.toFixed(0)}</span>
         <div class="who"><div class="verb">Claim</div><div class="pname">${esc(claim.name)} <span class="pos">${claim.pos}, ${esc(claim.team)}</span></div>${fixStrip(claim)}</div></div>
       <span class="gain">+${s.gain.toFixed(0)}</span>
       ${whyNote(s)}
+      ${recentNote(s, drop, claim)}
+      ${xiNote(s, drop)}
       ${riskNote(s)}
     </div>`;
   }).join("")
@@ -757,6 +796,17 @@ $("posTabs").addEventListener("click", e => {
   document.querySelectorAll("#posTabs button").forEach(x => x.setAttribute("aria-pressed", x === b));
   renderTable();
 });
+// Keep / stop keeping: remember it, then ask the server for new swaps
+function setKept(id, on) {
+  on ? state.keep.add(id) : state.keep.delete(id);
+  loadTeam(state.team, DATA.league_id, state.view);
+}
+$("swaps").addEventListener("click", e => {
+  const b = e.target.closest("[data-keep]"); if (b) setKept(Number(b.dataset.keep), true);
+});
+$("keepBar").addEventListener("click", e => {
+  const b = e.target.closest("[data-unkeep]"); if (b) setKept(Number(b.dataset.unkeep), false);
+});
 $("faMore").addEventListener("click", () => { state.showAllFa = !state.showAllFa; renderTable(); });
 $("search").addEventListener("input", e => { state.q = e.target.value; renderTable(); });
 $("hideFlagged").addEventListener("change", e => { state.hideFlagged = e.target.checked; renderTable(); });
@@ -797,6 +847,7 @@ const fromLink = new URLSearchParams(location.search);
 const startTeam = fromLink.get("team") || recall("teamId");
 const startLeague = fromLink.get("league");
 state.view = fromLink.get("view") === "season" ? "season" : "week";
+state.keep = new Set((fromLink.get("keep") || "").split(",").filter(s => /^\d+$/.test(s)).map(Number));
 if (/^[0-9]+$/.test(startTeam || "")) {
   $("teamId").value = startTeam;
   loadTeam(startTeam, /^[0-9]+$/.test(startLeague || "") ? startLeague : null);

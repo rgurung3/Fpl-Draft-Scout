@@ -3,8 +3,10 @@ Draft Scout - a helper app for FPL Draft leagues.
 
 Run:  python app.py   then open http://127.0.0.1:5000
 """
+import re
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import requests
@@ -23,7 +25,7 @@ BREAK_GAP_DAYS = 10
 BREAK_MIN_WEEKS = 3
 BREAK_MAX_WEEKS = 10
 LAST_GW = 38
-MIN_MINUTES = 180       # players need this many minutes for xGI/90 and to set the rating scale
+MIN_MINUTES = 180       # per-90 stats count in full from this many minutes (in proportion below it)
 SCALE_PERCENTILE = 95   # each stat is measured against this percentile of regular players
 
 app = Flask(__name__, static_folder="static")
@@ -58,6 +60,30 @@ def parse_time(text):
     except ValueError:
         return None
     return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
+NEWS_RETURN = re.compile(r"(?:Expected back|Suspended until) (\d{1,2}) ([A-Z][a-z]{2})")
+
+
+def return_date(el):
+    """
+    When an injured or suspended player is expected back, or None. The Draft feed's
+    news_return field is empty, but the news text says "Expected back 10 Oct" or
+    "Suspended until 17 Oct" (no year: it's the next such date after news_added).
+    """
+    back = parse_time(el.get("news_return"))
+    if back:
+        return back
+    found = NEWS_RETURN.search(el.get("news") or "")
+    if not found:
+        return None
+    added = parse_time(el.get("news_added")) or datetime.now(timezone.utc)
+    try:
+        back = datetime.strptime(f"{found[1]} {found[2]} {added.year}", "%d %b %Y")
+        back = back.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return back if back >= added else back.replace(year=back.year + 1)
 
 
 def gameweek_deadlines(events):
@@ -173,9 +199,10 @@ SEASON_WEIGHTS = {
 SEASON_FULL_FROM = 75  # until the break: players at least this likely to play count as fully fit
 
 # Each view's settings. "return_dates": a player who is out now but has a known
-# return date only loses the gameweeks of the window he'd miss.
+# return date only loses the gameweeks of the window he'd miss (a one-match ban
+# shouldn't rate 0 over five gameweeks).
 VIEWS = {
-    "week": {"weights": WEIGHTS, "full_from": None, "return_dates": False},
+    "week": {"weights": WEIGHTS, "full_from": None, "return_dates": True},
     "season": {"weights": SEASON_WEIGHTS, "full_from": SEASON_FULL_FROM, "return_dates": True},
 }
 
@@ -194,8 +221,8 @@ def availability(el, full_from=None, window_deadlines=None):
         value = 1.0 if full_from is not None and chance >= full_from else chance / 100
     else:
         value = AVAIL_BY_STATUS.get(el.get("status", "a"), 1.0)
-    back = parse_time(el.get("news_return"))
-    if value == 0 and back and window_deadlines:
+    back = return_date(el) if value == 0 and window_deadlines else None
+    if back:
         return sum(d >= back for d in window_deadlines) / len(window_deadlines)
     return value
 
@@ -225,9 +252,18 @@ def stat_scales(raw, minutes):
     return {k: percentile([r[k] for r in pool], SCALE_PERCENTILE) or 1 for k in SCALED_STATS}
 
 
+def trust(mins):
+    """How far to trust a player's per-90 stats: 1 from MIN_MINUTES, shrinking smoothly to 0 below it."""
+    return min(max(mins, 0) / MIN_MINUTES, 1.0)
+
+
 def per90(total, mins):
-    """A season total per 90 minutes, or 0 for players under MIN_MINUTES (too few to trust)."""
-    return total / mins * 90 if mins >= MIN_MINUTES else 0.0
+    """
+    A season total per 90 minutes, shrunk in proportion to trust(mins). Under
+    MIN_MINUTES the figure is noisy, so it counts for less rather than being
+    thrown away (a cliff at 180 would give 0 to someone on 179).
+    """
+    return total / mins * 90 * trust(mins) if mins > 0 else 0.0
 
 
 def score_players(elements, fixtures_by_team, current_gw, view="week", window_deadlines=None):
@@ -242,14 +278,14 @@ def score_players(elements, fixtures_by_team, current_gw, view="week", window_de
     for el in elements:
         mins = num(el.get("minutes"))
         minutes.append(mins)
-        xgc90 = per90(num(el.get("expected_goals_conceded")), mins)
+        xgc90 = num(el.get("expected_goals_conceded")) / mins * 90 if mins > 0 else 0.0
         raw.append({
             "form": max(num(el.get("form")), 0),
             "ppg": max(num(el.get("points_per_game")), 0),
             "xgi90": per90(num(el.get("expected_goal_involvements")), mins),
             "mins": min(mins / (games_so_far * 90), 1.0),
             "fix": fixture_ease(fixtures_by_team.get(el["team"], [])),
-            "cs": max(CS_BASELINE - xgc90, 0) if mins >= MIN_MINUTES else 0.0,
+            "cs": max(CS_BASELINE - xgc90, 0) * trust(mins),
             "dc90": per90(num(el.get("defensive_contribution")), mins),
             "crea90": per90(num(el.get("creativity")), mins),
         })
@@ -288,6 +324,8 @@ MIN_CHANCE_FOR_WAIVERS = 75  # suggest doubtful players only if at least this li
 MIN_GAIN = 3                 # a swap has to be worth at least this many rating points
 PAIRS_PER_POSITION = 2
 MAX_TARGETS = 5
+SMALL_SAMPLE_MINUTES = 300   # a player with fewer minutes than this gets a "too early to trust" note
+RECENT_GAMEWEEKS = 4         # how many gameweeks of minutes to show for the players in a swap
 
 
 def by_score(players):
@@ -339,6 +377,9 @@ def swap_reasons(drop, claim):
     Why a claim rates higher than a drop, in a few words. Each rating is the sum
     of its breakdown pieces, so the gain splits into piece-by-piece differences.
 
+    availability: if the drop is injured, suspended or doubtful, what that is
+    worth to the claim ({"text", "points"}), or None. The page shows it on its
+    own line above the reasons, because it's about fitness, not performance.
     reasons: up to MAX_REASONS pieces in the claim's favour, biggest first.
     against: the biggest piece in the drop's favour, or None. Worth knowing:
     the drop might still be the better long-term player on that measure.
@@ -348,24 +389,69 @@ def swap_reasons(drop, claim):
 
     # the drop's injury doubt counts in the claim's favour. (The claim's own
     # doubt isn't repeated here; it already gets its "!" warning.)
+    availability = None
     doubt = round(claim["breakdown"]["avail"] - drop["breakdown"]["avail"], 1)
     if doubt > 0:
         status = "is out" if drop["chance"] == 0 else f"is {drop['chance']}% to play"
-        diffs.append((doubt, f"{drop['name']} {status}"))
+        availability = {"text": f"{drop['name']} {status}", "points": doubt}
 
     positives = sorted((d for d in diffs if d[0] > 0), reverse=True)
     reasons = [d for d in positives if d[0] >= MIN_REASON][:MAX_REASONS] or positives[:1]
     worst = min(diffs[:len(REASON_LABELS)])
     return {
+        "availability": availability,
         "reasons": [{"text": text, "points": pts} for pts, text in reasons],
         "against": ({"text": f"{drop['name']} has {worst[1]}", "points": worst[0]}
                     if worst[0] <= -MIN_REASON else None),
     }
 
 
-def waiver_targets(players, me):
+def small_samples(players):
+    """The players here with under SMALL_SAMPLE_MINUTES played: their numbers could still change fast."""
+    return [{"id": p["id"], "name": p["name"], "minutes": p["minutes"], "starts": p.get("starts", 0)}
+            for p in players if p.get("minutes", SMALL_SAMPLE_MINUTES) < SMALL_SAMPLE_MINUTES]
+
+
+def strength_after_swap(players, me, drop, claim):
+    """My best-eleven strength if I dropped `drop` and claimed `claim` (the real list is never changed)."""
+    swapped = [{**p, "owner": None} if p["id"] == drop["id"]
+               else {**p, "owner": me} if p["id"] == claim["id"] else p for p in players]
+    return squad_strength(swapped, me)["strength"]
+
+
+def recent_minutes(ids, current_gw):
+    """
+    Minutes played in each of the last RECENT_GAMEWEEKS gameweeks, oldest first, for
+    each player id: {"gws": [3, 4, 5, 6], "minutes": {id: [0, 26, 71, 71]}}. One request per
+    player, made a few at a time. A player whose history can't be fetched is left out.
+    """
+    gws = list(range(max(current_gw - RECENT_GAMEWEEKS + 1, 1), current_gw + 1))
+
+    def one(pid):
+        try:
+            history = get_json(f"{DRAFT}/element-summary/{pid}")["history"]
+        except (requests.RequestException, KeyError, TypeError, ValueError):
+            return pid, None
+        played = Counter()
+        for row in history:
+            played[row.get("event")] += num(row.get("minutes"))   # a double gameweek adds up
+        return pid, [int(played[gw]) for gw in gws]
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        found = dict(pool.map(one, set(ids)))
+    return {"gws": gws, "minutes": {pid: mins for pid, mins in found.items() if mins is not None}}
+
+
+def kept_ids(text):
+    """Turn '12,34' from a link into {12, 34}. Anything that isn't a number is ignored."""
+    return {int(s) for s in (text or "").split(",") if s.strip().isdigit()}
+
+
+def waiver_targets(players, me, keep=()):
     """
     Suggested drop/claim swaps for one manager, best gain first.
+    Players in `keep` are never suggested as a drop (the next weakest is used).
+    Each swap also says whether the drop is in my best eleven and what the swap does to its strength.
 
     Per position, my weakest players are paired one-for-one with the best free
     agents who are at least MIN_CHANCE_FOR_WAIVERS% likely to play. A doubtful
@@ -377,7 +463,7 @@ def waiver_targets(players, me):
 
     swaps = []
     for pos in FORMATION:
-        weakest_first = by_score(p for p in mine if p["pos"] == pos)[::-1]
+        weakest_first = by_score(p for p in mine if p["pos"] == pos and p["id"] not in keep)[::-1]
         best_first = by_score(p for p in free if p["pos"] == pos)
         for drop, claim in list(zip(weakest_first, best_first))[:PAIRS_PER_POSITION]:
             gain = round(claim["score"] - drop["score"], 1)
@@ -386,6 +472,7 @@ def waiver_targets(players, me):
 
     top = sorted(swaps, key=lambda s: s["gain"], reverse=True)[:MAX_TARGETS]
     claimed = {s["claim"]["id"] for s in top}
+    before = squad_strength(players, me)
 
     targets = []
     for s in top:
@@ -397,7 +484,11 @@ def waiver_targets(players, me):
             backup = fit[0]["id"] if fit else None
         targets.append({"drop": s["drop"]["id"], "claim": claim["id"],
                         "gain": s["gain"], "backup": backup,
-                        "why": swap_reasons(s["drop"], claim)})
+                        "why": swap_reasons(s["drop"], claim),
+                        "small_sample": small_samples([s["drop"], claim]),
+                        "drop_in_xi": s["drop"]["id"] in before["best_xi"],
+                        "xi_before": before["strength"],
+                        "xi_after": strength_after_swap(players, me, s["drop"], claim)})
     return targets
 
 
@@ -684,6 +775,8 @@ def load_league(league_id, view="week"):
             "total": int(num(el.get("total_points"))),
             "xgi90": s["xgi90"],
             "mins_share": s["mins_share"],
+            "minutes": int(num(el.get("minutes"))),
+            "starts": int(num(el.get("starts"))),
             "status": el.get("status", "a"),
             "chance": round(availability(el) * 100),  # the real chance for next week, in both views
             "news": el.get("news") or "",
@@ -757,7 +850,8 @@ def team(entry_id):
     """
     Look up which league a team plays in, then load that league with the team
     marked as "me". If the team is in more than one league, ?league=<id> picks one.
-    ?view=season rates everyone for the rest of the season instead of this week.
+    ?view=season rates everyone until the next break instead of over the next 5 gameweeks.
+    ?keep=12,34 protects those players from being suggested as a drop.
     """
     try:
         data, leagues = league_for_team(entry_id, request.args.get("league", type=int),
@@ -767,7 +861,12 @@ def team(entry_id):
 
     data["me"] = entry_id
     data["my_leagues"] = leagues
-    data["waiver_targets"] = waiver_targets(data["players"], entry_id)
+    keep = kept_ids(request.args.get("keep"))
+    data["keep"] = sorted(p["id"] for p in data["players"] if p["owner"] == entry_id and p["id"] in keep)
+    data["waiver_targets"] = waiver_targets(data["players"], entry_id, keep)
+    # the last few gameweeks of minutes for the players in the swaps (one request each)
+    in_swaps = [p for t in data["waiver_targets"] for p in (t["drop"], t["claim"])]
+    data["recent"] = recent_minutes(in_swaps, data["current_gw"])
     return jsonify(data)
 
 

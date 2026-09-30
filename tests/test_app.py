@@ -61,6 +61,9 @@ def fake_api(monkeypatch):
             return details
         if url.endswith("/element-status"):
             return status
+        if "element-summary" in url:
+            return {"history": [{"event": 4, "minutes": 26}, {"event": 5, "minutes": 71},
+                                {"event": 5, "minutes": 10}]}
         if "bootstrap" in url:
             return {"teams": TEAMS}
         if "fixtures" in url:
@@ -115,10 +118,21 @@ def test_scores_stay_between_0_and_100():
     assert all(0 <= s["score"] <= 100 for s in scores.values())
 
 
-def test_low_minutes_players_get_no_xgi_boost():
-    cameo = make_player(1, minutes=45, xgi="1.0")
+def test_low_minutes_players_get_a_smaller_xgi_boost():
+    cameo = make_player(1, minutes=45, xgi="1.0")          # 2.0 per 90, but only a quarter trusted
     scores = app.score_players([cameo], {}, current_gw=6)
-    assert scores[1]["xgi90"] == 0
+    assert scores[1]["xgi90"] == pytest.approx(0.5)
+
+
+def test_per_90_stats_have_no_cliff_at_180_minutes():
+    # same rate per 90 (xGI 0.333), different minutes
+    players = regulars() + [make_player(90, minutes=90, xgi="0.333"),
+                            make_player(179, minutes=179, xgi="0.662"),
+                            make_player(180, minutes=180, xgi="0.666")]
+    xgi = {i: app.score_players(players, {}, current_gw=6)[i]["breakdown"]["xgi"] for i in (90, 179, 180)}
+    assert xgi[179] == pytest.approx(xgi[180], rel=0.01)    # one minute short: hardly any difference
+    assert xgi[90] == pytest.approx(xgi[180] / 2, rel=0.02)  # half the minutes: half the trust
+    assert xgi[90] > 0
 
 
 def test_breakdown_adds_up_to_the_rating():
@@ -280,19 +294,40 @@ def test_return_dates_are_ignored_without_a_window_or_a_date():
     assert app.availability(injured("rubbish"), 75, WINDOW) == 0.0
 
 
+@pytest.mark.parametrize("news,year,expected", [
+    ("Hamstring injury - Expected back 10 Oct", 2026, "2026-10-10"),
+    ("Suspended until 17 Oct", 2026, "2026-10-17"),
+    ("Knee injury - Expected back 3 Jan", 2026, "2027-01-03"),      # a date before the news means next year
+])
+def test_return_date_is_read_from_the_news_text(news, year, expected):
+    el = {"news": news, "news_added": f"{year}-09-20T10:00:00Z"}
+    assert app.return_date(el).strftime("%Y-%m-%d") == expected
+
+
+@pytest.mark.parametrize("news", ["Back injury - Unknown return date", "75% chance of playing", "", None])
+def test_return_date_is_none_when_the_news_has_no_date(news):
+    assert app.return_date({"news": news, "news_added": "2026-09-20T10:00:00Z"}) is None
+
+
+def test_a_suspended_player_misses_only_the_ban():
+    banned = {"status": "s", "chance_of_playing_next_round": 0, "news": "Suspended until 8 Oct",
+              "news_added": "2026-10-01T10:00:00Z"}
+    assert app.availability(banned, None, WINDOW) == 0.75      # misses the first of four gameweeks
+
+
 def test_a_doubt_keeps_its_chance_even_with_a_return_date():
     doubt = {"status": "d", "chance_of_playing_next_round": 50, "news_return": "2026-10-12T00:00:00Z"}
     assert app.availability(doubt, 75, WINDOW) == 0.5
 
 
-def test_only_the_until_the_break_view_uses_return_dates():
+def test_both_views_use_return_dates():
     fit, hurt = make_player(1), make_player(2, status="i", chance=0)
     hurt["news_return"] = "2026-10-12T00:00:00Z"
     week = app.score_players([fit, hurt], {}, current_gw=6, window_deadlines=WINDOW)
     season = app.score_players([fit, hurt], {}, current_gw=6, view="season", window_deadlines=WINDOW)
-    assert week[2]["score"] == 0
-    assert season[2]["score"] == pytest.approx(season[1]["score"] * 0.5, abs=0.1)
-    assert sum(season[2]["breakdown"].values()) == pytest.approx(season[2]["score"], abs=0.5)
+    for scores in (week, season):
+        assert scores[2]["score"] == pytest.approx(scores[1]["score"] * 0.5, abs=0.1)
+        assert sum(scores[2]["breakdown"].values()) == pytest.approx(scores[2]["score"], abs=0.5)
 
 
 def defenders(**changes):
@@ -317,10 +352,14 @@ def test_season_view_uses_the_new_stats(changes, piece):
     assert season[99]["breakdown"][piece] < season[1]["breakdown"][piece]
 
 
-def test_new_stats_need_180_minutes():
-    cameo = make_player(1, pos=2, minutes=90, creativity="50.0", xgc="0.0", dc=40)
-    breakdown = app.score_players([cameo], {}, current_gw=6, view="season")[1]["breakdown"]
-    assert breakdown["crea"] == breakdown["cs"] == breakdown["dc"] == 0
+def test_new_stats_count_in_proportion_under_180_minutes():
+    # player 99 has the same rates per 90 as the regulars, but only 90 minutes
+    players = defenders(minutes=90, creativity="3.33", xgc="1.0", dc=5)
+    scores = app.score_players(players, {}, current_gw=6, view="season")
+    for piece in ("crea", "cs", "dc"):
+        cameo, regular = scores[99]["breakdown"][piece], scores[1]["breakdown"][piece]
+        assert cameo == pytest.approx(regular / 2, abs=0.3)
+        assert cameo > 0
 
 
 def test_forwards_ignore_the_defensive_pieces():
@@ -725,10 +764,110 @@ def test_reasons_use_the_season_pieces():
 
 
 @pytest.mark.parametrize("chance,text", [(50, "P1 is 50% to play"), (0, "P1 is out")])
-def test_drop_injury_doubt_is_a_reason(chance, text):
+def test_drop_injury_doubt_gets_its_own_line(chance, text):
     drop = rated(1, "DEF", 20, owner=100, chance=chance, breakdown=piece(form=40, avail=-20))
     claim = rated(2, "DEF", 40, breakdown=piece(form=40))
-    assert app.swap_reasons(drop, claim)["reasons"] == [{"text": text, "points": 20}]
+    why = app.swap_reasons(drop, claim)
+    assert why["availability"] == {"text": text, "points": 20}
+    assert why["reasons"] == []        # it isn't mixed in with the performance reasons
+
+
+def test_no_availability_line_when_the_drop_is_fit():
+    drop = rated(1, "DEF", 20, owner=100, breakdown=piece(form=20))
+    claim = rated(2, "DEF", 40, breakdown=piece(form=40))
+    assert app.swap_reasons(drop, claim)["availability"] is None
+
+
+def test_small_samples_name_players_on_few_minutes():
+    new = {**rated(1, "MID", 30), "minutes": 168, "starts": 2}
+    regular = {**rated(2, "MID", 60), "minutes": 500, "starts": 5}
+    assert app.small_samples([new, regular]) == [{"id": 1, "name": "P1", "minutes": 168, "starts": 2}]
+    assert app.small_samples([rated(3, "MID", 50)]) == []      # no minutes known: nothing to say
+
+
+def test_waiver_targets_flag_small_samples():
+    drop = {**rated(1, "DEF", 40, owner=100, breakdown=piece(form=40)), "minutes": 168, "starts": 2}
+    claim = {**rated(2, "DEF", 60, breakdown=piece(form=60)), "minutes": 236, "starts": 2}
+    target = app.waiver_targets([drop, claim], me=100)[0]
+    assert [p["id"] for p in target["small_sample"]] == [1, 2]
+
+
+def test_players_carry_minutes_and_starts(fake_api):
+    players = app.app.test_client().get("/api/team/100").get_json()["players"]
+    assert all("minutes" in p and "starts" in p for p in players)
+
+
+def test_kept_players_are_never_suggested_as_a_drop():
+    mine = [rated(1, "MID", 20, owner=100), rated(2, "MID", 30, owner=100)]
+    free = [rated(3, "MID", 60), rated(4, "MID", 55)]
+    assert [t["drop"] for t in app.waiver_targets(mine + free, me=100)] == [1, 2]
+    assert [t["drop"] for t in app.waiver_targets(mine + free, me=100, keep={1})] == [2]   # next weakest
+
+
+def test_kept_ids_ignore_rubbish():
+    assert app.kept_ids("12, 34,x,,5") == {12, 34, 5}
+    assert app.kept_ids(None) == set()
+
+
+def test_team_endpoint_keeps_only_my_players(fake_api):
+    client = app.app.test_client()
+    data = client.get("/api/team/100?keep=1,2,999").get_json()
+    assert data["keep"] == [1]                      # 2 isn't mine, 999 doesn't exist
+    assert all(t["drop"] != 1 for t in data["waiver_targets"])
+    assert client.get("/api/team/100").get_json()["keep"] == []
+
+
+def test_swap_says_whether_the_drop_starts_and_what_it_does_to_the_xi():
+    squad = full_squad()
+    squad[7]["score"] = 20                     # one midfielder is far weaker than the rest
+    claim = rated(99, "MID", 60, breakdown=piece(form=60))
+    target = app.waiver_targets(squad + [claim], me=100)[0]
+    assert target["drop"] == 8 and target["claim"] == 99
+    assert target["xi_before"] == pytest.approx(50, abs=0.1)
+    assert target["xi_after"] > target["xi_before"]
+
+
+def test_a_bench_swap_can_leave_the_best_eleven_unchanged():
+    squad = full_squad()
+    squad[11]["score"] = 10                    # the fifth midfielder, on the bench
+    claim = rated(99, "MID", 40, breakdown=piece(form=40))   # better than him, but not a starter
+    target = app.waiver_targets(squad + [claim], me=100)[0]
+    assert target["drop"] == squad[11]["id"]
+    assert target["drop_in_xi"] is False
+    assert target["xi_after"] == target["xi_before"]
+
+
+def test_strength_after_swap_leaves_the_real_list_alone():
+    squad = full_squad()
+    claim = rated(99, "MID", 90)
+    app.strength_after_swap(squad + [claim], 100, squad[7], claim)
+    assert squad[7]["owner"] == 100 and claim["owner"] is None
+
+
+def test_recent_minutes_cover_the_last_gameweeks(monkeypatch):
+    history = {"history": [{"event": 4, "minutes": 26}, {"event": 5, "minutes": 71},
+                           {"event": 5, "minutes": 10}]}     # GW5 was a double gameweek
+    monkeypatch.setattr(app, "get_json", lambda url: history)
+    recent = app.recent_minutes([7, 7, 8], current_gw=5)
+    assert recent["gws"] == [2, 3, 4, 5]
+    assert recent["minutes"] == {7: [0, 0, 26, 81], 8: [0, 0, 26, 81]}   # didn't play = 0, doubles add up
+
+
+def test_recent_minutes_skip_players_that_fail(monkeypatch):
+    def fake(url):
+        if url.endswith("/7"):
+            raise requests.ConnectionError("down")
+        return {"history": [{"event": 1, "minutes": 90}]}
+    monkeypatch.setattr(app, "get_json", fake)
+    assert app.recent_minutes([7, 8], current_gw=1)["minutes"] == {8: [90]}
+
+
+def test_team_endpoint_includes_recent_minutes(fake_api):
+    data = app.app.test_client().get("/api/team/100").get_json()
+    assert data["recent"]["gws"] == [3, 4, 5, 6]
+    assert set(data["recent"]["minutes"]) <= {p["id"] for p in data["players"]}
+    for t in data["waiver_targets"]:
+        assert data["recent"]["minutes"][str(t["claim"])] == [0, 26, 81, 0]
 
 
 def test_waiver_targets_come_with_reasons():
