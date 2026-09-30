@@ -115,10 +115,21 @@ def test_scores_stay_between_0_and_100():
     assert all(0 <= s["score"] <= 100 for s in scores.values())
 
 
-def test_low_minutes_players_get_no_xgi_boost():
-    cameo = make_player(1, minutes=45, xgi="1.0")
+def test_low_minutes_players_get_a_smaller_xgi_boost():
+    cameo = make_player(1, minutes=45, xgi="1.0")          # 2.0 per 90, but only a quarter trusted
     scores = app.score_players([cameo], {}, current_gw=6)
-    assert scores[1]["xgi90"] == 0
+    assert scores[1]["xgi90"] == pytest.approx(0.5)
+
+
+def test_per_90_stats_have_no_cliff_at_180_minutes():
+    # same rate per 90 (xGI 0.333), different minutes
+    players = regulars() + [make_player(90, minutes=90, xgi="0.333"),
+                            make_player(179, minutes=179, xgi="0.662"),
+                            make_player(180, minutes=180, xgi="0.666")]
+    xgi = {i: app.score_players(players, {}, current_gw=6)[i]["breakdown"]["xgi"] for i in (90, 179, 180)}
+    assert xgi[179] == pytest.approx(xgi[180], rel=0.01)    # one minute short: hardly any difference
+    assert xgi[90] == pytest.approx(xgi[180] / 2, rel=0.02)  # half the minutes: half the trust
+    assert xgi[90] > 0
 
 
 def test_breakdown_adds_up_to_the_rating():
@@ -338,10 +349,14 @@ def test_season_view_uses_the_new_stats(changes, piece):
     assert season[99]["breakdown"][piece] < season[1]["breakdown"][piece]
 
 
-def test_new_stats_need_180_minutes():
-    cameo = make_player(1, pos=2, minutes=90, creativity="50.0", xgc="0.0", dc=40)
-    breakdown = app.score_players([cameo], {}, current_gw=6, view="season")[1]["breakdown"]
-    assert breakdown["crea"] == breakdown["cs"] == breakdown["dc"] == 0
+def test_new_stats_count_in_proportion_under_180_minutes():
+    # player 99 has the same rates per 90 as the regulars, but only 90 minutes
+    players = defenders(minutes=90, creativity="3.33", xgc="1.0", dc=5)
+    scores = app.score_players(players, {}, current_gw=6, view="season")
+    for piece in ("crea", "cs", "dc"):
+        cameo, regular = scores[99]["breakdown"][piece], scores[1]["breakdown"][piece]
+        assert cameo == pytest.approx(regular / 2, abs=0.3)
+        assert cameo > 0
 
 
 def test_forwards_ignore_the_defensive_pieces():

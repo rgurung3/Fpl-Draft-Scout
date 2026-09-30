@@ -24,7 +24,7 @@ BREAK_GAP_DAYS = 10
 BREAK_MIN_WEEKS = 3
 BREAK_MAX_WEEKS = 10
 LAST_GW = 38
-MIN_MINUTES = 180       # players need this many minutes for xGI/90 and to set the rating scale
+MIN_MINUTES = 180       # per-90 stats count in full from this many minutes (in proportion below it)
 SCALE_PERCENTILE = 95   # each stat is measured against this percentile of regular players
 
 app = Flask(__name__, static_folder="static")
@@ -251,9 +251,18 @@ def stat_scales(raw, minutes):
     return {k: percentile([r[k] for r in pool], SCALE_PERCENTILE) or 1 for k in SCALED_STATS}
 
 
+def trust(mins):
+    """How far to trust a player's per-90 stats: 1 from MIN_MINUTES, shrinking smoothly to 0 below it."""
+    return min(max(mins, 0) / MIN_MINUTES, 1.0)
+
+
 def per90(total, mins):
-    """A season total per 90 minutes, or 0 for players under MIN_MINUTES (too few to trust)."""
-    return total / mins * 90 if mins >= MIN_MINUTES else 0.0
+    """
+    A season total per 90 minutes, shrunk in proportion to trust(mins). Under
+    MIN_MINUTES the figure is noisy, so it counts for less rather than being
+    thrown away (a cliff at 180 would give 0 to someone on 179).
+    """
+    return total / mins * 90 * trust(mins) if mins > 0 else 0.0
 
 
 def score_players(elements, fixtures_by_team, current_gw, view="week", window_deadlines=None):
@@ -268,14 +277,14 @@ def score_players(elements, fixtures_by_team, current_gw, view="week", window_de
     for el in elements:
         mins = num(el.get("minutes"))
         minutes.append(mins)
-        xgc90 = per90(num(el.get("expected_goals_conceded")), mins)
+        xgc90 = num(el.get("expected_goals_conceded")) / mins * 90 if mins > 0 else 0.0
         raw.append({
             "form": max(num(el.get("form")), 0),
             "ppg": max(num(el.get("points_per_game")), 0),
             "xgi90": per90(num(el.get("expected_goal_involvements")), mins),
             "mins": min(mins / (games_so_far * 90), 1.0),
             "fix": fixture_ease(fixtures_by_team.get(el["team"], [])),
-            "cs": max(CS_BASELINE - xgc90, 0) if mins >= MIN_MINUTES else 0.0,
+            "cs": max(CS_BASELINE - xgc90, 0) * trust(mins),
             "dc90": per90(num(el.get("defensive_contribution")), mins),
             "crea90": per90(num(el.get("creativity")), mins),
         })
