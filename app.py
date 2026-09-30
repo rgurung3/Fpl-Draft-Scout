@@ -410,6 +410,13 @@ def small_samples(players):
             for p in players if p.get("minutes", SMALL_SAMPLE_MINUTES) < SMALL_SAMPLE_MINUTES]
 
 
+def strength_after_swap(players, me, drop, claim):
+    """My best-eleven strength if I dropped `drop` and claimed `claim` (the real list is never changed)."""
+    swapped = [{**p, "owner": None} if p["id"] == drop["id"]
+               else {**p, "owner": me} if p["id"] == claim["id"] else p for p in players]
+    return squad_strength(swapped, me)["strength"]
+
+
 def kept_ids(text):
     """Turn '12,34' from a link into {12, 34}. Anything that isn't a number is ignored."""
     return {int(s) for s in (text or "").split(",") if s.strip().isdigit()}
@@ -419,6 +426,7 @@ def waiver_targets(players, me, keep=()):
     """
     Suggested drop/claim swaps for one manager, best gain first.
     Players in `keep` are never suggested as a drop (the next weakest is used).
+    Each swap also says whether the drop is in my best eleven and what the swap does to its strength.
 
     Per position, my weakest players are paired one-for-one with the best free
     agents who are at least MIN_CHANCE_FOR_WAIVERS% likely to play. A doubtful
@@ -439,6 +447,7 @@ def waiver_targets(players, me, keep=()):
 
     top = sorted(swaps, key=lambda s: s["gain"], reverse=True)[:MAX_TARGETS]
     claimed = {s["claim"]["id"] for s in top}
+    before = squad_strength(players, me)
 
     targets = []
     for s in top:
@@ -451,7 +460,10 @@ def waiver_targets(players, me, keep=()):
         targets.append({"drop": s["drop"]["id"], "claim": claim["id"],
                         "gain": s["gain"], "backup": backup,
                         "why": swap_reasons(s["drop"], claim),
-                        "small_sample": small_samples([s["drop"], claim])})
+                        "small_sample": small_samples([s["drop"], claim]),
+                        "drop_in_xi": s["drop"]["id"] in before["best_xi"],
+                        "xi_before": before["strength"],
+                        "xi_after": strength_after_swap(players, me, s["drop"], claim)})
     return targets
 
 

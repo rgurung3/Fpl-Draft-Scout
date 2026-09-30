@@ -455,6 +455,14 @@ function whyNote(s) {
   return fit + why + small;
 }
 
+// does the player you'd drop start for you, and what does the swap do to your best eleven?
+function xiNote(s, drop) {
+  const change = s.xi_after - s.xi_before;
+  const sign = change > 0 ? "+" : change < 0 ? "−" : "";
+  return `<div class="why xi"><strong>Your best eleven:</strong> ${esc(drop.name)} ${s.drop_in_xi ? "starts for you" : "is on your bench"}. `
+    + `Strength ${s.xi_before.toFixed(1)} → ${s.xi_after.toFixed(1)} (${sign}${Math.abs(change).toFixed(1)}).</div>`;
+}
+
 function renderSwaps() {
   if (!DATA.managers.some(m => m.entry_id === state.me)) {
     $("swaps").innerHTML = `<div class="empty">Team ${esc(state.me)} isn't listed in this league, so there's nothing to compare. Check the team ID and try again.</div>`;
@@ -482,6 +490,7 @@ function renderSwaps() {
         <div class="who"><div class="verb">Claim</div><div class="pname">${esc(claim.name)} <span class="pos">${claim.pos}, ${esc(claim.team)}</span></div>${fixStrip(claim)}</div></div>
       <span class="gain">+${s.gain.toFixed(0)}</span>
       ${whyNote(s)}
+      ${xiNote(s, drop)}
       ${riskNote(s)}
     </div>`;
   }).join("")

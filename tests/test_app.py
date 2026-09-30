@@ -814,6 +814,33 @@ def test_team_endpoint_keeps_only_my_players(fake_api):
     assert client.get("/api/team/100").get_json()["keep"] == []
 
 
+def test_swap_says_whether_the_drop_starts_and_what_it_does_to_the_xi():
+    squad = full_squad()
+    squad[7]["score"] = 20                     # one midfielder is far weaker than the rest
+    claim = rated(99, "MID", 60, breakdown=piece(form=60))
+    target = app.waiver_targets(squad + [claim], me=100)[0]
+    assert target["drop"] == 8 and target["claim"] == 99
+    assert target["xi_before"] == pytest.approx(50, abs=0.1)
+    assert target["xi_after"] > target["xi_before"]
+
+
+def test_a_bench_swap_can_leave_the_best_eleven_unchanged():
+    squad = full_squad()
+    squad[11]["score"] = 10                    # the fifth midfielder, on the bench
+    claim = rated(99, "MID", 40, breakdown=piece(form=40))   # better than him, but not a starter
+    target = app.waiver_targets(squad + [claim], me=100)[0]
+    assert target["drop"] == squad[11]["id"]
+    assert target["drop_in_xi"] is False
+    assert target["xi_after"] == target["xi_before"]
+
+
+def test_strength_after_swap_leaves_the_real_list_alone():
+    squad = full_squad()
+    claim = rated(99, "MID", 90)
+    app.strength_after_swap(squad + [claim], 100, squad[7], claim)
+    assert squad[7]["owner"] == 100 and claim["owner"] is None
+
+
 def test_waiver_targets_come_with_reasons():
     players = [rated(1, "DEF", 40, owner=100, breakdown=piece(form=20, fix=20)),
                rated(2, "DEF", 60, breakdown=piece(form=20, fix=40))]
