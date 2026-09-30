@@ -3,7 +3,7 @@
 A small helper app for FPL Draft leagues. Enter your team ID and it finds your
 league, rates every player, and shows you:
 
-- **Waiver targets**: free agents who rate higher than your weakest player in the same position, each with a one-line reason (for example "easier fixtures +14, better form +12. But Porro has more attacking threat −6"). Players with a 75% chance of playing are included, with a warning and a fully fit backup
+- **Waiver targets**: free agents who rate higher than your weakest player in the same position, each with a one-line reason (for example "easier fixtures +14, better form +12. But Porro has more attacking threat −6"). Each swap also says if the player you'd drop starts for you, what it does to your best eleven, how many minutes both players have played lately, and warns when a player has few minutes so far. A "Keep" button protects a player from being suggested as a drop (it's saved in your link). Players with a 75% chance of playing are included, with a warning and a fully fit backup
 - **Trade analyzer**: pick players from your squad and another manager's, and see how the trade changes both teams' best eleven, and whether it's a fair offer they might accept
 - **Free agents**: a sortable, filterable table of everyone unowned in your league, with both ratings (next 5 and until the break) and upcoming fixtures. It shows the top 15 at first, with a button for more
 - **League race** (head-to-head leagues): a chart of each manager's league points climbing from 0 after every gameweek (a dot on your line for each week), and a grid of everyone's weekly scores shaded against the league average, with each week's W, D or L
@@ -129,7 +129,7 @@ injured star rates low even if he's back soon. Use the verdict as a guide.
 Each player gets a 0-100 rating from recent form, points per game, attacking
 threat (xGI per 90), share of minutes played, and fixture difficulty over the
 next 3 gameweeks. Each stat is measured against the 95th percentile of
-players with at least 180 minutes and capped there, so one standout week
+players with at least 180 minutes and capped there (players with fewer minutes count in proportion, not as zero), so one standout week
 doesn't skew everyone else's rating. Weights differ by position (fixtures matter more for
 keepers and defenders, xGI matters more for forwards). The total is then
 scaled down if the player is flagged as doubtful or injured.

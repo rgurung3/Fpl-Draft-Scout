@@ -20,7 +20,9 @@
 - Free agents table shows the top 15 with a "Show more" button (up to 60); search and position filters look through everyone
 - Waiver swaps show a "Fitness:" line above the "Why:" line when the dropped player is injured, suspended or doubtful (swap_reasons returns it as "availability", separate from the performance reasons)
 - Return dates now work on real data: the feed's news_return is empty, so return_date() reads "Expected back 10 Oct" / "Suspended until 17 Oct" from the news text (year = next such date after news_added). Both views use them, so a one-match ban no longer rates 0 over five gameweeks
-- Tests (pytest, 127 passing) and CI (GitHub Actions); ruff clean
+- Smarter swaps: a "Small sample" line when a player has under 300 minutes, a Keep button (protects a player from being suggested as a drop, saved in the link as &keep=), a "Your best eleven" line (does the drop start, and strength before/after), and a "Minutes, GW2-5" line with each player's last four gameweeks
+- Per-90 stats no longer have a cliff at 180 minutes: they count in proportion below it (Barcola on 168 minutes had xGI counted as 0)
+- Tests (pytest, 140 passing) and CI (GitHub Actions); ruff clean
 
 ## How it works
 - app.py fetches data from the FPL Draft site (team → league lookup, league details, who owns whom) and the classic FPL site (fixtures + difficulty), then rates every player 0–100.
@@ -34,7 +36,7 @@
 - On Render: build command `pip install -r requirements.txt`, start command `gunicorn app:app --workers 1 --threads 4 --timeout 60`. Render picks the Python version from .python-version (3.12). Deploy steps are in README.md.
 
 ## How the rating works
-- Five stats per player: form, points per game, xGI per 90 (0 if under 180 minutes), minutes share, fixture ease over the next 3 GWs (sum of 6 - difficulty; doubles count twice, blanks count zero).
+- Five stats per player: form, points per game, xGI per 90 (in proportion to minutes/180 if under 180 minutes), minutes share, fixture ease over the next 3 GWs (sum of 6 - difficulty; doubles count twice, blanks count zero).
 - Each stat is divided by its 95th percentile (SCALE_PERCENTILE) among players with 180+ minutes (MIN_MINUTES) and capped at 1.0. Early in the season, before anyone has 180 minutes, the scale uses everyone who has played.
 - Then the stats are combined with position weights (WEIGHTS), times 100, times availability (chance of playing, or 0 if injured/suspended).
 - score_players also returns a breakdown: rating points per piece (form, ppg, xgi, mins, fix = 100 x weight x stat) plus avail (what an injury doubt takes off, 0 or less). The pieces add up to the rating, give or take rounding. Every player on the page carries it.
@@ -44,7 +46,7 @@
 - break_window(deadlines, next_gw): the first gameweek g from next_gw where the deadline of g+1 is more than BREAK_GAP_DAYS (10) after g's means a break after g, so the window is next_gw..g. Kept between BREAK_MIN_WEEKS (3) and BREAK_MAX_WEEKS (10), never past GW38; SEASON_LOOKAHEAD (8) if no break is found. Deadlines come from boot events data (gameweek_deadlines). Checked on the real calendar: from GW6 the window is GW6-10 (15 days between the GW10 and GW11 deadlines).
 - The league data also has "windows": {view: {from, to}}, which the page uses for the button labels.
 - Weights are dicts per position, {piece: weight}, each adding up to 1 (a test checks this). Missing pieces count as 0.
-- New pieces (season only): cs = CS_BASELINE (2.0) minus expected goals conceded per 90, so lower xGC = better; dc = defensive_contribution per 90; crea = creativity per 90. All need MIN_MINUTES, like xGI, and use the same 95th-percentile scale.
+- New pieces (season only): cs = CS_BASELINE (2.0) minus expected goals conceded per 90, so lower xGC = better; dc = defensive_contribution per 90; crea = creativity per 90. All count in proportion under MIN_MINUTES, like xGI, and use the same 95th-percentile scale.
 - Season weights: form drops to 0.15 everywhere (Next 5 has 0.30), and the freed weight goes to fixtures, xGI and clean sheets. GKP adds cs; DEF adds cs, dc and crea (creativity for attacking full backs); MID adds dc; FWD leans more on xGI and fixtures. All first guesses. Fixtures get a bit less weight over the longer window.
 - Injuries in the season view: chance >= SEASON_FULL_FROM (75) counts as fully fit; 50% and below are unchanged (50% halves the rating). A player at 0% who has a news_return date counts as available for the share of the window's gameweeks whose deadline is on or after that date (availability() with window_deadlines); no date, or a doubt above 0%, works as before. Waiver suggestions still use the real next-week chance, so an injured player isn't suggested. The player's "chance" field (used for the "!" warning and waiver rules) is always the real next-week chance.
 - load_league(league_id, view) rates everyone in both views: week_score and season_score on every player; score, breakdown and fixtures follow the chosen view. Unknown views fall back to "week". All three routes accept ?view=season.
@@ -66,6 +68,8 @@
 - A doubtful claim gets a "!" warning and a backup: the best fully fit free agent in the same position that isn't already one of the suggestions.
 - A pair only shows if the free agent rates at least 3 points higher (MIN_GAIN).
 - Top 5 pairs by gain are shown (MAX_TARGETS).
+- Keep: ?keep=12,34 (set by the Keep button) removes those players from the drop candidates, so the next weakest is paired instead. Only my own players count. They still count in squad strength.
+- Each swap also carries: small_sample (drop/claim with under SMALL_SAMPLE_MINUTES = 300), drop_in_xi plus xi_before/xi_after (best-eleven strength with and without the swap, from strength_after_swap), and the route adds "recent": minutes in the last RECENT_GAMEWEEKS (4) gameweeks for every player in a swap, from /element-summary/<id> (one request each, 8 at a time, cached 10 minutes; a failed request just leaves that player out). A real league load went from about 1 to 5 seconds uncached.
 - Each pair has a "why" (swap_reasons): claim breakdown minus drop breakdown, piece by piece. Up to 3 reasons (MAX_REASONS) of at least 1 point (MIN_REASON), biggest first; if none are that big, the single biggest. The drop's injury doubt counts as a reason ("Porro is 50% to play"); the claim's own doubt isn't repeated because it has the "!" row. "against" = the biggest piece in the drop's favour ("But Porro has more attacking threat -6").
 - League squads = average rating of each team's best legal eleven: take the minimum at each position (1 GKP, 3 DEF, 2 MID, 1 FWD), then fill the last 4 places with the best players left without breaking a maximum (1 GKP, 5 DEF, 5 MID, 3 FWD). My squad is opened and highlighted, with formation and bench.
 
@@ -119,6 +123,8 @@ Idea for later: trade finder. "I want Joao Pedro and I'll give Fernandes": sugge
 - Ratings are higher overall than before the percentile change, so MIN_GAIN = 3 may need tuning after watching real suggestions for a week or two.
 - The backup for a doubtful claim is taken from the wire, so someone else may claim it first. Could also suggest a bench player as the fallback.
 - Doubtful players below 75% (50%, 25%) are never suggested, even if they'd still rate higher.
+- Swaps pick the weakest player per position by rating only. Upside (a player who might jump later) isn't measured; the Keep button is the manual answer. Ideas: a watch list of free agents whose minutes are rising, last season's points per game (doesn't help new arrivals).
+- The recent-minutes line shows 0 for a gameweek with no appearance, which can't tell a blank gameweek from being left out.
 - Trade analyzer ignores depth: bench players don't count, so injury cover has no value.
 - Trade verdicts use short-term ratings (form, next 3 GWs), but a trade lasts all season. An injured star rates near 0 now even if he's back in two weeks. A longer fixture window just for trades could help.
 - TRADE_MIN_GAIN and FAIR_MARGIN (both 0.5) are first guesses; tune after trying real trades.
