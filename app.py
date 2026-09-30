@@ -676,6 +676,156 @@ def league_history(details):
     return {"gws": gws, "average": average, "managers": managers}
 
 
+# ---------------------------------------------------------------- league banter (head-to-head)
+
+FACT_COUNT = 5           # how many banter facts we keep (the page shows the first couple at first)
+STREAK_MIN = 3           # a winning or losing run has to be this long to be worth a mention
+LUCK_MIN_GAP = 2         # table place vs points-scored place: this many places apart counts as unlucky
+MIN_BATTLE_MANAGERS = 4  # the battle cards need this many managers (and one more for the bottom one)
+
+
+def ordinal(n):
+    """1 -> '1st', 2 -> '2nd', 11 -> '11th'."""
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def league_banter(details):
+    """
+    Fun facts and match-ups for a head-to-head league, worked out from the league
+    details (matches and table) with no extra requests. Returns None if no gameweek
+    has finished yet or the league isn't head-to-head, like league_history.
+
+    hot_match: the next gameweek's match with the most on it (the best-placed pair of
+      managers who face each other), or None if there are no matches left. Its "line" is
+      the short caption for the card; battles have one too.
+    battles: "Battle for 3rd" and "Wooden spoon watch": two managers who sit next to each
+      other in the table, how far apart they are, and whether they meet again.
+    facts: up to FACT_COUNT one-sentence facts, best first, each {kind, text}.
+    Tone is mild teasing; it's all worked out from the numbers, not written by AI.
+    """
+    history = league_history(details)
+    if history is None:
+        return None
+    entries = [e for e in details.get("league_entries", []) if e.get("entry_id")]
+    entry_of = {e.get("id"): e["entry_id"] for e in entries}
+    who = {e["entry_id"]: {"entry_id": e["entry_id"], "team": e.get("entry_name") or f'Team {e["entry_id"]}',
+                           "manager": (f'{e.get("player_first_name", "")} '
+                                       f'{e.get("player_last_name", "")}').strip()}
+           for e in entries}
+    order = [m["entry_id"] for m in history["managers"]]
+    table = {m["entry_id"]: (i + 1, m["league_points"][-1], m["scored"])
+             for i, m in enumerate(history["managers"])}  # team -> (place, league points, points scored)
+
+    def name(entry):
+        return who[entry]["team"]
+
+    def person(entry):
+        return {**who[entry], "position": table[entry][0], "league_points": table[entry][1]}
+
+    played, coming = [], []
+    for m in details.get("matches", []):
+        a, b = entry_of.get(m.get("league_entry_1")), entry_of.get(m.get("league_entry_2"))
+        if a not in table or b not in table or not m.get("event"):
+            continue
+        if m.get("finished"):
+            pa, pb = m.get("league_entry_1_points"), m.get("league_entry_2_points")
+            if pa is not None and pb is not None:
+                played.append({"gw": m["event"], "a": a, "b": b, "pa": pa, "pb": pb})
+        else:
+            coming.append({"gw": m["event"], "a": a, "b": b})
+    coming.sort(key=lambda m: m["gw"])
+
+    # the next gameweek's match with the most on it: the best-placed pair, then the closest together
+    hot = None
+    if coming:
+        week = [m for m in coming if m["gw"] == coming[0]["gw"]]
+        m = min(week, key=lambda m: (table[m["a"]][0] + table[m["b"]][0],
+                                     abs(table[m["a"]][1] - table[m["b"]][1])))
+        gap = abs(table[m["a"]][1] - table[m["b"]][1])
+        hot = {"gw": m["gw"], "a": person(m["a"]), "b": person(m["b"]), "gap": gap,
+               "line": f"Only {gap} league points between them." if gap else "Level on league points."}
+
+    pairs = []
+    if len(order) >= MIN_BATTLE_MANAGERS:
+        pairs.append(("Battle for 3rd", 3))
+    if len(order) > MIN_BATTLE_MANAGERS:
+        pairs.append(("Wooden spoon watch", len(order) - 1))
+    battles = []
+    for title, upper in pairs:
+        a, b = order[upper - 1], order[upper]
+        gap = table[a][1] - table[b][1]
+        meet = next((m["gw"] for m in coming if {m["a"], m["b"]} == {a, b}), None)
+        apart = f"{gap} {'point' if gap == 1 else 'points'} apart." if gap else "Level on points."
+        battles.append({"title": title, "a": person(a), "b": person(b), "gap": gap, "meet_gw": meet,
+                        "line": apart + (f" They meet in GW{meet}." if meet else "")})
+
+    facts = []
+
+    # luck: who sits furthest below where their points scored say they should be
+    by_scored = sorted(order, key=lambda e: table[e][2], reverse=True)
+    unlucky = max(order, key=lambda e: table[e][0] - (by_scored.index(e) + 1))
+    scored_place = by_scored.index(unlucky) + 1
+    if table[unlucky][0] - scored_place >= LUCK_MIN_GAP:
+        facts.append({"kind": "luck", "text": (
+            f"{name(unlucky)} are {ordinal(scored_place)} for points scored but only "
+            f"{ordinal(table[unlucky][0])} in the table. The fixture list has not been kind.")})
+
+    # the highest score that still lost
+    losses = ([(m["pa"], m["pb"], m["a"], m["b"], m["gw"]) for m in played if m["pa"] < m["pb"]]
+              + [(m["pb"], m["pa"], m["b"], m["a"], m["gw"]) for m in played if m["pb"] < m["pa"]])
+    if losses:
+        mine, theirs, loser, winner, gw = max(losses)
+        facts.append({"kind": "harsh", "text": (
+            f"{name(loser)} scored {mine} in GW{gw} and still lost to {name(winner)} ({theirs}). Harsh.")})
+
+    # the longest winning or losing run that's still going
+    runs = []
+    for m in history["managers"]:
+        for result in ("W", "L"):
+            n = 0
+            for r in reversed(m["results"]):
+                if r != result:
+                    break
+                n += 1
+            if n >= STREAK_MIN:
+                runs.append((n, result, m["entry_id"]))
+    if runs:
+        n, result, entry = max(runs)
+        facts.append({"kind": "streak", "text": (
+            f"{name(entry)} have won {n} in a row. Somebody stop them." if result == "W"
+            else f"{name(entry)} have lost {n} in a row. A hug may be needed.")})
+
+    decided = [m for m in played if m["pa"] != m["pb"]]
+    if decided:
+        def outcome(m):
+            """(winner, loser, winning score, losing score)"""
+            return ((m["a"], m["b"], m["pa"], m["pb"]) if m["pa"] > m["pb"]
+                    else (m["b"], m["a"], m["pb"], m["pa"]))
+
+        big = max(decided, key=lambda m: abs(m["pa"] - m["pb"]))
+        win, lose, top, bottom = outcome(big)
+        facts.append({"kind": "thrashing", "text": (
+            f"Biggest beating so far: {name(win)} {top}-{bottom} {name(lose)} in GW{big['gw']}, "
+            f"a {top - bottom}-point gap. Handshake optional.")})
+        near = min(decided, key=lambda m: abs(m["pa"] - m["pb"]))
+        win, lose, top, bottom = outcome(near)
+        facts.append({"kind": "closest", "text": (
+            f"Closest match so far: {name(win)} edged {name(lose)} {top}-{bottom} in GW{near['gw']}.")})
+
+    scores = [(pts, entry, m["gw"]) for m in played
+              for pts, entry in ((m["pa"], m["a"]), (m["pb"], m["b"]))]
+    if scores:
+        pts, entry, gw = min(scores)
+        facts.append({"kind": "low", "text": (
+            f"Lowest score so far: {name(entry)} managed {pts} in GW{gw}. "
+            "Everyone has a bad week, but this was a bit worse.")})
+        pts, entry, gw = max(scores)
+        facts.append({"kind": "high", "text": f"Best week so far: {name(entry)} put up {pts} in GW{gw}."})
+
+    return {"gws": history["gws"], "hot_match": hot, "battles": battles, "facts": facts[:FACT_COUNT]}
+
+
 # ---------------------------------------------------------------- talking to FPL
 
 LEAGUE_NOT_FOUND = "No Draft league found with that ID. Check the number in your league's URL."
@@ -806,6 +956,18 @@ def load_league(league_id, view="week"):
     }
 
 
+def find_league(entry_id, wanted=None):
+    """
+    Which league does this team play in? If it's in more than one, `wanted` picks one
+    (ignored unless it's one of the team's leagues). Returns (the league ID, all the team's league IDs).
+    """
+    entry = fetch(f"{DRAFT}/entry/{entry_id}/public", TEAM_NOT_FOUND).get("entry") or {}
+    leagues = entry.get("league_set") or []
+    if not leagues:
+        raise FplError(NO_LEAGUE_YET, 400)
+    return (wanted if wanted in leagues else leagues[0]), leagues
+
+
 def league_for_team(entry_id, wanted=None, view="week"):
     """
     Find the league a team plays in and load it. If the team is in more than one
@@ -813,11 +975,8 @@ def league_for_team(entry_id, wanted=None, view="week"):
     `view` is "week" or "season" (see VIEWS).
     Returns (the league data, the team's league IDs).
     """
-    entry = fetch(f"{DRAFT}/entry/{entry_id}/public", TEAM_NOT_FOUND).get("entry") or {}
-    leagues = entry.get("league_set") or []
-    if not leagues:
-        raise FplError(NO_LEAGUE_YET, 400)
-    return load_league(wanted if wanted in leagues else leagues[0], view), leagues
+    league_id, leagues = find_league(entry_id, wanted)
+    return load_league(league_id, view), leagues
 
 
 # ---------------------------------------------------------------- routes
@@ -825,6 +984,16 @@ def league_for_team(entry_id, wanted=None, view="week"):
 @app.route("/")
 def index():
     return send_from_directory(app.static_folder, "index.html")
+
+
+@app.route("/trade")
+def trade_page():
+    return send_from_directory(app.static_folder, "trade.html")
+
+
+@app.route("/banter")
+def banter_page():
+    return send_from_directory(app.static_folder, "banter.html")
 
 
 @app.route("/health")
@@ -845,6 +1014,18 @@ def league(league_id):
         return jsonify({"error": e.message}), e.status
 
 
+@app.route("/api/league/<int:league_id>/banter")
+def banter(league_id):
+    """Fun facts, the hot match and the table battles for a head-to-head league (see league_banter)."""
+    try:
+        details = fetch(f"{DRAFT}/league/{league_id}/details", LEAGUE_NOT_FOUND)
+    except FplError as e:
+        return jsonify({"error": e.message}), e.status
+    return jsonify({"league_id": league_id,
+                    "league_name": details.get("league", {}).get("name", f"League {league_id}"),
+                    "banter": league_banter(details)})
+
+
 @app.route("/api/team/<int:entry_id>")
 def team(entry_id):
     """
@@ -852,6 +1033,7 @@ def team(entry_id):
     marked as "me". If the team is in more than one league, ?league=<id> picks one.
     ?view=season rates everyone until the next break instead of over the next 5 gameweeks.
     ?keep=12,34 protects those players from being suggested as a drop.
+    ?swaps=0 skips the waiver suggestions (and the extra requests they need).
     """
     try:
         data, leagues = league_for_team(entry_id, request.args.get("league", type=int),
@@ -861,6 +1043,8 @@ def team(entry_id):
 
     data["me"] = entry_id
     data["my_leagues"] = leagues
+    if request.args.get("swaps") == "0":   # the trade page only needs the players and managers
+        return jsonify(data)
     keep = kept_ids(request.args.get("keep"))
     data["keep"] = sorted(p["id"] for p in data["players"] if p["owner"] == entry_id and p["id"] in keep)
     data["waiver_targets"] = waiver_targets(data["players"], entry_id, keep)

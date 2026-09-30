@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trade analyzer - Draft Scout</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/common.css">
+<style>
+  .back { display: inline-block; margin-bottom: 8px; color: var(--pitch); font-weight: 600; text-decoration: none; }
+  .pos { color: var(--muted); font-size: .85rem; }
+  .tradecols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 14px; }
+  .tradecols fieldset { margin: 0; min-width: 0; padding: 6px 14px 8px; border: 1px solid var(--line);
+    border-radius: 4px; background: var(--surface); }
+  .tradecols legend { font-family: var(--display); font-weight: 600; font-size: 1.25rem; padding: 0 4px; }
+  .pick { display: grid; grid-template-columns: auto 1fr auto auto; gap: 10px; align-items: center;
+    padding: 6px 0; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .pick:last-child { border-bottom: 0; }
+  .pick:has(input:checked) .pname { color: var(--pitch); }
+  .pick .pname { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pick .pts { color: var(--muted); font-size: .85rem; font-variant-numeric: tabular-nums; }
+  .pick .score { font-size: 1.25rem; }
+  .verdict { font-weight: 600; background: var(--surface); border: 1px solid var(--line);
+    border-left: 5px solid var(--muted); border-radius: 4px; padding: 12px 16px; margin: 18px 0 10px; }
+  .verdict.good_and_fair { border-left-color: var(--pitch); }
+  .verdict.good_but_unfair { border-left-color: var(--amber); }
+  .verdict.worse { border-left-color: var(--rival); }
+  .tsides { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .tside { background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 12px 16px;
+    display: grid; gap: 4px; align-content: start; }
+  .tside .who { font-weight: 600; }
+  .tside .muted { color: var(--muted); font-size: .9rem; }
+  .tchange { display: flex; align-items: baseline; gap: 8px; }
+  .tchange .arrow { color: var(--muted); }
+  .delta { font-family: var(--display); font-weight: 700; font-size: 1.3rem; color: var(--muted); }
+  .delta.up { color: var(--pitch); } .delta.down { color: var(--rival); }
+  .shifts { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; }
+  .shift { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .shift.up { color: var(--pitch); } .shift.down { color: var(--rival); }
+  #tradeResult .error { margin: 16px 0 0; }
+  @media (max-width: 640px) { .tradecols, .tsides { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <header class="top">
+    <div>
+      <a class="back" id="backLink" href="/">← Back to Draft Scout</a>
+      <h1>Trade analyzer</h1>
+      <p class="sub" style="margin:4px 0 0" id="leagueLine">Loading your league…</p>
+    </div>
+  </header>
+
+  <div id="error" class="error hidden" role="alert"></div>
+
+  <div id="app" class="hidden">
+    <div class="leaguebar">
+      <div class="tabs viewtabs" id="viewTabs" role="group" aria-label="Rate players for">
+        <button type="button" data-view="week" aria-pressed="true">Next 5</button>
+        <button type="button" data-view="season" aria-pressed="false">Until the break</button>
+      </div>
+    </div>
+    <p class="sub">Pick a manager, tick the players going each way, and see how the trade changes both teams' best eleven, including which positions get stronger or weaker. Both sides need the same positions, because every Draft squad keeps 2 GKP, 5 DEF, 5 MID and 3 FWD.</p>
+    <div id="tradeEmpty" class="empty hidden"></div>
+    <div id="tradeArea">
+      <div class="controls">
+        <label>Trade with <select id="tradeWith"></select></label>
+      </div>
+      <div class="tradecols" id="tradeCols">
+        <fieldset><legend>You give</legend><div id="giveList"></div></fieldset>
+        <fieldset><legend>You get</legend><div id="getList"></div></fieldset>
+      </div>
+      <button class="btn" id="tradeBtn" type="button">Analyze trade</button>
+      <div id="tradeResult" aria-live="polite"></div>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let DATA = null;
+let state = { me: null, view: "week", tradeWith: null, give: new Set(), get: new Set() };
+const POS_ORDER = { GKP: 0, DEF: 1, MID: 2, FWD: 3 };
+
+function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+function recall(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+const player = id => DATA.players.find(p => p.id === id);
+
+// the page is opened as /trade?team=276914&league=...&view=season&with=<their team ID>
+const fromLink = new URLSearchParams(location.search);
+const teamId = fromLink.get("team") || recall("teamId");
+const leagueId = fromLink.get("league");
+const wanted = /^[0-9]+$/.test(fromLink.get("with") || "") ? Number(fromLink.get("with")) : null;
+state.view = fromLink.get("view") === "season" ? "season" : "week";
+
+async function loadTeam(view = state.view) {
+  $("error").classList.add("hidden");
+  const query = new URLSearchParams({ view, swaps: "0" });   // no waiver suggestions needed here
+  if (/^[0-9]+$/.test(leagueId || "")) query.set("league", leagueId);
+  try {
+    let r;
+    try { r = await fetch(`/api/team/${teamId}?${query}`); }
+    catch (e) { throw new Error("Can't reach Draft Scout. Check your connection and try again."); }
+    let j = null;
+    try { j = await r.json(); } catch (e) { /* not JSON, e.g. a crash page */ }
+    if (!r.ok || !j) throw new Error(j?.error || "Draft Scout hit an unexpected error. Try again in a moment.");
+    DATA = j;
+    state.me = j.me; state.view = j.view;
+    // keep the address bar shareable, with the league and view that are on screen
+    const params = new URLSearchParams({ team: teamId, league: j.league_id, view: j.view });
+    history.replaceState(null, "", "?" + params);
+    const back = new URLSearchParams({ team: teamId, league: j.league_id, view: j.view });
+    $("backLink").href = "/?" + back;
+    render();
+  } catch (e) {
+    $("error").textContent = e.message; $("error").classList.remove("hidden");
+    $("leagueLine").textContent = "";
+  }
+}
+
+function render() {
+  $("app").classList.remove("hidden");
+  $("leagueLine").textContent = DATA.league_name;
+  const win = DATA.windows;
+  document.querySelector('#viewTabs [data-view="week"]').textContent = `Next ${win.week.to - win.week.from + 1}`;
+  document.querySelector('#viewTabs [data-view="season"]').textContent =
+    `Until the break (${win.season.from === win.season.to ? "GW" + win.season.from : `GW${win.season.from}–${win.season.to}`})`;
+  document.querySelectorAll("#viewTabs button").forEach(b => b.setAttribute("aria-pressed", b.dataset.view === state.view));
+  resetTrade();
+  renderTrade();
+}
+
+// a new league or view was loaded: start with nothing ticked and the wanted (or first other) manager picked
+function resetTrade() {
+  const others = DATA.managers.filter(m => m.entry_id !== state.me);
+  const chosen = others.find(m => m.entry_id === (state.tradeWith ?? wanted)) || others[0];
+  state.tradeWith = chosen ? chosen.entry_id : null;
+  state.give = new Set(); state.get = new Set();
+}
+
+// one manager's squad as tickable rows, keeper first, best first within each position
+function pickList(owner, chosen, side) {
+  const squad = DATA.players.filter(p => p.owner === owner)
+    .sort((a, b) => POS_ORDER[a.pos] - POS_ORDER[b.pos] || b.score - a.score);
+  return squad.map(p => `
+    <label class="pick">
+      <input type="checkbox" data-side="${side}" value="${p.id}" ${chosen.has(p.id) ? "checked" : ""}>
+      <span class="pname">${esc(p.name)} <span class="pos">${p.pos}, ${esc(p.team)}</span></span>
+      <span class="pts">${p.total} pts</span>
+      <span class="score">${p.score.toFixed(0)}</span>
+    </label>`).join("") || "<p>No players yet.</p>";
+}
+
+function renderTrade() {
+  const inLeague = DATA.managers.some(m => m.entry_id === state.me);
+  const others = DATA.managers.filter(m => m.entry_id !== state.me);
+  const empty = !inLeague ? `Team ${state.me} isn't listed in this league, so there's no one to trade with.`
+    : !DATA.players.some(p => p.owner === state.me) ? "Trades open once your squad is drafted."
+    : !others.length ? "There's no one else in this league to trade with yet." : "";
+  $("tradeEmpty").textContent = empty;
+  $("tradeEmpty").classList.toggle("hidden", !empty);
+  $("tradeArea").classList.toggle("hidden", !!empty);
+  if (empty) return;
+
+  $("tradeWith").innerHTML = others.map(m =>
+    `<option value="${m.entry_id}" ${m.entry_id === state.tradeWith ? "selected" : ""}>${esc(m.team_name)} (${esc(m.manager)})</option>`).join("");
+  $("giveList").innerHTML = pickList(state.me, state.give, "give");
+  $("getList").innerHTML = pickList(state.tradeWith, state.get, "get");
+  $("tradeResult").innerHTML = "";
+}
+
+// one side of the result: strength before and after, formation, who moves in or out of the eleven
+function tradeSide(side, title) {
+  const names = ids => ids.map(id => esc(player(id)?.name ?? `Player ${id}`)).join(", ");
+  const sign = side.change > 0 ? "+" : side.change < 0 ? "−" : "";
+  const cls = side.change > 0 ? "up" : side.change < 0 ? "down" : "";
+  const shape = side.formation_before === side.formation_after
+    ? `Formation stays ${esc(side.formation_after)}`
+    : `Formation changes from ${esc(side.formation_before)} to ${esc(side.formation_after)}`;
+  // rating points each position gains or loses in the best eleven, in squad order (GKP first)
+  const shifts = Object.entries(side.by_position)
+    .filter(([, v]) => Math.round(v) !== 0)
+    .sort(([a], [b]) => POS_ORDER[a] - POS_ORDER[b])
+    .map(([pos, v]) => `<span class="shift ${v > 0 ? "up" : "down"}">${pos} ${v > 0 ? "+" : "−"}${Math.abs(v).toFixed(0)}</span>`);
+  const moves = (side.joins_xi.length ? `<div>Into the best eleven: ${names(side.joins_xi)}</div>` : "")
+    + (side.leaves_xi.length ? `<div>Out of the best eleven: ${names(side.leaves_xi)}</div>` : "");
+  return `
+    <div class="tside">
+      <div class="who">${esc(title)}</div>
+      <div class="tchange">
+        <span class="score">${side.before.toFixed(1)}</span><span class="arrow" aria-label="becomes">›</span>
+        <span class="score">${side.after.toFixed(1)}</span>
+        <span class="delta ${cls}">${sign}${Math.abs(side.change).toFixed(1)}</span>
+      </div>
+      <div class="muted">${shape}</div>
+      ${shifts.length ? `<div class="shifts"><span class="muted">Rating points by position</span>${shifts.join("")}</div>` : ""}
+      ${moves || "<div>Best eleven unchanged</div>"}
+    </div>`;
+}
+
+async function analyzeTrade() {
+  const btn = $("tradeBtn");
+  btn.disabled = true; btn.textContent = "Analyzing…";
+  const params = new URLSearchParams({ "with": state.tradeWith, give: [...state.give].join(","),
+    get: [...state.get].join(","), league: DATA.league_id, view: DATA.view });
+  try {
+    let r;
+    try { r = await fetch(`/api/team/${teamId}/trade?${params}`); }
+    catch (e) { throw new Error("Can't reach Draft Scout. Check your connection and try again."); }
+    let j = null;
+    try { j = await r.json(); } catch (e) { /* not JSON, e.g. a crash page */ }
+    if (!r.ok || !j) throw new Error(j?.error || "Draft Scout hit an unexpected error while analyzing this trade.");
+    // the server works out the verdict and numbers (see evaluate_trade in app.py); this just draws them
+    const them = DATA.managers.find(m => m.entry_id === state.tradeWith);
+    $("tradeResult").innerHTML = `
+      <div class="verdict ${esc(j.verdict)}">${esc(j.message)}</div>
+      <div class="tsides">${tradeSide(j.me, "Your team")}${tradeSide(j.them, them ? them.team_name : "Their team")}</div>`;
+  } catch (e) {
+    $("tradeResult").innerHTML = `<div class="error" role="alert">${esc(e.message)}</div>`;
+  } finally {
+    btn.disabled = false; btn.textContent = "Analyze trade";
+  }
+}
+
+// events
+$("viewTabs").addEventListener("click", e => {
+  const b = e.target.closest("button");
+  if (!b || !DATA || b.dataset.view === DATA.view) return;
+  state.view = b.dataset.view;
+  loadTeam(state.view);
+});
+$("tradeWith").addEventListener("change", e => {
+  state.tradeWith = Number(e.target.value);
+  state.get = new Set();   // their players belong to the old manager
+  renderTrade();
+});
+$("tradeCols").addEventListener("change", e => {
+  const box = e.target.closest("input[type=checkbox]"); if (!box) return;
+  const chosen = box.dataset.side === "give" ? state.give : state.get;
+  if (box.checked) chosen.add(Number(box.value)); else chosen.delete(Number(box.value));
+  $("tradeResult").innerHTML = "";   // the old result no longer matches what's ticked
+});
+$("tradeBtn").addEventListener("click", analyzeTrade);
+
+if (/^[0-9]+$/.test(teamId || "")) {
+  loadTeam();
+} else {
+  $("leagueLine").textContent = "";
+  $("error").textContent = "Open the trade analyzer from your team's page, so it knows which team is yours.";
+  $("error").classList.remove("hidden");
+}
+</script>
+</body>
+</html>

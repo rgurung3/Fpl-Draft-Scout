@@ -1117,3 +1117,165 @@ def test_trade_endpoint_explains_bad_trades(two_managers, query, text):
     res = app.app.test_client().get(f"/api/team/100/trade?{query}")
     assert res.status_code == 400
     assert text in res.get_json()["error"]
+
+
+# ---------------------------------------------------------------- league banter
+
+def banter_league(matches):
+    """A 5-team head-to-head league (team 100-104). Entries carry names so facts can mention them."""
+    entries = [{"id": 10 + i, "entry_id": 100 + i, "entry_name": f"Team {i}",
+                "player_first_name": "M", "player_last_name": str(i)} for i in range(5)]
+    return {"league": {"name": "Banter League"}, "league_entries": entries, "matches": matches}
+
+
+# GW1: 0 beats 1 (60-40), 2 beats 3 (90-50); 4 has a bye.  GW2: 0 beats 2 (70-69), 1 beats 4 (50-20).
+BANTER_WEEKS = [match(1, 10, 60, 11, 40), match(1, 12, 90, 13, 50),
+                match(2, 10, 70, 12, 69), match(2, 11, 50, 14, 20),
+                match(3, 10, 0, 11, 0, finished=False), match(3, 12, 0, 13, 0, finished=False),
+                match(4, 13, 0, 14, 0, finished=False)]
+
+
+def test_banter_needs_a_finished_gameweek():
+    assert app.league_banter(banter_league([match(1, 10, 0, 11, 0, finished=False)])) is None
+    assert app.league_banter({"league_entries": [{"id": 10, "entry_id": 100}]}) is None
+
+
+def test_hot_match_is_the_best_placed_pair_in_the_next_gameweek():
+    # table after GW2: Team 0 (6 pts), Team 2, Team 1 (3 each), then Teams 3 and 4 (0).
+    # GW3 has 0 v 1 (1st + 3rd) and 2 v 3 (2nd + 4th), so 0 v 1 is the hot one
+    hot = app.league_banter(banter_league(BANTER_WEEKS))["hot_match"]
+    assert hot["gw"] == 3
+    assert {hot["a"]["entry_id"], hot["b"]["entry_id"]} == {100, 101}
+    assert hot["line"] == "Only 3 league points between them."
+
+
+def test_no_hot_match_when_nothing_is_left_to_play():
+    assert app.league_banter(banter_league(BANTER_WEEKS[:4]))["hot_match"] is None
+
+
+def test_battles_pair_up_neighbours_in_the_table():
+    banter = app.league_banter(banter_league(BANTER_WEEKS))
+    third, bottom = banter["battles"]
+    assert third["title"] == "Battle for 3rd"
+    assert (third["a"]["position"], third["b"]["position"]) == (3, 4)
+    assert bottom["title"] == "Wooden spoon watch"
+    assert (bottom["a"]["position"], bottom["b"]["position"]) == (4, 5)
+
+
+def test_battle_says_when_the_pair_meet_again():
+    banter = app.league_banter(banter_league(BANTER_WEEKS))
+    by_title = {b["title"]: b for b in banter["battles"]}
+    assert by_title["Battle for 3rd"]["meet_gw"] is None    # Teams 1 and 3 don't play each other again
+    assert by_title["Wooden spoon watch"]["meet_gw"] == 4   # Teams 3 and 4 meet in GW4
+    assert by_title["Wooden spoon watch"]["line"].endswith("They meet in GW4.")
+
+
+def test_small_leagues_skip_the_battles():
+    entries = [{"id": 10, "entry_id": 100, "entry_name": "A"}, {"id": 11, "entry_id": 101, "entry_name": "B"}]
+    details = {"league_entries": entries, "matches": [match(1, 10, 50, 11, 40)]}
+    assert app.league_banter(details)["battles"] == []
+
+
+def facts_by_kind(matches):
+    return {f["kind"]: f["text"] for f in app.league_banter(banter_league(matches))["facts"]}
+
+
+def test_facts_are_capped_and_not_repeated():
+    kinds = [f["kind"] for f in app.league_banter(banter_league(BANTER_WEEKS))["facts"]]
+    assert len(kinds) == app.FACT_COUNT
+    assert len(kinds) == len(set(kinds))
+
+
+def test_harsh_fact_names_the_highest_losing_score(monkeypatch):
+    monkeypatch.setattr(app, "FACT_COUNT", 20)
+    assert facts_by_kind(BANTER_WEEKS)["harsh"] == (
+        "Team 2 scored 69 in GW2 and still lost to Team 0 (70). Harsh.")
+
+
+def test_each_fact_reads_from_the_numbers(monkeypatch):
+    monkeypatch.setattr(app, "FACT_COUNT", 20)
+    facts = facts_by_kind(BANTER_WEEKS)
+    assert facts["thrashing"].startswith("Biggest beating so far: Team 2 90-50 Team 3 in GW1, a 40-point gap")
+    assert facts["closest"] == "Closest match so far: Team 0 edged Team 2 70-69 in GW2."
+    assert facts["low"].startswith("Lowest score so far: Team 4 managed 20 in GW2")
+    assert facts["high"] == "Best week so far: Team 2 put up 90 in GW1."
+
+
+def test_luck_fact_finds_the_manager_whose_table_place_lags_their_points(monkeypatch):
+    monkeypatch.setattr(app, "FACT_COUNT", 20)
+    # Team 2 scores 200 (the most) but loses both games by a point, so it sits 4th in the table
+    weeks = [match(1, 12, 100, 13, 101), match(1, 10, 10, 11, 5),
+             match(2, 12, 100, 14, 101), match(2, 10, 10, 13, 5)]
+    assert facts_by_kind(weeks)["luck"] == (
+        "Team 2 are 1st for points scored but only 4th in the table. The fixture list has not been kind.")
+
+
+def test_a_winning_run_is_called_out(monkeypatch):
+    monkeypatch.setattr(app, "FACT_COUNT", 20)
+    weeks = [match(gw, 10, 60, 11 + gw, 40) for gw in (1, 2, 3)]
+    assert facts_by_kind(weeks)["streak"] == "Team 0 have won 3 in a row. Somebody stop them."
+
+
+def test_a_losing_run_is_teased_kindly(monkeypatch):
+    monkeypatch.setattr(app, "FACT_COUNT", 20)
+    weeks = [match(1, 10, 60, 11, 40), match(2, 12, 60, 11, 40), match(3, 13, 60, 11, 40)]
+    assert facts_by_kind(weeks)["streak"] == "Team 1 have lost 3 in a row. A hug may be needed."
+
+
+def test_short_runs_are_not_mentioned(monkeypatch):
+    monkeypatch.setattr(app, "FACT_COUNT", 20)
+    assert "streak" not in facts_by_kind(BANTER_WEEKS)
+
+
+def test_banter_route_returns_the_league_name_and_banter(fake_api, monkeypatch):
+    fake = app.get_json
+
+    def with_matches(url):
+        if url.endswith("/league/123/details"):
+            return banter_league(BANTER_WEEKS)
+        return fake(url)
+
+    monkeypatch.setattr(app, "get_json", with_matches)
+    data = app.app.test_client().get("/api/league/123/banter").get_json()
+    assert data["league_name"] == "Banter League"
+    assert data["banter"]["hot_match"]["gw"] == 3
+
+
+def test_banter_route_is_empty_for_a_league_without_matches(fake_api):
+    data = app.app.test_client().get("/api/league/123/banter").get_json()
+    assert data["banter"] is None
+
+
+def test_banter_route_gives_a_friendly_error(monkeypatch):
+    def not_found(url):
+        raise requests.HTTPError(response=type("R", (), {"status_code": 404})())
+
+    monkeypatch.setattr(app, "get_json", not_found)
+    res = app.app.test_client().get("/api/league/999/banter")
+    assert res.status_code == 400
+    assert "No Draft league found" in res.get_json()["error"]
+
+
+@pytest.mark.parametrize("n,text", [(1, "1st"), (2, "2nd"), (3, "3rd"), (4, "4th"),
+                                    (11, "11th"), (12, "12th"), (21, "21st")])
+def test_ordinal(n, text):
+    assert app.ordinal(n) == text
+
+
+# ---------------------------------------------------------------- trade and banter pages
+
+@pytest.mark.parametrize("path,text", [("/trade", b"Trade analyzer"), ("/banter", b"League banter")])
+def test_extra_pages_load(path, text):
+    res = app.app.test_client().get(path)
+    assert res.status_code == 200
+    assert text in res.data
+
+
+def test_team_endpoint_can_skip_the_swaps(fake_api):
+    data = app.app.test_client().get("/api/team/100?swaps=0").get_json()
+    assert "waiver_targets" not in data and "recent" not in data
+    assert data["me"] == 100 and data["players"]
+
+
+def test_shared_stylesheet_is_served():
+    assert app.app.test_client().get("/static/common.css").status_code == 200
