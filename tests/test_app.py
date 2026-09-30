@@ -61,6 +61,9 @@ def fake_api(monkeypatch):
             return details
         if url.endswith("/element-status"):
             return status
+        if "element-summary" in url:
+            return {"history": [{"event": 4, "minutes": 26}, {"event": 5, "minutes": 71},
+                                {"event": 5, "minutes": 10}]}
         if "bootstrap" in url:
             return {"teams": TEAMS}
         if "fixtures" in url:
@@ -839,6 +842,32 @@ def test_strength_after_swap_leaves_the_real_list_alone():
     claim = rated(99, "MID", 90)
     app.strength_after_swap(squad + [claim], 100, squad[7], claim)
     assert squad[7]["owner"] == 100 and claim["owner"] is None
+
+
+def test_recent_minutes_cover_the_last_gameweeks(monkeypatch):
+    history = {"history": [{"event": 4, "minutes": 26}, {"event": 5, "minutes": 71},
+                           {"event": 5, "minutes": 10}]}     # GW5 was a double gameweek
+    monkeypatch.setattr(app, "get_json", lambda url: history)
+    recent = app.recent_minutes([7, 7, 8], current_gw=5)
+    assert recent["gws"] == [2, 3, 4, 5]
+    assert recent["minutes"] == {7: [0, 0, 26, 81], 8: [0, 0, 26, 81]}   # didn't play = 0, doubles add up
+
+
+def test_recent_minutes_skip_players_that_fail(monkeypatch):
+    def fake(url):
+        if url.endswith("/7"):
+            raise requests.ConnectionError("down")
+        return {"history": [{"event": 1, "minutes": 90}]}
+    monkeypatch.setattr(app, "get_json", fake)
+    assert app.recent_minutes([7, 8], current_gw=1)["minutes"] == {8: [90]}
+
+
+def test_team_endpoint_includes_recent_minutes(fake_api):
+    data = app.app.test_client().get("/api/team/100").get_json()
+    assert data["recent"]["gws"] == [3, 4, 5, 6]
+    assert set(data["recent"]["minutes"]) <= {p["id"] for p in data["players"]}
+    for t in data["waiver_targets"]:
+        assert data["recent"]["minutes"][str(t["claim"])] == [0, 26, 81, 0]
 
 
 def test_waiver_targets_come_with_reasons():

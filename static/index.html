@@ -455,6 +455,14 @@ function whyNote(s) {
   return fit + why + small;
 }
 
+// minutes in the last few gameweeks for the two players in a swap, to show who is actually playing
+function recentNote(s, drop, claim) {
+  const r = DATA.recent, mins = id => r.minutes[id];
+  const line = p => mins(p.id) ? `${esc(p.name)} <b>${mins(p.id).join(", ")}</b>` : "";
+  const parts = [line(drop), line(claim)].filter(Boolean);
+  return parts.length ? `<div class="why recent"><strong>Minutes, GW${r.gws[0]}–${r.gws.at(-1)}:</strong> ${parts.join(" · ")}</div>` : "";
+}
+
 // does the player you'd drop start for you, and what does the swap do to your best eleven?
 function xiNote(s, drop) {
   const change = s.xi_after - s.xi_before;
@@ -490,6 +498,7 @@ function renderSwaps() {
         <div class="who"><div class="verb">Claim</div><div class="pname">${esc(claim.name)} <span class="pos">${claim.pos}, ${esc(claim.team)}</span></div>${fixStrip(claim)}</div></div>
       <span class="gain">+${s.gain.toFixed(0)}</span>
       ${whyNote(s)}
+      ${recentNote(s, drop, claim)}
       ${xiNote(s, drop)}
       ${riskNote(s)}
     </div>`;

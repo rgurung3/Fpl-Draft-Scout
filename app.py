@@ -6,6 +6,7 @@ Run:  python app.py   then open http://127.0.0.1:5000
 import re
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import requests
@@ -324,6 +325,7 @@ MIN_GAIN = 3                 # a swap has to be worth at least this many rating 
 PAIRS_PER_POSITION = 2
 MAX_TARGETS = 5
 SMALL_SAMPLE_MINUTES = 300   # a player with fewer minutes than this gets a "too early to trust" note
+RECENT_GAMEWEEKS = 4         # how many gameweeks of minutes to show for the players in a swap
 
 
 def by_score(players):
@@ -415,6 +417,29 @@ def strength_after_swap(players, me, drop, claim):
     swapped = [{**p, "owner": None} if p["id"] == drop["id"]
                else {**p, "owner": me} if p["id"] == claim["id"] else p for p in players]
     return squad_strength(swapped, me)["strength"]
+
+
+def recent_minutes(ids, current_gw):
+    """
+    Minutes played in each of the last RECENT_GAMEWEEKS gameweeks, oldest first, for
+    each player id: {"gws": [3, 4, 5, 6], "minutes": {id: [0, 26, 71, 71]}}. One request per
+    player, made a few at a time. A player whose history can't be fetched is left out.
+    """
+    gws = list(range(max(current_gw - RECENT_GAMEWEEKS + 1, 1), current_gw + 1))
+
+    def one(pid):
+        try:
+            history = get_json(f"{DRAFT}/element-summary/{pid}")["history"]
+        except (requests.RequestException, KeyError, TypeError, ValueError):
+            return pid, None
+        played = Counter()
+        for row in history:
+            played[row.get("event")] += num(row.get("minutes"))   # a double gameweek adds up
+        return pid, [int(played[gw]) for gw in gws]
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        found = dict(pool.map(one, set(ids)))
+    return {"gws": gws, "minutes": {pid: mins for pid, mins in found.items() if mins is not None}}
 
 
 def kept_ids(text):
@@ -839,6 +864,9 @@ def team(entry_id):
     keep = kept_ids(request.args.get("keep"))
     data["keep"] = sorted(p["id"] for p in data["players"] if p["owner"] == entry_id and p["id"] in keep)
     data["waiver_targets"] = waiver_targets(data["players"], entry_id, keep)
+    # the last few gameweeks of minutes for the players in the swaps (one request each)
+    in_swaps = [p for t in data["waiver_targets"] for p in (t["drop"], t["claim"])]
+    data["recent"] = recent_minutes(in_swaps, data["current_gw"])
     return jsonify(data)
 
 
