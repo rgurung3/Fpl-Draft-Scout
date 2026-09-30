@@ -794,6 +794,26 @@ def test_players_carry_minutes_and_starts(fake_api):
     assert all("minutes" in p and "starts" in p for p in players)
 
 
+def test_kept_players_are_never_suggested_as_a_drop():
+    mine = [rated(1, "MID", 20, owner=100), rated(2, "MID", 30, owner=100)]
+    free = [rated(3, "MID", 60), rated(4, "MID", 55)]
+    assert [t["drop"] for t in app.waiver_targets(mine + free, me=100)] == [1, 2]
+    assert [t["drop"] for t in app.waiver_targets(mine + free, me=100, keep={1})] == [2]   # next weakest
+
+
+def test_kept_ids_ignore_rubbish():
+    assert app.kept_ids("12, 34,x,,5") == {12, 34, 5}
+    assert app.kept_ids(None) == set()
+
+
+def test_team_endpoint_keeps_only_my_players(fake_api):
+    client = app.app.test_client()
+    data = client.get("/api/team/100?keep=1,2,999").get_json()
+    assert data["keep"] == [1]                      # 2 isn't mine, 999 doesn't exist
+    assert all(t["drop"] != 1 for t in data["waiver_targets"])
+    assert client.get("/api/team/100").get_json()["keep"] == []
+
+
 def test_waiver_targets_come_with_reasons():
     players = [rated(1, "DEF", 40, owner=100, breakdown=piece(form=20, fix=20)),
                rated(2, "DEF", 60, breakdown=piece(form=20, fix=40))]

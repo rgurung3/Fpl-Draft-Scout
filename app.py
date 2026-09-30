@@ -410,9 +410,15 @@ def small_samples(players):
             for p in players if p.get("minutes", SMALL_SAMPLE_MINUTES) < SMALL_SAMPLE_MINUTES]
 
 
-def waiver_targets(players, me):
+def kept_ids(text):
+    """Turn '12,34' from a link into {12, 34}. Anything that isn't a number is ignored."""
+    return {int(s) for s in (text or "").split(",") if s.strip().isdigit()}
+
+
+def waiver_targets(players, me, keep=()):
     """
     Suggested drop/claim swaps for one manager, best gain first.
+    Players in `keep` are never suggested as a drop (the next weakest is used).
 
     Per position, my weakest players are paired one-for-one with the best free
     agents who are at least MIN_CHANCE_FOR_WAIVERS% likely to play. A doubtful
@@ -424,7 +430,7 @@ def waiver_targets(players, me):
 
     swaps = []
     for pos in FORMATION:
-        weakest_first = by_score(p for p in mine if p["pos"] == pos)[::-1]
+        weakest_first = by_score(p for p in mine if p["pos"] == pos and p["id"] not in keep)[::-1]
         best_first = by_score(p for p in free if p["pos"] == pos)
         for drop, claim in list(zip(weakest_first, best_first))[:PAIRS_PER_POSITION]:
             gain = round(claim["score"] - drop["score"], 1)
@@ -807,7 +813,8 @@ def team(entry_id):
     """
     Look up which league a team plays in, then load that league with the team
     marked as "me". If the team is in more than one league, ?league=<id> picks one.
-    ?view=season rates everyone for the rest of the season instead of this week.
+    ?view=season rates everyone until the next break instead of over the next 5 gameweeks.
+    ?keep=12,34 protects those players from being suggested as a drop.
     """
     try:
         data, leagues = league_for_team(entry_id, request.args.get("league", type=int),
@@ -817,7 +824,9 @@ def team(entry_id):
 
     data["me"] = entry_id
     data["my_leagues"] = leagues
-    data["waiver_targets"] = waiver_targets(data["players"], entry_id)
+    keep = kept_ids(request.args.get("keep"))
+    data["keep"] = sorted(p["id"] for p in data["players"] if p["owner"] == entry_id and p["id"] in keep)
+    data["waiver_targets"] = waiver_targets(data["players"], entry_id, keep)
     return jsonify(data)
 
 
