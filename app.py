@@ -5,6 +5,7 @@ Run:  python app.py   then open http://127.0.0.1:5000
 """
 import time
 from collections import Counter
+from datetime import datetime, timezone
 
 import requests
 from flask import Flask, jsonify, request, send_from_directory
@@ -13,8 +14,15 @@ DRAFT = "https://draft.premierleague.com/api"
 CLASSIC = "https://fantasy.premierleague.com/api"
 HEADERS = {"User-Agent": "Mozilla/5.0 (DraftScout personal tool)"}
 CACHE_SECONDS = 600
-LOOKAHEAD = 3         # how many upcoming gameweeks count toward fixture ease (this week view)
-SEASON_LOOKAHEAD = 6  # the same for the rest of season view
+LOOKAHEAD = 5         # how many upcoming gameweeks the "next 5" view looks at
+# The "until the break" view runs to the next international break: a gap of more
+# than BREAK_GAP_DAYS between two gameweek deadlines. The window is kept between
+# BREAK_MIN_WEEKS and BREAK_MAX_WEEKS long, and is SEASON_LOOKAHEAD long if no break is found.
+SEASON_LOOKAHEAD = 8
+BREAK_GAP_DAYS = 10
+BREAK_MIN_WEEKS = 3
+BREAK_MAX_WEEKS = 10
+LAST_GW = 38
 MIN_MINUTES = 180       # players need this many minutes for xGI/90 and to set the rating scale
 SCALE_PERCENTILE = 95   # each stat is measured against this percentile of regular players
 
@@ -39,6 +47,48 @@ def num(x, default=0.0):
         return float(x)
     except (TypeError, ValueError):
         return default
+
+
+# ---------------------------------------------------------------- windows
+
+def parse_time(text):
+    """An ISO date such as 2026-10-10T10:00:00Z as a datetime, or None if it's missing or unreadable."""
+    try:
+        when = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
+def gameweek_deadlines(events):
+    """{gameweek: deadline datetime} from the Draft site's events. Unreadable deadlines are left out."""
+    found = {e.get("id"): parse_time(e.get("deadline_time")) for e in events.get("data") or []}
+    return {gw: when for gw, when in found.items() if gw and when}
+
+
+def break_window(deadlines, next_gw):
+    """
+    How many gameweeks the "until the break" view covers, counting from next_gw.
+    A gap of more than BREAK_GAP_DAYS between one gameweek's deadline and the
+    next one's means an international break after that gameweek, so the window
+    ends there. The length is kept between BREAK_MIN_WEEKS and BREAK_MAX_WEEKS,
+    and never runs past the last gameweek. With no break in sight it is
+    SEASON_LOOKAHEAD long.
+    """
+    weeks = SEASON_LOOKAHEAD
+    for gw in range(next_gw, LAST_GW):
+        if gw not in deadlines or gw + 1 not in deadlines:
+            continue
+        if (deadlines[gw + 1] - deadlines[gw]).days > BREAK_GAP_DAYS:
+            weeks = gw - next_gw + 1
+            break
+    weeks = max(BREAK_MIN_WEEKS, min(weeks, BREAK_MAX_WEEKS))
+    return max(1, min(weeks, LAST_GW - next_gw + 1))
+
+
+def view_windows(events, next_gw):
+    """How many gameweeks each view looks at: {"week": 5, "season": until the break}."""
+    return {"week": LOOKAHEAD, "season": break_window(gameweek_deadlines(events), next_gw)}
 
 
 # ---------------------------------------------------------------- fixtures
@@ -100,7 +150,7 @@ PIECES = tuple(PIECE_STATS)
 SCALED_STATS = ("form", "ppg", "xgi90", "fix", "cs", "dc90", "crea90")  # minutes share is already 0-1
 CS_BASELINE = 2.0  # conceding this many expected goals per 90 counts as no clean-sheet chance at all
 
-# this week: weights per position. Each position's weights add up to 1.
+# next 5: weights per position. Each position's weights add up to 1.
 WEIGHTS = {
     1: {"form": 0.30, "ppg": 0.25, "xgi": 0.00, "mins": 0.20, "fix": 0.25},  # GKP
     2: {"form": 0.30, "ppg": 0.20, "xgi": 0.10, "mins": 0.15, "fix": 0.25},  # DEF
@@ -108,39 +158,46 @@ WEIGHTS = {
     4: {"form": 0.30, "ppg": 0.20, "xgi": 0.25, "mins": 0.10, "fix": 0.15},  # FWD
 }
 
-# rest of season: form keeps its weight, fixtures (over a longer window) count a
-# bit less, and new stats aimed at particular roles get a share: clean-sheet
-# chances for keepers and defenders, defensive actions for defenders and
-# midfielders, creativity for defenders (attacking full backs). Forwards only
-# change through the longer fixture window and the lighter injury rule.
+# until the break: recent form counts half as much (a few games of form say less
+# about a longer stretch), so the underlying stats and the fixtures count more.
+# New stats aimed at particular roles get a share too: clean-sheet chances for
+# keepers and defenders, defensive actions for defenders and midfielders,
+# creativity for defenders (attacking full backs).
 SEASON_WEIGHTS = {
-    1: {"form": 0.30, "ppg": 0.20, "mins": 0.20, "fix": 0.15, "cs": 0.15},                  # GKP
-    2: {"form": 0.30, "ppg": 0.15, "xgi": 0.10, "mins": 0.10, "fix": 0.10,
-        "cs": 0.10, "dc": 0.05, "crea": 0.10},                                             # DEF
-    3: {"form": 0.30, "ppg": 0.20, "xgi": 0.20, "mins": 0.10, "fix": 0.15, "dc": 0.05},     # MID
-    4: {"form": 0.30, "ppg": 0.20, "xgi": 0.25, "mins": 0.10, "fix": 0.15},                 # FWD
+    1: {"form": 0.15, "ppg": 0.20, "mins": 0.20, "fix": 0.20, "cs": 0.25},                  # GKP
+    2: {"form": 0.15, "ppg": 0.15, "xgi": 0.10, "mins": 0.10, "fix": 0.15,
+        "cs": 0.15, "dc": 0.10, "crea": 0.10},                                             # DEF
+    3: {"form": 0.15, "ppg": 0.20, "xgi": 0.25, "mins": 0.10, "fix": 0.20, "dc": 0.10},     # MID
+    4: {"form": 0.15, "ppg": 0.20, "xgi": 0.30, "mins": 0.10, "fix": 0.25},                 # FWD
 }
-SEASON_FULL_FROM = 75  # rest of season: players at least this likely to play count as fully fit
+SEASON_FULL_FROM = 75  # until the break: players at least this likely to play count as fully fit
 
+# Each view's settings. "return_dates": a player who is out now but has a known
+# return date only loses the gameweeks of the window he'd miss.
 VIEWS = {
-    "week": {"lookahead": LOOKAHEAD, "weights": WEIGHTS, "full_from": None},
-    "season": {"lookahead": SEASON_LOOKAHEAD, "weights": SEASON_WEIGHTS,
-               "full_from": SEASON_FULL_FROM},
+    "week": {"weights": WEIGHTS, "full_from": None, "return_dates": False},
+    "season": {"weights": SEASON_WEIGHTS, "full_from": SEASON_FULL_FROM, "return_dates": True},
 }
 
 
-def availability(el, full_from=None):
+def availability(el, full_from=None, window_deadlines=None):
     """
-    How likely a player is to play, 0-1. If full_from is set (the season view),
-    a chance of at least full_from% counts as fully fit; lower chances don't.
+    How likely a player is to play, 0-1. If full_from is set (the until-the-break
+    view), a chance of at least full_from% counts as fully fit; lower chances don't.
+    If window_deadlines (the deadlines of the window's gameweeks) is given and the
+    player is out (0) with a known return date, it's the share of those gameweeks
+    that start on or after that date, instead of 0.
     """
     chance = el.get("chance_of_playing_next_round")
     if chance is not None:
         chance = num(chance, 100)
-        if full_from is not None and chance >= full_from:
-            return 1.0
-        return chance / 100
-    return AVAIL_BY_STATUS.get(el.get("status", "a"), 1.0)
+        value = 1.0 if full_from is not None and chance >= full_from else chance / 100
+    else:
+        value = AVAIL_BY_STATUS.get(el.get("status", "a"), 1.0)
+    back = parse_time(el.get("news_return"))
+    if value == 0 and back and window_deadlines:
+        return sum(d >= back for d in window_deadlines) / len(window_deadlines)
+    return value
 
 
 def percentile(values, pct):
@@ -173,10 +230,11 @@ def per90(total, mins):
     return total / mins * 90 if mins >= MIN_MINUTES else 0.0
 
 
-def score_players(elements, fixtures_by_team, current_gw, view="week"):
+def score_players(elements, fixtures_by_team, current_gw, view="week", window_deadlines=None):
     """
     Rate every player 0-100 for one view ("week" or "season", see VIEWS).
-    fixtures_by_team should cover that view's fixture window.
+    fixtures_by_team should cover that view's fixture window, and window_deadlines
+    is the deadlines of that window's gameweeks (used for return dates).
     """
     settings = VIEWS[view]
     raw, minutes = [], []
@@ -206,7 +264,8 @@ def score_players(elements, fixtures_by_team, current_gw, view="week"):
         values = {piece: r[stat] if stat == "mins" else min(r[stat] / scale[stat], 1.0)
                   for piece, stat in PIECE_STATS.items()}
         base = sum(w * values[piece] for piece, w in weights.items())
-        avail = availability(el, settings["full_from"])
+        avail = availability(el, settings["full_from"],
+                             window_deadlines if settings["return_dates"] else None)
         # the rating split into rating points per piece, plus what an injury doubt
         # takes off (0 or less). The pieces add up to the rating, give or take rounding.
         breakdown = {piece: round(100 * w * values[piece], 1) for piece, w in weights.items()}
@@ -578,7 +637,8 @@ def fetch(url, not_found):
 def load_league(league_id, view="week"):
     """
     Fetch a league from the Draft site and build everything the page needs.
-    Every player gets both ratings (week_score, season_score); "score",
+    Every player gets both ratings (week_score for "next 5", season_score for
+    "until the break"); "score",
     "breakdown" and "fixtures" follow the chosen view, so waivers, squads and
     trades all use it.
     """
@@ -596,8 +656,13 @@ def load_league(league_id, view="week"):
     positions = {p["id"]: p["singular_name_short"] for p in boot["element_types"]}
     elements = boot["elements"]
 
-    fixtures = {v: upcoming_fixtures(teams, next_gw, VIEWS[v]["lookahead"]) for v in VIEWS}
-    ratings = {v: score_players(elements, fixtures[v], current_gw, v) for v in VIEWS}
+    windows = view_windows(events, next_gw)
+    deadlines = gameweek_deadlines(events)
+    fixtures = {v: upcoming_fixtures(teams, next_gw, windows[v]) for v in VIEWS}
+    ratings = {v: score_players(elements, fixtures[v], current_gw, v,
+                                [deadlines[gw] for gw in range(next_gw, next_gw + windows[v])
+                                 if gw in deadlines])
+               for v in VIEWS}
 
     owner_of = {s["element"]: s.get("owner") for s in status.get("element_status", [])}
 
@@ -640,7 +705,8 @@ def load_league(league_id, view="week"):
         "current_gw": current_gw,
         "next_gw": next_gw,
         "view": view,
-        "lookahead": VIEWS[view]["lookahead"],
+        "lookahead": windows[view],
+        "windows": {v: {"from": next_gw, "to": next_gw + windows[v] - 1} for v in VIEWS},
         "managers": managers,
         "players": players,
         "history": league_history(details),
