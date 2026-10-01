@@ -167,6 +167,12 @@
         <ul class="facts" id="facts"></ul>
         <button class="btn ghost hidden" id="moreFacts" type="button"></button>
       </section>
+      <section id="luckSection">
+        <h2>Luck</h2>
+        <p class="sub">Each week, how would a manager have done if they'd played everyone instead of one opponent? Add that up and you get the league points they <em>deserved</em>. Bars to the right (green) are managers with more points than that: lucky. Bars to the left (red) have fewer: unlucky.</p>
+        <p class="racecap" id="luckCaption"></p>
+        <div class="chartwrap"><svg class="plot" id="luck" role="img"></svg></div>
+      </section>
     </div>
 
     <div id="panel-charts" class="hidden">
@@ -332,6 +338,7 @@ function renderBanter(data) {
   $("banterEmpty").classList.toggle("hidden", !!b);
   $("matchups").classList.toggle("hidden", !b);
   $("factsSection").classList.toggle("hidden", !b);
+  $("luckSection").classList.toggle("hidden", !b);
   if (!b) {
     $("banterEmpty").textContent = "The banter starts once a gameweek has finished. It needs a head-to-head league, because it's built from the match results.";
     return;
@@ -345,6 +352,7 @@ function renderBanter(data) {
   $("matchSub").textContent = b.hot_match ? `Looking ahead to gameweek ${b.hot_match.gw}.` : "No matches left to play.";
   $("cards").innerHTML = cards.join("") || `<div class="empty">Nothing to show yet.</div>`;
   renderFacts();
+  renderLuck(b.luck);
 }
 
 function renderFacts() {
@@ -539,6 +547,39 @@ function renderScatter() {
   chart.setAttribute("aria-label", `Scatter chart of points scored against points conceded for ${ms.length} managers.`);
   chart.innerHTML = svg;
   $("scatterSub").textContent = "Each dot is a manager. The dashed line is where scored equals conceded: below it they score more than they concede (strong), above it they concede more.";
+}
+
+// ---------------------------------------------------------------- luck
+
+function renderLuck(rows) {
+  const ms = rows;   // the server sends them luckiest first (see league_banter in app.py)
+  const W = 720, rowH = 30, L = 150, R = 24, T = 10, B = 30, H = T + B + ms.length * rowH;
+  const reach = Math.max(2, Math.ceil(Math.max(...ms.map(m => Math.abs(m.luck)))));
+  const step = reach <= 6 ? 1 : reach <= 12 ? 2 : 5, edge = Math.ceil(reach / step) * step;
+  const x = v => L + (v + edge) * (W - L - R) / (2 * edge);
+  let svg = "";
+  for (let v = -edge; v <= edge; v += step) {
+    svg += `<line class="grid" x1="${x(v)}" x2="${x(v)}" y1="${T}" y2="${H - B}"/>`
+      + `<text x="${x(v)}" y="${H - B + 18}" text-anchor="middle">${v > 0 ? "+" + v : v}</text>`;
+  }
+  svg += `<line x1="${x(0)}" x2="${x(0)}" y1="${T}" y2="${H - B}" stroke="var(--ink)" stroke-opacity=".6"/>`;
+  ms.forEach((m, i) => {
+    const cy = T + i * rowH + rowH / 2, mine = m.entry_id === myId;
+    const x0 = x(0), x1 = x(m.luck), good = m.luck >= 0, label = (m.luck > 0 ? "+" : "") + m.luck;
+    svg += `<g><title>${esc(m.team)}: ${m.league_points} league points, ${m.expected_points} if they'd played everyone every week (${label})</title>`
+      + `<text class="lbl ${mine ? "me" : ""}" x="${L - 10}" y="${cy + 4}" text-anchor="end">${esc(short(m.team, 20))}</text>`
+      + `<rect x="${Math.min(x0, x1)}" y="${cy - 8}" width="${Math.max(Math.abs(x1 - x0), 2)}" height="16" rx="2" `
+      + `style="fill:var(${good ? "--pitch" : "--rival"});fill-opacity:${mine ? 1 : .8}"/>`
+      + `<text x="${x1 + (good ? 6 : -6)}" y="${cy + 4}" text-anchor="${good ? "start" : "end"}">${label}</text></g>`;
+  });
+  const chart = $("luck");
+  chart.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  chart.setAttribute("aria-label", `Bar chart of league points above or below what each of ${ms.length} managers would have earned playing everyone.`);
+  chart.innerHTML = svg;
+  const first = ms[0], last = ms.at(-1);
+  $("luckCaption").innerHTML = first.luck > 0 || last.luck < 0
+    ? `Luckiest: <strong>${esc(first.team)}</strong> (${first.luck > 0 ? "+" : ""}${first.luck}). Unluckiest: <strong>${esc(last.team)}</strong> (${last.luck}).`
+    : "Nobody is lucky or unlucky yet.";
 }
 
 // ---------------------------------------------------------------- weekly scores

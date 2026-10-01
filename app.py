@@ -683,15 +683,38 @@ def league_history(details):
 
 # ---------------------------------------------------------------- league banter (head-to-head)
 
-FACT_COUNT = 5           # how many banter facts we keep (the page shows the first couple at first)
+FACT_COUNT = 9           # how many banter facts we keep (the page shows the first couple at first)
 STREAK_MIN = 3           # a winning or losing run has to be this long to be worth a mention
 LUCK_MIN_GAP = 2         # table place vs points-scored place: this many places apart counts as unlucky
+LUCK_FACT_MIN = 2        # league points above or below the "play everyone" table that count as luck
 
 
 def ordinal(n):
     """1 -> '1st', 2 -> '2nd', 11 -> '11th'."""
     suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
     return f"{n}{suffix}"
+
+
+def expected_league_points(history):
+    """
+    The league points each manager would have earned if every week they'd played everyone,
+    not just their one opponent: each week their score is compared with every other
+    manager's, with the table's points for a win and a draw, averaged over those opponents.
+    Only weeks they played a real match count (not a bye), so it compares with their
+    actual league points. Returns {team ID: expected points}, from league_history's data.
+    """
+    expected = {m["entry_id"]: 0.0 for m in history["managers"]}
+    for i in range(len(history["gws"])):
+        scores = {m["entry_id"]: m["points"][i] for m in history["managers"]
+                  if m["points"][i] is not None}
+        for m in history["managers"]:
+            entry, mine = m["entry_id"], m["points"][i]
+            others = [p for e, p in scores.items() if e != entry]
+            if mine is None or m["results"][i] is None or not others:
+                continue
+            earned = sum(WIN_POINTS if mine > p else DRAW_POINTS if mine == p else 0 for p in others)
+            expected[entry] += earned / len(others)
+    return expected
 
 
 def league_banter(details):
@@ -706,6 +729,9 @@ def league_banter(details):
     Each card has a short "line" (how far apart they are). Cards are left out when the
     gameweek has too few matches.
     facts: up to FACT_COUNT one-sentence facts, best first, each {kind, text}.
+    luck: every manager, luckiest first, with league_points, expected_points (what they'd have
+    if they'd played everyone every week, see expected_league_points) and luck (the difference:
+    positive means lucky, negative unlucky). The page draws it as a chart.
     Tone is mild teasing; it's all worked out from the numbers, not written by AI.
     """
     history = league_history(details)
@@ -770,11 +796,29 @@ def league_banter(details):
 
     facts = []
 
-    # luck: who sits furthest below where their points scored say they should be
+    # luck by the "play everyone" table: real league points against what their scores deserved
+    expected = expected_league_points(history)
+    luck = sorted(({"entry_id": e, "team": name(e), "league_points": table[e][1],
+                    "expected_points": round(expected[e], 1),
+                    "luck": round(table[e][1] - expected[e], 1)} for e in order),
+                  key=lambda r: r["luck"], reverse=True)
+    robbed, kissed = luck[-1], luck[0]
+    robbed_entry = robbed["entry_id"] if robbed["luck"] <= -LUCK_FACT_MIN else None   # named below
+    if robbed_entry:
+        facts.append({"kind": "unlucky", "text": (
+            f"{robbed['team']} have {robbed['league_points']} league points, but their scores deserved "
+            f"{robbed['expected_points']:g}. Robbed by the fixture list.")})
+    if kissed["luck"] >= LUCK_FACT_MIN:
+        facts.append({"kind": "lucky", "text": (
+            f"{kissed['team']} have {kissed['league_points']} league points, but their scores only "
+            f"deserved {kissed['expected_points']:g}. Don't ask questions.")})
+
+    # luck by table place: who sits furthest below where their points scored say they should be
+    # (left out if the "play everyone" fact above already names that team)
     by_scored = sorted(order, key=lambda e: table[e][2], reverse=True)
     unlucky = max(order, key=lambda e: table[e][0] - (by_scored.index(e) + 1))
     scored_place = by_scored.index(unlucky) + 1
-    if table[unlucky][0] - scored_place >= LUCK_MIN_GAP:
+    if table[unlucky][0] - scored_place >= LUCK_MIN_GAP and unlucky != robbed_entry:
         facts.append({"kind": "luck", "text": (
             f"{name(unlucky)} are {ordinal(scored_place)} for points scored but only "
             f"{ordinal(table[unlucky][0])} in the table. The fixture list has not been kind.")})
@@ -831,7 +875,8 @@ def league_banter(details):
         pts, entry, gw = max(scores)
         facts.append({"kind": "high", "text": f"Best week so far: {name(entry)} put up {pts} in GW{gw}."})
 
-    return {"gws": history["gws"], "hot_match": hot, "battles": battles, "facts": facts[:FACT_COUNT]}
+    return {"gws": history["gws"], "hot_match": hot, "battles": battles, "facts": facts[:FACT_COUNT],
+            "luck": luck}
 
 
 # ---------------------------------------------------------------- league charts (head-to-head)
@@ -847,7 +892,7 @@ def league_charts(details):
       points_for / points_against  total points scored by them / by their opponents in
                                    their finished matches (the same matches, so they compare)
       league_points                from the table
-      low, high, average           their weekly scores: {"gw", "points"} for low and high
+      low, high, average          their weekly scores: {"gw", "points"} for low and high
                                    (None if they have no scores yet)
     head_to_head: one row per manager (table order), {"entry_id", "vs": [...]}, where each
       opponent they've played has {entry_id, won, drawn, lost, points_for, points_against}.

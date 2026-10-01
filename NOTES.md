@@ -109,6 +109,11 @@
 - league_rivalries(details, league_id, a, b) combines the saved files with this season's live results (live replaces the saved copy of the same season), and league_rivalry() lists every meeting between two managers plus their record. Route: /api/league/<id>/rivalries?a=&b= (without a and b you only get the manager list).
 - The Rivalries choice in the league hub (view-only link too) has two pickers, a record summary, a bar chart of the points margin in each meeting (green = first manager won) and a list of every meeting.
 
+## How the luck chart works
+- Part of Banter, not Charts (league_banter in app.py). expected_league_points(history) works out, for each week a manager played a real match, how many league points they'd have got playing everyone (3 per win, 1 per draw, averaged over the other managers who had a score that week), and adds the weeks up. league_banter returns "luck": every manager, luckiest first, with league_points, expected_points and luck (= league_points minus expected, 1 decimal; positive = lucky). The page draws bars: green right of zero, red left.
+- Two banter facts use it: "unlucky" (the manager furthest below their deserved points) and "lucky" (furthest above), each only if the gap is at least LUCK_FACT_MIN = 2 league points. The older "luck" fact (table place vs points-scored place) is skipped when "unlucky" already names the same team. FACT_COUNT is now 9 so no fact is cut; the page still shows 2 at first.
+- Byes are skipped so it compares with the same weeks as the real points. Luck doesn't sum to zero across the league, because a draw is worth 2 points in total in the "play everyone" table but a win is worth 3.
+
 ## Decisions
 - Snapshots live in the repo's history/ folder on main, not a database or a separate branch. The repo is a free permanent store with nothing new to set up, and the app just reads local files. Cost: each daily change is a commit to main, so Render redeploys that day (harmless; the cache just resets). If that gets annoying, move history to its own branch and read it over HTTP, or use a database.
 - Flask backend, because the Draft site blocks requests made directly from a browser page.
@@ -146,7 +151,7 @@ Idea for later: trade finder. "I want Joao Pedro and I'll give Fernandes": sugge
 
 ## Known issues / ideas
 - The hub's view-only mode only hides links; the main app at the site's root address is still public: anyone who knows the address can open it and enter any team ID (it's all public Draft data). Hiding the links stops friends wandering in; it doesn't lock anyone out. A passcode would be needed for real access control (also needed before showing friends' photos).
-- Charts: head-to-head records are this season only (last season's data isn't available from the API: the Draft site replaces a league's data when it renews). Ideas not built: a luck chart (league points vs a play-everyone table), a rank-over-time chart. Snapshots are saved daily now, and the Rivalries choice uses them.
+- Charts: head-to-head records are this season only (last season's data isn't available from the API: the Draft site replaces a league's data when it renews). Luck chart built, in Banter (league points vs a play-everyone table); it's noisy early in the season (5 gameweeks in, one result can swing it). Idea not built: a rank-over-time chart. Snapshots are saved daily now, and the Rivalries choice uses them.
 - Rivalries: only league 52607 is saved automatically (the ID is in snapshot.yml). The daily job runs on GitHub's servers, so Cloudflare may 403 it; if the Actions tab shows red runs, run `python save_snapshot.py 52607` on my computer instead and commit history/. Only finished matches are saved, and the last gameweek before a renewal is only kept if a daily run happens after it finishes and before the league renews. Snapshots hold scores and managers' names at the time, not squads or transfers.
 - Banter: facts use team names, and two teams with the same name would be confusing. Before any gameweek finishes there's nothing to show. The hot match ignores squad strength (only the table).
 - The FPL Draft data feed isn't officially documented and could change.
