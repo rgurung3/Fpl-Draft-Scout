@@ -12,8 +12,8 @@
   .sharebar { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; color: var(--muted); font-size: .9rem; margin-bottom: 20px; }
   .sharebar input { flex: 1 1 240px; max-width: 360px; padding: 7px 10px; border: 1px solid var(--line);
     border-radius: 6px; background: var(--surface); color: var(--ink); font-size: .9rem; }
-  .back { display: inline-block; margin-bottom: 8px; color: var(--pitch); font-weight: 600; text-decoration: none; }
 
+  .back { display: inline-block; margin-bottom: 8px; color: var(--pitch); font-weight: 600; text-decoration: none; }
   /* the choices: big buttons, the content appears below the one picked */
   .choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 32px; }
   .choice { text-align: left; background: var(--surface); border: 1px solid var(--line); border-left: 5px solid var(--line);
@@ -105,9 +105,9 @@
 <main>
   <header class="top">
     <div>
-      <a class="back hidden" id="backLink" href="/">← Back to Draft Scout</a>
+      <a class="back fullonly hidden" id="backLink" href="/">← Back to Draft Scout</a>
       <h1>League hub</h1>
-      <p class="sub" style="margin:4px 0 0" id="leagueLine">Banter, charts and your own team, all in one place</p>
+      <p class="sub" style="margin:4px 0 0" id="leagueLine">Banter and charts for the league</p>
     </div>
     <form class="load" id="loadForm">
       <label>League ID
@@ -121,9 +121,14 @@
 
   <div id="app" class="hidden">
     <div class="sharebar">
-      <span>Share this page:</span>
+      <span id="shareLabel">Share this page:</span>
       <input id="shareLink" readonly aria-label="Link to share">
       <button class="btn ghost" id="copyLink" type="button">Copy link</button>
+    </div>
+    <div class="sharebar fullonly hidden">
+      <span>Full link, with My team and the way back (for one friend):</span>
+      <input id="fullLink" readonly aria-label="Full link">
+      <button class="btn ghost" id="copyFull" type="button">Copy link</button>
     </div>
 
     <div class="choices" id="choices" role="group" aria-label="What would you like to see?">
@@ -131,7 +136,7 @@
         <span class="t">Banter</span><span class="d">This week's match-ups and facts to argue about</span></button>
       <button class="choice" type="button" data-tab="charts" aria-pressed="false">
         <span class="t">Charts</span><span class="d">The league race, head-to-head records and who's scoring</span></button>
-      <button class="choice" type="button" data-tab="team" aria-pressed="false">
+      <button class="choice fullonly hidden" type="button" data-tab="team" aria-pressed="false">
         <span class="t">My team</span><span class="d">Waiver targets, trades and squads for your own team</span></button>
     </div>
     <p class="sub" id="loading" style="display:none">Loading…</p>
@@ -200,7 +205,8 @@
 <script>
 const $ = id => document.getElementById(id);
 const FACTS_SHOWN = 2;   // facts shown at first; "Show more" reveals the rest
-const TABS = ["banter", "charts", "team"];
+const FULL = new URLSearchParams(location.search).get("full") === "1";   // the full version: My team and the way back
+const TABS = FULL ? ["banter", "charts", "team"] : ["banter", "charts"];
 let leagueId = null;     // the league this page is open on
 let tab = null;          // the choice currently open (none until a friend picks one)
 const loaded = { banter: null, charts: null };   // which league each choice's data is for, so each loads only once
@@ -220,7 +226,7 @@ const tint = (good, share) => `color-mix(in srgb, var(${good ? "--pitch" : "--ri
 
 function setAddress() {
   // the address is a link anyone can open; &team= only keeps your highlight on reload
-  history.replaceState(null, "", "?league=" + leagueId + (tab ? "&tab=" + tab : "") + (myId ? "&team=" + myId : ""));
+  history.replaceState(null, "", "?league=" + leagueId + (tab ? "&tab=" + tab : "") + (myId ? "&team=" + myId : "") + (FULL ? "&full=1" : ""));
 }
 
 async function getJson(path) {
@@ -261,8 +267,8 @@ function openLeague(id, firstTab) {
   tab = null;
   $("app").classList.remove("hidden");
   $("error").classList.add("hidden");
-  $("leagueLine").textContent = "League " + id;
-  $("shareLink").value = location.origin + "/league?league=" + id;   // the link to send: it opens on the choices
+  $("shareLink").value = location.origin + "/league?league=" + id;   // the link to send: view-only, and it opens on the choices
+  $("fullLink").value = location.origin + "/league?league=" + id + "&full=1";
   document.querySelectorAll(".choice").forEach(b => b.setAttribute("aria-pressed", false));
   TABS.forEach(t => $("panel-" + t).classList.add("hidden"));
   if (TABS.includes(firstTab)) openTab(firstTab); else setAddress();
@@ -549,6 +555,16 @@ $("loadForm").addEventListener("submit", e => {
   const id = $("leagueId").value.trim();
   if (/^[0-9]+$/.test(id)) openLeague(id, null);
 });
+function copyButton(button, input) {
+  button.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(input.value); }
+    catch (e) { input.select(); return; }   // no clipboard access: select it so they can copy by hand
+    button.textContent = "Copied";
+    setTimeout(() => { button.textContent = "Copy link"; }, 2000);
+  });
+}
+copyButton($("copyLink"), $("shareLink"));
+copyButton($("copyFull"), $("fullLink"));
 $("teamForm").addEventListener("submit", e => {
   e.preventDefault();
   const team = $("teamId").value.trim();
@@ -556,14 +572,12 @@ $("teamForm").addEventListener("submit", e => {
   try { localStorage.setItem("teamId", team); } catch (err) { /* no storage: the link still carries the team */ }
   location.href = "/?team=" + team + "&league=" + leagueId;
 });
-$("copyLink").addEventListener("click", async () => {
-  try { await navigator.clipboard.writeText($("shareLink").value); }
-  catch (e) { $("shareLink").select(); return; }   // no clipboard access: select it so they can copy by hand
-  $("copyLink").textContent = "Copied";
-  setTimeout(() => { $("copyLink").textContent = "Copy link"; }, 2000);
-});
 
-// a shared link looks like /league?league=12345 (add &tab=banter, charts or team to open straight on one)
+// a shared link looks like /league?league=12345 (add &tab=banter or &tab=charts to open straight on one).
+// Without &full=1 the page has no way into the rest of Draft Scout, so it can be shared as a view-only page.
+// With &full=1 (the link for one friend) it also shows the way back and My team. That's a convenience, not
+// a lock: anyone who adds &full=1 to the address gets it.
+if (FULL) document.querySelectorAll(".fullonly").forEach(el => el.classList.remove("hidden"));
 const params = new URLSearchParams(location.search);
 let stored = null;
 try { stored = localStorage.getItem("teamId"); } catch (e) { /* no storage: nothing to highlight */ }
@@ -571,11 +585,12 @@ const teamText = params.get("team") || stored;
 if (/^[0-9]+$/.test(teamText || "")) {
   myId = Number(teamText);
   $("teamId").value = teamText;
-  $("backLink").href = "/?team=" + teamText; $("backLink").classList.remove("hidden");
+  $("backLink").href = "/?team=" + teamText;
 }
 const leagueParam = params.get("league");
 if (/^[0-9]+$/.test(leagueParam || "")) {
   $("leagueId").value = leagueParam;
+  if (!FULL) $("loadForm").classList.add("hidden");   // the link already has the league, so friends don't need the ID box
   openLeague(leagueParam, params.get("tab"));
 }
 </script>
