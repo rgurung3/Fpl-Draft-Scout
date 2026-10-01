@@ -1200,9 +1200,10 @@ def facts_by_kind(matches):
     return {f["kind"]: f["text"] for f in app.league_banter(banter_league(matches))["facts"]}
 
 
-def test_facts_are_capped_and_not_repeated():
+def test_facts_are_capped_and_not_repeated(monkeypatch):
+    monkeypatch.setattr(app, "FACT_COUNT", 4)
     kinds = [f["kind"] for f in app.league_banter(banter_league(BANTER_WEEKS))["facts"]]
-    assert len(kinds) == app.FACT_COUNT
+    assert len(kinds) == 4
     assert len(kinds) == len(set(kinds))
 
 
@@ -1223,6 +1224,7 @@ def test_each_fact_reads_from_the_numbers(monkeypatch):
 
 def test_luck_fact_finds_the_manager_whose_table_place_lags_their_points(monkeypatch):
     monkeypatch.setattr(app, "FACT_COUNT", 20)
+    monkeypatch.setattr(app, "LUCK_FACT_MIN", 99)   # no "play everyone" facts (they name Team 2 too)
     # Team 2 scores 200 (the most) but loses both games by a point, so it sits 4th in the table
     weeks = [match(1, 12, 100, 13, 101), match(1, 10, 10, 11, 5),
              match(2, 12, 100, 14, 101), match(2, 10, 10, 13, 5)]
@@ -1549,3 +1551,86 @@ def test_league_hub_offers_rivalries_to_everyone():
     page = res.data.decode()
     res.close()
     assert '<button class="choice" type="button" data-tab="rivalries"' in page      # not fullonly
+
+
+# ---------------------------------------------------------------- luck (league points vs playing everyone)
+
+def luck_of(matches):
+    return {m["entry_id"]: m for m in app.league_banter(h2h(matches))["luck"]}
+
+
+def test_luck_compares_actual_points_with_playing_everyone():
+    # scores 60, 55, 10 and 50: playing everyone would give 3, 2, 0 and 1 league points
+    by_team = luck_of([match(1, 10, 60, 13, 50), match(1, 11, 55, 12, 10)])
+    assert [by_team[t]["expected_points"] for t in (100, 101, 102, 103)] == [3, 2, 0, 1]
+    assert [by_team[t]["luck"] for t in (100, 101, 102, 103)] == [0, 1, 0, -1]   # 101 got a weak opponent
+
+
+def test_luck_counts_a_draw_as_one_point_against_that_opponent():
+    by_team = luck_of([match(1, 10, 60, 11, 40), match(1, 12, 50, 13, 50)])
+    assert by_team[102]["expected_points"] == pytest.approx(1.3, abs=0.05)   # beat 101, drew 103, lost to 100
+    assert by_team[102]["luck"] == pytest.approx(-0.3, abs=0.05)             # the real draw gave only 1
+
+
+def test_luck_adds_up_over_the_weeks_and_ignores_unfinished_matches():
+    weeks = [match(1, 10, 60, 13, 50), match(1, 11, 55, 12, 10),
+             match(2, 10, 10, 11, 80), match(2, 12, 70, 13, 20),
+             match(3, 10, 0, 13, 0, finished=False)]
+    by_team = luck_of(weeks)
+    assert by_team[100]["expected_points"] == 3                    # 3 in week 1, 0 in week 2 (lowest score)
+    assert by_team[101]["expected_points"] == 2 + 3                # 2, then the top score
+    assert by_team[100]["luck"] == 0 and by_team[101]["luck"] == 1
+
+
+def test_luck_skips_a_bye_week():
+    by_team = luck_of([match(1, 10, 55, None, None), match(1, 11, 40, 12, 30)])
+    assert by_team[100]["expected_points"] == 0 and by_team[100]["luck"] == 0   # no match to compare with
+    assert by_team[101]["expected_points"] == 1.5                                # beat 30, lost to 55
+    assert by_team[101]["luck"] == 1.5
+
+
+def test_banter_route_includes_luck(fake_api, monkeypatch):
+    fake = app.get_json
+
+    def with_matches(url):
+        return banter_league(BANTER_WEEKS) if url.endswith("/league/123/details") else fake(url)
+
+    monkeypatch.setattr(app, "get_json", with_matches)
+    luck = app.app.test_client().get("/api/league/123/banter").get_json()["banter"]["luck"]
+    assert len(luck) == 5 and all({"team", "expected_points", "luck"} <= set(r) for r in luck)
+    assert luck == sorted(luck, key=lambda r: r["luck"], reverse=True)       # luckiest first
+
+
+def test_luck_facts_name_the_luckiest_and_unluckiest(monkeypatch):
+    monkeypatch.setattr(app, "FACT_COUNT", 20)
+    # 100 scores well but meets 101, the top scorer, both weeks; 103 scores poorly but meets the bottom team
+    weeks = [match(1, 10, 60, 11, 65), match(1, 12, 10, 13, 20),
+             match(2, 10, 58, 11, 70), match(2, 12, 10, 13, 15)]
+    facts = {f["kind"]: f["text"] for f in app.league_banter(h2h(weeks))["facts"]}
+    assert facts["lucky"] == ("Team 103 have 6 league points, but their scores only deserved 2. "
+                              "Don't ask questions.")
+    assert facts["unlucky"] == ("Team 100 have 0 league points, but their scores deserved 4. "
+                                "Robbed by the fixture list.")
+
+
+def test_the_table_place_luck_fact_steps_aside_for_the_same_team(monkeypatch):
+    monkeypatch.setattr(app, "FACT_COUNT", 20)
+    # 100 is the unluckiest by both measures, so only the "play everyone" fact names them
+    weeks = [match(1, 10, 60, 11, 65), match(1, 12, 10, 13, 20),
+             match(2, 10, 58, 11, 70), match(2, 12, 10, 13, 15)]
+    facts = {f["kind"]: f["text"] for f in app.league_banter(h2h(weeks))["facts"]}
+    assert "unlucky" in facts and "luck" not in facts
+
+
+def test_luck_facts_need_a_big_enough_gap(monkeypatch):
+    monkeypatch.setattr(app, "FACT_COUNT", 20)
+    facts = facts_by_kind([match(1, 10, 60, 11, 40), match(1, 12, 55, 13, 50)])   # luck is only ever 0 or 1
+    assert "lucky" not in facts and "unlucky" not in facts
+
+
+def test_league_hub_has_a_luck_chart():
+    res = app.app.test_client().get("/league?league=123")
+    page = res.data.decode()
+    res.close()
+    assert 'id="luck"' in page and "function renderLuck" in page
+    assert page.index('id="luckSection"') < page.index('id="panel-charts"')   # in Banter, not Charts
