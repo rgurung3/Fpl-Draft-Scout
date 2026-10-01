@@ -90,7 +90,7 @@
 
 ## How league banter works
 - league_banter(details) in app.py, route /api/league/<id>/banter. Built from the league details (matches and league_history's table), so no extra requests. None until a gameweek has finished or if the league has no matches.
-- hot_match: among the next unplayed gameweek's matches, the pair with the lowest table places added together, then the smallest gap in league points. battles: Battle for 3rd (places 3 and 4) and Wooden spoon watch (last two); needs 4 and 5 managers. Each says how far apart they are and whether they meet again.
+- The three cards are three different matches from the next unplayed gameweek (nobody is on two cards, and nothing from later weeks): hot_match = the pair with the lowest table places added together (then the smaller gap); Battle for 3rd = of the rest, the pair whose places are closest to 3rd; Wooden spoon watch = of the rest, the lowest-placed pair. A card is left out if the gameweek has too few matches. Each has a "line" saying how far apart they are.
 - facts (in this order, first FACT_COUNT = 5 that apply): luck (table place at least LUCK_MIN_GAP = 2 below points-scored place), harsh (highest score that still lost), streak (current winning or losing run of STREAK_MIN = 3 or more), thrashing, closest, low, high. The page shows 2, the rest behind "Show more". Text is written from the numbers, mild teasing, no AI.
 - Last season's facts (head-to-head records between managers across seasons, finish vs last year) are not built yet: they need last season's league ID and a way to match managers across seasons (entry IDs may change). Next step is a script to check what the Draft site still returns for the old league.
 

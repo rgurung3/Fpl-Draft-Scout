@@ -1146,34 +1146,53 @@ def test_hot_match_is_the_best_placed_pair_in_the_next_gameweek():
     hot = app.league_banter(banter_league(BANTER_WEEKS))["hot_match"]
     assert hot["gw"] == 3
     assert {hot["a"]["entry_id"], hot["b"]["entry_id"]} == {100, 101}
-    assert hot["line"] == "Only 3 league points between them."
+    assert hot["line"] == "3 points apart."
 
 
 def test_no_hot_match_when_nothing_is_left_to_play():
     assert app.league_banter(banter_league(BANTER_WEEKS[:4]))["hot_match"] is None
 
 
-def test_battles_pair_up_neighbours_in_the_table():
-    banter = app.league_banter(banter_league(BANTER_WEEKS))
-    third, bottom = banter["battles"]
-    assert third["title"] == "Battle for 3rd"
-    assert (third["a"]["position"], third["b"]["position"]) == (3, 4)
-    assert bottom["title"] == "Wooden spoon watch"
-    assert (bottom["a"]["position"], bottom["b"]["position"]) == (4, 5)
+def test_cards_are_three_different_matches_from_the_next_gameweek():
+    # 6 teams, 3 matches in GW2. After GW1: 0, 2, 4 won (3 pts); 1, 3, 5 lost
+    entries = [{"id": 10 + i, "entry_id": 100 + i, "entry_name": f"Team {i}"} for i in range(6)]
+    matches = [match(1, 10, 90, 11, 10), match(1, 12, 80, 13, 10), match(1, 14, 70, 15, 10),
+               match(2, 10, 0, 15, 0, finished=False), match(2, 12, 0, 13, 0, finished=False),
+               match(2, 14, 0, 11, 0, finished=False), match(3, 10, 0, 11, 0, finished=False)]
+    banter = app.league_banter({"league_entries": entries, "matches": matches})
+    cards = [banter["hot_match"], *banter["battles"]]
+    assert [c["gw"] for c in cards] == [2, 2, 2]               # GW3 is further ahead, so it's ignored
+    teams = [c[side]["entry_id"] for c in cards for side in "ab"]
+    assert len(teams) == len(set(teams)) == 6                  # nobody is on two cards
+    assert {c["title"] for c in banter["battles"]} == {"Battle for 3rd", "Wooden spoon watch"}
 
 
-def test_battle_says_when_the_pair_meet_again():
-    banter = app.league_banter(banter_league(BANTER_WEEKS))
+def test_battle_cards_follow_the_table():
+    entries = [{"id": 10 + i, "entry_id": 100 + i, "entry_name": f"Team {i}"} for i in range(6)]
+    matches = [match(1, 10, 90, 11, 10), match(1, 12, 80, 13, 10), match(1, 14, 70, 15, 10),
+               match(2, 10, 0, 15, 0, finished=False), match(2, 12, 0, 13, 0, finished=False),
+               match(2, 14, 0, 11, 0, finished=False)]
+    banter = app.league_banter({"league_entries": entries, "matches": matches})
     by_title = {b["title"]: b for b in banter["battles"]}
-    assert by_title["Battle for 3rd"]["meet_gw"] is None    # Teams 1 and 3 don't play each other again
-    assert by_title["Wooden spoon watch"]["meet_gw"] == 4   # Teams 3 and 4 meet in GW4
-    assert by_title["Wooden spoon watch"]["line"].endswith("They meet in GW4.")
+    # table: Team 0, 2, 4 (3 pts, in that order of points scored), then Teams 1, 3, 5
+    assert {banter["hot_match"]["a"]["entry_id"], banter["hot_match"]["b"]["entry_id"]} == {100, 105}
+    def teams(card):
+        return {card["a"]["entry_id"], card["b"]["entry_id"]}
+
+    assert teams(by_title["Battle for 3rd"]) == {104, 101}
+    assert teams(by_title["Wooden spoon watch"]) == {102, 103}
+    assert by_title["Wooden spoon watch"]["line"] == "3 points apart."
 
 
-def test_small_leagues_skip_the_battles():
-    entries = [{"id": 10, "entry_id": 100, "entry_name": "A"}, {"id": 11, "entry_id": 101, "entry_name": "B"}]
-    details = {"league_entries": entries, "matches": [match(1, 10, 50, 11, 40)]}
-    assert app.league_banter(details)["battles"] == []
+def test_cards_are_left_out_when_there_are_too_few_matches():
+    banter = app.league_banter(banter_league(BANTER_WEEKS))   # GW3 has two matches
+    assert banter["hot_match"] is not None
+    assert [b["title"] for b in banter["battles"]] == ["Battle for 3rd"]
+
+
+def test_no_battles_when_nothing_is_left_to_play():
+    banter = app.league_banter(banter_league(BANTER_WEEKS[:4]))
+    assert banter["hot_match"] is None and banter["battles"] == []
 
 
 def facts_by_kind(matches):

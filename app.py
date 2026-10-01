@@ -681,7 +681,6 @@ def league_history(details):
 FACT_COUNT = 5           # how many banter facts we keep (the page shows the first couple at first)
 STREAK_MIN = 3           # a winning or losing run has to be this long to be worth a mention
 LUCK_MIN_GAP = 2         # table place vs points-scored place: this many places apart counts as unlucky
-MIN_BATTLE_MANAGERS = 4  # the battle cards need this many managers (and one more for the bottom one)
 
 
 def ordinal(n):
@@ -696,11 +695,11 @@ def league_banter(details):
     details (matches and table) with no extra requests. Returns None if no gameweek
     has finished yet or the league isn't head-to-head, like league_history.
 
-    hot_match: the next gameweek's match with the most on it (the best-placed pair of
-      managers who face each other), or None if there are no matches left. Its "line" is
-      the short caption for the card; battles have one too.
-    battles: "Battle for 3rd" and "Wooden spoon watch": two managers who sit next to each
-      other in the table, how far apart they are, and whether they meet again.
+    hot_match, and the two cards in battles, are three different matches from the next
+    gameweek, so no manager is on two cards: hot_match is the best-placed pair, "Battle for
+    3rd" the pair closest to 3rd place, and "Wooden spoon watch" the lowest-placed pair.
+    Each card has a short "line" (how far apart they are). Cards are left out when the
+    gameweek has too few matches.
     facts: up to FACT_COUNT one-sentence facts, best first, each {kind, text}.
     Tone is mild teasing; it's all worked out from the numbers, not written by AI.
     """
@@ -736,29 +735,33 @@ def league_banter(details):
             coming.append({"gw": m["event"], "a": a, "b": b})
     coming.sort(key=lambda m: m["gw"])
 
-    # the next gameweek's match with the most on it: the best-placed pair, then the closest together
-    hot = None
-    if coming:
-        week = [m for m in coming if m["gw"] == coming[0]["gw"]]
-        m = min(week, key=lambda m: (table[m["a"]][0] + table[m["b"]][0],
-                                     abs(table[m["a"]][1] - table[m["b"]][1])))
-        gap = abs(table[m["a"]][1] - table[m["b"]][1])
-        hot = {"gw": m["gw"], "a": person(m["a"]), "b": person(m["b"]), "gap": gap,
-               "line": f"Only {gap} league points between them." if gap else "Level on league points."}
+    # the three cards are all matches in the next gameweek, each a different match, so nobody
+    # appears twice: the best-placed pair, then the pair closest to 3rd, then the lowest-placed pair
+    def place_sum(m):
+        return table[m["a"]][0] + table[m["b"]][0]
 
-    pairs = []
-    if len(order) >= MIN_BATTLE_MANAGERS:
-        pairs.append(("Battle for 3rd", 3))
-    if len(order) > MIN_BATTLE_MANAGERS:
-        pairs.append(("Wooden spoon watch", len(order) - 1))
-    battles = []
-    for title, upper in pairs:
-        a, b = order[upper - 1], order[upper]
-        gap = table[a][1] - table[b][1]
-        meet = next((m["gw"] for m in coming if {m["a"], m["b"]} == {a, b}), None)
-        apart = f"{gap} {'point' if gap == 1 else 'points'} apart." if gap else "Level on points."
-        battles.append({"title": title, "a": person(a), "b": person(b), "gap": gap, "meet_gw": meet,
-                        "line": apart + (f" They meet in GW{meet}." if meet else "")})
+    def gap_of(m):
+        return abs(table[m["a"]][1] - table[m["b"]][1])
+
+    def card(m, **extra):
+        gap = gap_of(m)
+        apart = f"{gap} {'point' if gap == 1 else 'points'} apart." if gap else "Level on league points."
+        return {**extra, "gw": m["gw"], "a": person(m["a"]), "b": person(m["b"]), "gap": gap, "line": apart}
+
+    hot, battles = None, []
+    week = [m for m in coming if m["gw"] == coming[0]["gw"]] if coming else []
+    if week:
+        best = min(week, key=lambda m: (place_sum(m), gap_of(m)))
+        hot = card(best)
+        week.remove(best)
+    if week:
+        third = min(week, key=lambda m: (abs(table[m["a"]][0] - 3.5) + abs(table[m["b"]][0] - 3.5),
+                                         gap_of(m)))
+        battles.append(card(third, title="Battle for 3rd"))
+        week.remove(third)
+    if week:
+        spoon = max(week, key=lambda m: (place_sum(m), -gap_of(m)))
+        battles.append(card(spoon, title="Wooden spoon watch"))
 
     facts = []
 
