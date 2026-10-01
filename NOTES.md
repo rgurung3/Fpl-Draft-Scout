@@ -24,7 +24,8 @@
 - Per-90 stats no longer have a cliff at 180 minutes: they count in proportion below it (Barcola on 168 minutes had xGI counted as 0)
 - Trade analyzer moved to its own page (/trade) so the main page is less cluttered. Links on the main page carry team, league and view across ("Build a trade with this team" adds &with=). Shared styles now live in static/common.css
 - League banter page (/banter?league=<id>, for sharing with the league): hot match of the week, Battle for 3rd, Wooden spoon watch, and up to 5 facts (2 shown, rest behind Show more). This season only for now. Checked against the real league (league 52607); layout checked in the browser
-- Tests (pytest, 167 passing) and CI (GitHub Actions); ruff clean
+- League charts page (/charts?league=<id>, for sharing with the league): the league race and weekly grid moved here from the main page, plus a head-to-head grid (W-D-L between every pair, click a row for the points), a points scored vs conceded scatter and a weekly score range chart. Main page has a "League charts" link that carries team, league and view. Checked against the real league (52607) in the browser, desktop and phone width
+- Tests (pytest, 180 passing) and CI (GitHub Actions); ruff clean
 
 ## How it works
 - app.py fetches data from the FPL Draft site (team → league lookup, league details, who owns whom) and the classic FPL site (fixtures + difficulty), then rates every player 0–100.
@@ -54,6 +55,12 @@
 - load_league(league_id, view) rates everyone in both views: week_score and season_score on every player; score, breakdown and fixtures follow the chosen view. Unknown views fall back to "week". All three routes accept ?view=season.
 - The page: toggle in the league bar reloads with ?view=, the link keeps &view=season, the free agents table shows both ratings (chosen one in bold, sorted by it), fixture strips show the view's window, trades send the view.
 
+## How the league charts page works
+- league_charts(details) in app.py, route /api/league/<id>/charts, page static/charts.html (route /charts). Built from the league details (finished matches and the table), so no extra requests. None until a gameweek has finished or if the league isn't head-to-head.
+- Returns "history" (league_history, for the race and the weekly grid), "managers" in table order (team, manager, league_points, points_for and points_against over their finished matches, and low/high/average weekly score) and "head_to_head": per manager, a record against each opponent met so far (won, drawn, lost, points_for, points_against). Opponents not yet met are left out, so the grid shows a dot.
+- The page only draws this, with plain SVG (no chart library). It highlights you from ?team= or the team ID the main page last used; the share link has only ?league=. Scatter labels move up or down to avoid overlapping each other.
+- The race and its grid now live on this page only. load_league still returns "history" (check_league.py uses it), but the main page no longer draws it.
+
 ## How the league race works
 - league_history(details) in app.py, returned as "history" in the league data. Built from details["matches"] (already fetched), so no extra requests.
 - Only matches with finished = true count; future gameweeks are listed with 0 points.
@@ -61,7 +68,7 @@
 - Each week: W = 3 league points (WIN_POINTS), D = 1 (DRAW_POINTS), L = 0. A match with no opponent score gets no result.
 - Per manager: points, results, league_points (running total), behind (vs the leader that week), scored, table_total (the official table's total). Sorted by league points, then points scored. Plus the league's average score each week.
 - None for classic-scoring leagues (no matches) and before any gameweek finishes; the page then shows a short message.
-- The page draws it with plain SVG (no chart library). Lines are nudged a pixel or two apart by table position so tied managers stay visible (visual only). The grid scrolls sideways once there are many gameweeks, newest weeks shown first, team names stay put.
+- The charts page draws it with plain SVG (no chart library). Lines are nudged a pixel or two apart by table position so tied managers stay visible (visual only). The grid scrolls sideways once there are many gameweeks, newest weeks shown first, team names stay put.
 - check_league.py checks everyone has weekly results and that our league points equal the official table.
 
 ## How suggestions work
@@ -92,7 +99,7 @@
 - league_banter(details) in app.py, route /api/league/<id>/banter. Built from the league details (matches and league_history's table), so no extra requests. None until a gameweek has finished or if the league has no matches.
 - The three cards are three different matches from the next unplayed gameweek (nobody is on two cards, and nothing from later weeks): hot_match = the pair with the lowest table places added together (then the smaller gap); Battle for 3rd = of the rest, the pair whose places are closest to 3rd; Wooden spoon watch = of the rest, the lowest-placed pair. A card is left out if the gameweek has too few matches. Each has a "line" saying how far apart they are.
 - facts (in this order, first FACT_COUNT = 5 that apply): luck (table place at least LUCK_MIN_GAP = 2 below points-scored place), harsh (highest score that still lost), streak (current winning or losing run of STREAK_MIN = 3 or more), thrashing, closest, low, high. The page shows 2, the rest behind "Show more". Text is written from the numbers, mild teasing, no AI.
-- Last season's facts (head-to-head records between managers across seasons, finish vs last year) are not built yet: they need last season's league ID and a way to match managers across seasons (entry IDs may change). Next step is a script to check what the Draft site still returns for the old league.
+- Last season's facts (head-to-head records between managers across seasons, finish vs last year) are not built yet: checked on 2026-09-30: the Draft API only returns the current season. The league (52607) is marked is_renewed and keeps the same ID and entry IDs, but its team history, matches and standings start again at GW1, and a season parameter is ignored. Player totals for past seasons exist on the classic site (element-summary history_past, matched by player code), but nothing about managers. So this needs last season's results entered by hand (e.g. a final standings screenshot), or snapshots saved from this season on.
 
 ## Decisions
 - Flask backend, because the Draft site blocks requests made directly from a browser page.
@@ -122,13 +129,14 @@
 4. Trade analyzer (done)
 5. "Why this pick?" explanations: short, from the numbers (done). AI long version dropped
 6. Season view (now "Until the break"): a longer-term rating alongside Next 5, so players like Porro (poor form, but an attacking full back) aren't dropped too early (built; tune weights against the real league next)
-7. Banter with last season's league (head-to-head records between managers, places gained or lost)
+7. Banter with last season's league (head-to-head records between managers, places gained or lost). Blocked: the API doesn't keep last season's league (see Banter notes). Options: enter last season's final standings by hand, or save a snapshot each gameweek from now on
 8. One AI feature where AI writes words and Python does the maths (ideas: trade pitch message, weekly league recap)
 9. Accounts/login (needed for watchlists + limiting AI usage)
 
 Idea for later: trade finder. "I want Joao Pedro and I'll give Fernandes": suggest which of their players makes the best filler, so the positions match, it helps me, and it still looks fair to them.
 
 ## Known issues / ideas
+- Charts: head-to-head records are this season only (last season's data isn't available from the API: the Draft site replaces a league's data when it renews). Ideas not built: a luck chart (league points vs a play-everyone table), a rank-over-time chart, saving a snapshot each gameweek so next season can compare with this one.
 - Banter: facts use team names, and two teams with the same name would be confusing. Before any gameweek finishes there's nothing to show. The hot match ignores squad strength (only the table).
 - The FPL Draft data feed isn't officially documented and could change.
 - The Draft site sits behind Cloudflare and may block cloud servers (403). It worked from Render at deploy time, but Cloudflare can change its mind; if the live site starts showing the 403 message, that's the cause, not a bug in the app.

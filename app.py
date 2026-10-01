@@ -829,6 +829,67 @@ def league_banter(details):
     return {"gws": history["gws"], "hot_match": hot, "battles": battles, "facts": facts[:FACT_COUNT]}
 
 
+# ---------------------------------------------------------------- league charts (head-to-head)
+
+def league_charts(details):
+    """
+    Everything the charts page draws, worked out from the league details (finished matches
+    and the table, so no extra requests). Returns None if no gameweek has finished yet or
+    the league isn't head-to-head, like league_history.
+
+    history: league_history (the race and the weekly grid).
+    managers, in table order, each with entry_id, team, manager and:
+      points_for / points_against  total points scored by them / by their opponents in
+                                   their finished matches (the same matches, so they compare)
+      league_points                from the table
+      low, high, average           their weekly scores: {"gw", "points"} for low and high
+                                   (None if they have no scores yet)
+    head_to_head: one row per manager (table order), {"entry_id", "vs": [...]}, where each
+      opponent they've played has {entry_id, won, drawn, lost, points_for, points_against}.
+      Opponents they haven't met yet are left out.
+    """
+    history = league_history(details)
+    if history is None:
+        return None
+    entries = {e["entry_id"]: e for e in details.get("league_entries", []) if e.get("entry_id")}
+    entry_of = {e.get("id"): e["entry_id"] for e in entries.values()}
+
+    versus = {}  # team -> opponent -> running totals
+    for m in details.get("matches", []):
+        a, b = entry_of.get(m.get("league_entry_1")), entry_of.get(m.get("league_entry_2"))
+        pa, pb = m.get("league_entry_1_points"), m.get("league_entry_2_points")
+        if not m.get("finished") or a is None or b is None or pa is None or pb is None:
+            continue
+        for me, them, mine, theirs in ((a, b, pa, pb), (b, a, pb, pa)):
+            row = versus.setdefault(me, {}).setdefault(them, {
+                "entry_id": them, "won": 0, "drawn": 0, "lost": 0, "points_for": 0, "points_against": 0})
+            row["won" if mine > theirs else "lost" if mine < theirs else "drawn"] += 1
+            row["points_for"] += mine
+            row["points_against"] += theirs
+
+    order = [m["entry_id"] for m in history["managers"]]
+    managers, head_to_head = [], []
+    for m in history["managers"]:
+        entry = m["entry_id"]
+        played = [(p, gw) for p, gw in zip(m["points"], history["gws"]) if p is not None]
+        low = min(played, key=lambda x: x[0]) if played else None
+        high = max(played, key=lambda x: x[0]) if played else None
+        opponents = versus.get(entry, {})
+        info = entries.get(entry, {})
+        managers.append({
+            "entry_id": entry, "team": info.get("entry_name") or f"Team {entry}",
+            "manager": f'{info.get("player_first_name", "")} {info.get("player_last_name", "")}'.strip(),
+            "league_points": m["league_points"][-1],
+            "points_for": sum(o["points_for"] for o in opponents.values()),
+            "points_against": sum(o["points_against"] for o in opponents.values()),
+            "low": {"gw": low[1], "points": low[0]} if low else None,
+            "high": {"gw": high[1], "points": high[0]} if high else None,
+            "average": round(sum(p for p, _ in played) / len(played), 1) if played else None})
+        head_to_head.append({"entry_id": entry,
+                             "vs": [opponents[o] for o in order if o in opponents]})
+    return {"history": history, "managers": managers, "head_to_head": head_to_head}
+
+
 # ---------------------------------------------------------------- talking to FPL
 
 LEAGUE_NOT_FOUND = "No Draft league found with that ID. Check the number in your league's URL."
@@ -999,6 +1060,11 @@ def banter_page():
     return send_from_directory(app.static_folder, "banter.html")
 
 
+@app.route("/charts")
+def charts_page():
+    return send_from_directory(app.static_folder, "charts.html")
+
+
 @app.route("/health")
 def health():
     """
@@ -1027,6 +1093,18 @@ def banter(league_id):
     return jsonify({"league_id": league_id,
                     "league_name": details.get("league", {}).get("name", f"League {league_id}"),
                     "banter": league_banter(details)})
+
+
+@app.route("/api/league/<int:league_id>/charts")
+def charts(league_id):
+    """The race, head-to-head records and score charts for a head-to-head league (see league_charts)."""
+    try:
+        details = fetch(f"{DRAFT}/league/{league_id}/details", LEAGUE_NOT_FOUND)
+    except FplError as e:
+        return jsonify({"error": e.message}), e.status
+    return jsonify({"league_id": league_id,
+                    "league_name": details.get("league", {}).get("name", f"League {league_id}"),
+                    "charts": league_charts(details)})
 
 
 @app.route("/api/team/<int:entry_id>")

@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>League charts - Draft Scout</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/common.css">
+<style>
+  .sharebar { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; color: var(--muted); font-size: .9rem; margin-bottom: 28px; }
+  .sharebar input { flex: 1 1 240px; max-width: 360px; padding: 7px 10px; border: 1px solid var(--line);
+    border-radius: 6px; background: var(--surface); color: var(--ink); font-size: .9rem; }
+  .back { display: inline-block; margin-bottom: 8px; color: var(--pitch); font-weight: 600; text-decoration: none; }
+  .tablewrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; }
+
+  /* league race */
+  .minihead { font-family: var(--display); font-weight: 600; font-size: 1.3rem; margin: 26px 0 2px; }
+  .racecap { margin: 0 0 6px; min-height: 1.5em; font-size: .95rem; }
+  .racecap strong { font-weight: 600; }
+  .chartwrap { background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 8px 6px 2px; }
+  .race { display: block; width: 100%; height: auto; }
+  .race text { font-family: var(--body); font-size: 12px; fill: var(--muted); }
+  .race text.lbl { fill: var(--ink); font-weight: 600; }
+  .race .grid { stroke: var(--line); }
+  .race .ink { fill: none; stroke: var(--muted); stroke-opacity: .45; stroke-width: 1.5;
+    stroke-linejoin: round; stroke-linecap: round; }
+  .race .hit { fill: none; stroke: transparent; stroke-width: 14; cursor: pointer; }
+  .race .dot { fill: var(--muted); fill-opacity: .6; }
+  .race .wkdot { display: none; fill: var(--muted); stroke: var(--surface); stroke-width: 1.5; }
+  .race .me .wkdot { display: inline; fill: var(--amber); }
+  .race .hot .wkdot { display: inline; fill: var(--ink); }
+  .race .me .ink { stroke: var(--amber); stroke-opacity: 1; stroke-width: 3; }
+  .race .me .dot { fill: var(--amber); fill-opacity: 1; stroke: var(--surface); stroke-width: 2; }
+  .race .hot .ink { stroke: var(--ink); stroke-opacity: 1; stroke-width: 3; }
+  .race .hot .dot { fill: var(--ink); fill-opacity: 1; }
+  table.weeks { width: auto; border-collapse: separate; border-spacing: 2px; font-size: .9rem; }
+  table.weeks th, table.weeks td { padding: 5px 6px; border: 0; cursor: default; white-space: nowrap; }
+  table.weeks th { text-align: center; font-weight: 500; color: var(--muted); }
+  table.weeks td.team { position: sticky; left: 0; z-index: 1; background: var(--surface);
+    max-width: 11rem; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+  table.weeks tr.me td.team { color: var(--ink); font-weight: 600; }
+  table.weeks td.wk { min-width: 3.4em; text-align: center; border-radius: 3px; font-variant-numeric: tabular-nums; }
+  table.weeks .res { font-size: .7rem; color: var(--muted); margin-left: 3px; }
+
+  /* head to head: rows are the manager, columns are the opponent */
+  table.h2h th.opp { height: 9.5rem; vertical-align: bottom; padding: 4px 2px; }
+  table.h2h th.opp span { writing-mode: vertical-rl; transform: rotate(180deg); display: inline-block;
+    max-height: 9rem; overflow: hidden; text-overflow: ellipsis; }
+  table.h2h td.wk { min-width: 3.6em; }
+  table.h2h td.self { background: var(--line); opacity: .5; }
+  table.h2h td.wk.pick, table.h2h tr.pick td.team { outline: 2px solid var(--amber); outline-offset: -2px; }
+  table.h2h tr { cursor: pointer; }
+  .picked { background: var(--surface); border: 1px solid var(--line); border-left: 5px solid var(--amber);
+    border-radius: 4px; padding: 12px 16px; margin-top: 12px; }
+  .picked ul { margin: 6px 0 0; padding: 0; list-style: none; display: grid; gap: 2px; }
+  .picked li { display: flex; justify-content: space-between; gap: 16px; max-width: 520px; }
+  .picked .rec { font-variant-numeric: tabular-nums; color: var(--muted); }
+
+  /* scatter and spread */
+  .plot { display: block; width: 100%; height: auto; }
+  .plot text { font-family: var(--body); font-size: 12px; fill: var(--muted); }
+  .plot text.lbl { fill: var(--ink); }
+  .plot text.lbl.me { font-weight: 600; }
+  .plot .grid { stroke: var(--line); }
+  .plot .diag { stroke: var(--muted); stroke-dasharray: 5 4; stroke-opacity: .7; }
+  .plot .pt { fill: var(--pitch); fill-opacity: .85; stroke: var(--surface); stroke-width: 1.5; }
+  .plot .pt.me { fill: var(--amber); fill-opacity: 1; }
+  .plot .range { stroke: var(--pitch); stroke-opacity: .5; stroke-width: 8; stroke-linecap: round; }
+  .plot .range.me { stroke: var(--amber); stroke-opacity: .7; }
+  .plot .avg { stroke: var(--ink); stroke-width: 3; }
+</style>
+</head>
+<body>
+<main>
+  <header class="top">
+    <div>
+      <a class="back hidden" id="backLink" href="/">← Back to Draft Scout</a>
+      <h1>League charts</h1>
+      <p class="sub" style="margin:4px 0 0" id="leagueLine">The race, head-to-head records and who's scoring</p>
+    </div>
+    <form class="load" id="loadForm">
+      <label>League ID
+        <input id="leagueId" inputmode="numeric" pattern="[0-9]+" required placeholder="the number in your league's URL">
+      </label>
+      <button class="btn" id="loadBtn" type="submit">Show charts</button>
+    </form>
+  </header>
+
+  <div id="error" class="error hidden" role="alert"></div>
+
+  <div id="app" class="hidden">
+    <div class="sharebar">
+      <span>Share this page:</span>
+      <input id="shareLink" readonly aria-label="Link to share">
+      <button class="btn ghost" id="copyLink" type="button">Copy link</button>
+    </div>
+    <div id="empty" class="empty hidden"></div>
+
+    <div id="charts">
+      <section>
+        <h2>League race</h2>
+        <p class="sub">Each manager's league points after every gameweek, climbing from 0 (3 for a win, 1 for a draw). Your line has a dot for each week. Hover or tap a line to see whose it is.</p>
+        <p class="racecap" id="raceCaption" aria-live="polite"></p>
+        <div class="chartwrap"><svg class="race" id="raceChart" role="img"></svg></div>
+        <h3 class="minihead">Points each gameweek</h3>
+        <p class="sub">Shaded against that week's league average: green above, red below. W, D or L is the head-to-head result.</p>
+        <div class="tablewrap" id="weeksWrap"><table class="weeks" id="weeksTable"></table></div>
+      </section>
+
+      <section>
+        <h2>Head to head</h2>
+        <p class="sub">Each row is a manager's record (won-drawn-lost) against the manager at the top of the column, this season so far. Green means they're ahead, red behind. Select a row to see the points too.</p>
+        <div class="tablewrap"><table class="weeks h2h" id="h2hTable"></table></div>
+        <div class="picked hidden" id="picked"></div>
+      </section>
+
+      <section>
+        <h2>Points scored and conceded</h2>
+        <p class="sub" id="scatterSub"></p>
+        <div class="chartwrap"><svg class="plot" id="scatter" role="img"></svg></div>
+      </section>
+
+      <section>
+        <h2>Weekly scores</h2>
+        <p class="sub">Each bar runs from a manager's lowest week to their best week, with the black mark at their average. Short bars are steady; long bars are boom or bust.</p>
+        <div class="chartwrap"><svg class="plot" id="spread" role="img"></svg></div>
+      </section>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let CH = null;          // what the server sent (see league_charts in app.py); this page only draws it
+let me = null;          // your team ID, if we know it, so your line and row stand out
+let picked = null;      // the manager whose head-to-head record is open
+
+function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+const place = n => n + (n % 100 >= 11 && n % 100 <= 13 ? "th" : ({ 1: "st", 2: "nd", 3: "rd" }[n % 10] || "th"));
+const teamName = id => CH.managers.find(m => m.entry_id === id)?.team ?? `Team ${id}`;
+const short = (s, n) => s.length > n ? s.slice(0, n - 1) + "…" : s;
+const tint = (good, share) => `color-mix(in srgb, var(${good ? "--pitch" : "--rival"}) ${share.toFixed(0)}%, transparent)`;
+
+async function loadLeague(id) {
+  $("loadBtn").disabled = true; $("loadBtn").textContent = "Loading…";
+  $("error").classList.add("hidden");
+  try {
+    let r;
+    try { r = await fetch(`/api/league/${id}/charts`); }
+    catch (e) { throw new Error("Can't reach Draft Scout. Check your connection and try again."); }
+    let j = null;
+    try { j = await r.json(); } catch (e) { /* not JSON, e.g. a crash page */ }
+    if (!r.ok || !j) throw new Error(j?.error || "Draft Scout hit an unexpected error. Try again in a moment.");
+    // the address is a link anyone in the league can open; &team= only keeps your highlight on reload
+    history.replaceState(null, "", "?league=" + id + (me ? "&team=" + me : ""));
+    render(j, id);
+  } catch (e) {
+    $("error").textContent = e.message; $("error").classList.remove("hidden");
+  } finally {
+    $("loadBtn").disabled = false; $("loadBtn").textContent = "Show charts";
+  }
+}
+
+function render(data, id) {
+  $("app").classList.remove("hidden");
+  $("leagueLine").textContent = data.league_name;
+  $("shareLink").value = location.origin + location.pathname + "?league=" + id;
+  CH = data.charts;
+  $("empty").classList.toggle("hidden", !!CH);
+  $("charts").classList.toggle("hidden", !CH);
+  if (!CH) {
+    $("empty").textContent = "The charts appear once a gameweek has finished. They need a head-to-head league, because they're built from the match results.";
+    return;
+  }
+  if (!CH.managers.some(m => m.entry_id === me)) me = null;   // that team isn't in this league
+  picked = null;
+  renderRace(); renderGrid(); renderHeadToHead(); renderScatter(); renderSpread();
+}
+
+// ---------------------------------------------------------------- league race
+
+function raceDefaultCaption() {
+  const h = CH.history, i = h.managers.findIndex(m => m.entry_id === me);
+  if (i < 0) return "Hover or tap a line to see whose it is.";
+  const m = h.managers[i], behind = m.behind.at(-1);
+  return `<strong>You</strong> are ${place(i + 1)} with ${m.league_points.at(-1)} league points`
+    + (behind ? `, ${behind} behind the leader.` : ", level with the lead.");
+}
+
+function raceCaption(id) {
+  const h = CH.history, i = h.managers.findIndex(m => m.entry_id === id), m = h.managers[i];
+  const behind = m.behind.at(-1);
+  return `<strong>${esc(teamName(id))}</strong>: ${place(i + 1)}, ${m.league_points.at(-1)} league points`
+    + (behind ? `, ${behind} behind the leader.` : ", level with the lead.");
+}
+
+function renderRace() {
+  const h = CH.history;
+  // chart geometry: gameweeks across (starting from "Start" = 0 points), league points upwards
+  const W = 720, H = 270, L = 44, R = 190, T = 14, B = 30, n = h.gws.length + 1;
+  const most = Math.max(...h.managers.map(m => m.league_points.at(-1)), 3);
+  const step = Math.max(3, Math.ceil(most / 4 / 3) * 3);
+  const top = Math.ceil(most / step) * step;
+  const x = i => L + i * (W - L - R) / (n - 1);
+  const y = v => T + (top - v) * (H - T - B) / top;
+  // league points move in steps of 3, so lines often sit on top of each other.
+  // Nudge each manager's line by a pixel or two (by table position) so ties stay visible.
+  const nudge = id => (h.managers.findIndex(m => m.entry_id === id) - (h.managers.length - 1) / 2) * 1.8;
+
+  let svg = "";
+  for (let v = 0; v <= top; v += step) {
+    svg += `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/>`
+      + `<text x="${L - 8}" y="${y(v) + 4}" text-anchor="end">${v}</text>`;
+  }
+  const every = Math.ceil(n / 10);
+  svg += `<text x="${x(0)}" y="${H - 8}" text-anchor="middle">Start</text>`;
+  h.gws.forEach((gw, i) => {
+    if ((i + 1) % every === 0 || i === n - 2) svg += `<text x="${x(i + 1)}" y="${H - 8}" text-anchor="middle">GW${gw}</text>`;
+  });
+
+  // other managers first, so your line is drawn on top
+  const order = [...h.managers].sort((a, b) => (a.entry_id === me) - (b.entry_id === me));
+  order.forEach(m => {
+    const series = [0, ...m.league_points], nd = nudge(m.entry_id);
+    const pts = series.map((v, i) => `${x(i).toFixed(1)},${(y(v) + nd).toFixed(1)}`).join(" ");
+    const dots = m.league_points.map((v, i) => {
+      const r = m.results[i], word = { W: "won", D: "drew", L: "lost" }[r];
+      return `<circle class="wkdot" cx="${x(i + 1).toFixed(1)}" cy="${(y(v) + nd).toFixed(1)}" r="3.5">`
+        + `<title>GW${h.gws[i]}: ${v} league points${word ? ", " + word : ""}</title></circle>`;
+    }).join("");
+    svg += `<g class="line ${m.entry_id === me ? "me" : ""}" data-id="${m.entry_id}">`
+      + `<title>${esc(teamName(m.entry_id))}</title>`
+      + `<polyline class="ink" points="${pts}"/><polyline class="hit" points="${pts}"/>${dots}`
+      + `<circle class="dot" cx="${x(n - 1)}" cy="${y(series.at(-1)) + nd}" r="${m.entry_id === me ? 5 : 3}"/></g>`;
+  });
+
+  // labels at the end: the leader, and you (nudged apart if they'd overlap)
+  const leader = h.managers[0], mine = h.managers.find(m => m.entry_id === me);
+  const leaderY = y(leader.league_points.at(-1));
+  if (leader !== mine) svg += `<text class="lbl" x="${x(n - 1) + 12}" y="${leaderY + 4}">${esc(teamName(leader.entry_id))}, 1st</text>`;
+  if (mine) {
+    let myY = y(mine.league_points.at(-1));
+    if (leader !== mine && Math.abs(myY - leaderY) < 16) myY = leaderY + 16;
+    const behind = mine.behind.at(-1);
+    svg += `<text class="lbl" x="${x(n - 1) + 12}" y="${myY + 4}">You, ${mine.league_points.at(-1)} pts${behind ? ", −" + behind : ""}</text>`;
+  }
+
+  const chart = $("raceChart");
+  chart.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  chart.setAttribute("aria-label", `Line chart of league points for ${h.managers.length} managers, GW${h.gws[0]} to GW${h.gws.at(-1)}.`);
+  chart.innerHTML = svg;
+  $("raceCaption").innerHTML = raceDefaultCaption();
+}
+
+function renderGrid() {
+  const h = CH.history;
+  const head = `<tr><th></th>${h.gws.map(gw => `<th>GW${gw}</th>`).join("")}</tr>`;
+  const rows = h.managers.map(m => {
+    const cells = m.points.map((p, i) => {
+      if (p == null) return `<td class="wk">–</td>`;
+      const avg = h.average[i], diff = p - avg, share = Math.min(Math.abs(diff) / 20, 1) * 55;
+      const r = m.results[i], word = { W: "won", D: "drew", L: "lost" }[r];
+      const title = `GW${h.gws[i]}: ${p} points (league average ${avg})${word ? ", " + word : ""}`;
+      return `<td class="wk" style="background:${tint(diff >= 0, share)}" title="${title}">${p}${r ? `<span class="res">${r}</span>` : ""}</td>`;
+    }).join("");
+    const mine = m.entry_id === me;
+    return `<tr class="${mine ? "me" : ""}"><td class="team">${esc(teamName(m.entry_id))}${mine ? " (you)" : ""}</td>${cells}</tr>`;
+  }).join("");
+  $("weeksTable").innerHTML = head + rows;
+  $("weeksWrap").scrollLeft = $("weeksWrap").scrollWidth;   // newest weeks first on small screens
+}
+
+// ---------------------------------------------------------------- head to head
+
+function renderHeadToHead() {
+  const order = CH.managers.map(m => m.entry_id);
+  const rec = {};   // "me-them" -> record
+  CH.head_to_head.forEach(row => row.vs.forEach(o => { rec[row.entry_id + "-" + o.entry_id] = o; }));
+  const head = `<tr><th></th>${order.map(id => `<th class="opp" title="${esc(teamName(id))}"><span>${esc(short(teamName(id), 16))}</span></th>`).join("")}</tr>`;
+  const rows = order.map(a => {
+    const cells = order.map(b => {
+      if (a === b) return `<td class="wk self"></td>`;
+      const o = rec[a + "-" + b];
+      if (!o) return `<td class="wk" title="Haven't met yet">·</td>`;
+      const games = o.won + o.drawn + o.lost, edge = (o.won - o.lost) / games;
+      const bg = edge === 0 ? "transparent" : tint(edge > 0, Math.abs(edge) * 55);
+      return `<td class="wk" style="background:${bg}" title="${esc(teamName(a))} v ${esc(teamName(b))}: won ${o.won}, drew ${o.drawn}, lost ${o.lost}">${o.won}-${o.drawn}-${o.lost}</td>`;
+    }).join("");
+    const mine = a === me;
+    return `<tr data-id="${a}" class="${mine ? "me" : ""}"><td class="team">${esc(teamName(a))}${mine ? " (you)" : ""}</td>${cells}</tr>`;
+  }).join("");
+  $("h2hTable").innerHTML = head + rows;
+  renderPicked();
+}
+
+function renderPicked() {
+  document.querySelectorAll("#h2hTable tr[data-id]").forEach(r => r.classList.toggle("pick", Number(r.dataset.id) === picked));
+  $("picked").classList.toggle("hidden", picked == null);
+  if (picked == null) return;
+  const row = CH.head_to_head.find(r => r.entry_id === picked);
+  const items = row.vs.map(o => `<li><span>${esc(teamName(o.entry_id))}</span>`
+    + `<span class="rec">W${o.won} D${o.drawn} L${o.lost} · ${o.points_for}-${o.points_against} pts</span></li>`).join("");
+  $("picked").innerHTML = `<strong>${esc(teamName(picked))}</strong>`
+    + (items ? `<ul>${items}</ul>` : `<p class="sub" style="margin:4px 0 0">No finished matches yet.</p>`);
+}
+
+// ---------------------------------------------------------------- points scored and conceded
+
+function renderScatter() {
+  const ms = CH.managers;
+  const W = 720, H = 440, L = 54, R = 24, T = 16, B = 44;
+  const lo = Math.floor(Math.min(...ms.map(m => Math.min(m.points_for, m.points_against))) / 20) * 20;
+  const hi = Math.ceil(Math.max(...ms.map(m => Math.max(m.points_for, m.points_against))) / 20) * 20 || 20;
+  const span = Math.max(hi - lo, 20);
+  const x = v => L + (v - lo) * (W - L - R) / span;
+  const y = v => H - B - (v - lo) * (H - T - B) / span;
+  const step = span <= 100 ? 20 : span <= 250 ? 50 : 100;
+  let svg = "";
+  for (let v = Math.ceil(lo / step) * step; v <= lo + span; v += step) {
+    svg += `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text x="${L - 8}" y="${y(v) + 4}" text-anchor="end">${v}</text>`
+      + `<line class="grid" x1="${x(v)}" x2="${x(v)}" y1="${T}" y2="${H - B}"/><text x="${x(v)}" y="${H - B + 18}" text-anchor="middle">${v}</text>`;
+  }
+  svg += `<line class="diag" x1="${x(lo)}" y1="${y(lo)}" x2="${x(lo + span)}" y2="${y(lo + span)}"/>`
+    + `<text x="${(L + W - R) / 2}" y="${H - 6}" text-anchor="middle">Points scored</text>`
+    + `<text transform="translate(14 ${(T + H - B) / 2}) rotate(-90)" text-anchor="middle">Points conceded</text>`;
+  // labels sit beside their dot; when two would overlap, the later one moves up or down a line
+  const boxes = [];
+  const clear = b => !boxes.some(o => b.x0 < o.x1 && b.x1 > o.x0 && b.y0 < o.y1 && b.y1 > o.y0);
+  [...ms].sort((a, b) => (a.entry_id === me) - (b.entry_id === me)).forEach(m => {
+    const mine = m.entry_id === me, cx = x(m.points_for), cy = y(m.points_against);
+    const text = short(m.team, 14), w = text.length * 6.6;
+    const flip = cx > W - R - w - 14;   // labels at the right edge go to the left of the dot
+    const x0 = flip ? cx - 10 - w : cx + 10;
+    let ly = cy;
+    for (const dy of [0, -13, 13, -26, 26]) {
+      if (clear({ x0, x1: x0 + w, y0: cy + dy - 8, y1: cy + dy + 5 })) { ly = cy + dy; break; }
+    }
+    boxes.push({ x0, x1: x0 + w, y0: ly - 8, y1: ly + 5 });
+    svg += `<g><title>${esc(m.team)}: scored ${m.points_for}, conceded ${m.points_against}, ${m.league_points} league points</title>`
+      + `<circle class="pt ${mine ? "me" : ""}" cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${mine ? 7 : 5.5}"/>`
+      + `<text class="lbl ${mine ? "me" : ""}" x="${(flip ? cx - 10 : cx + 10).toFixed(1)}" y="${(ly + 4).toFixed(1)}" text-anchor="${flip ? "end" : "start"}">${esc(text)}</text></g>`;
+  });
+  const chart = $("scatter");
+  chart.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  chart.setAttribute("aria-label", `Scatter chart of points scored against points conceded for ${ms.length} managers.`);
+  chart.innerHTML = svg;
+  $("scatterSub").textContent = "Each dot is a manager. The dashed line is where scored equals conceded: below it they score more than they concede (strong), above it they concede more.";
+}
+
+// ---------------------------------------------------------------- weekly scores
+
+function renderSpread() {
+  const ms = CH.managers.filter(m => m.low).sort((a, b) => b.average - a.average);
+  const W = 720, rowH = 30, L = 150, R = 24, T = 10, B = 30, H = T + B + ms.length * rowH;
+  const lo = Math.floor(Math.min(...ms.map(m => m.low.points)) / 10) * 10;
+  const hi = Math.ceil(Math.max(...ms.map(m => m.high.points)) / 10) * 10 || 10;
+  const x = v => L + (v - lo) * (W - L - R) / Math.max(hi - lo, 10);
+  let svg = "";
+  for (let v = lo; v <= hi; v += 10) {
+    svg += `<line class="grid" x1="${x(v)}" x2="${x(v)}" y1="${T}" y2="${H - B}"/><text x="${x(v)}" y="${H - B + 18}" text-anchor="middle">${v}</text>`;
+  }
+  ms.forEach((m, i) => {
+    const cy = T + i * rowH + rowH / 2, mine = m.entry_id === me;
+    svg += `<g><title>${esc(m.team)}: lowest ${m.low.points} (GW${m.low.gw}), average ${m.average}, best ${m.high.points} (GW${m.high.gw})</title>`
+      + `<text class="lbl ${mine ? "me" : ""}" x="${L - 10}" y="${cy + 4}" text-anchor="end">${esc(short(m.team, 20))}</text>`
+      + `<line class="range ${mine ? "me" : ""}" x1="${x(m.low.points)}" x2="${x(m.high.points)}" y1="${cy}" y2="${cy}"/>`
+      + `<line class="avg" x1="${x(m.average)}" x2="${x(m.average)}" y1="${cy - 9}" y2="${cy + 9}"/></g>`;
+  });
+  const chart = $("spread");
+  chart.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  chart.setAttribute("aria-label", `Range of weekly scores for ${ms.length} managers, lowest to highest with the average marked.`);
+  chart.innerHTML = svg;
+}
+
+// ---------------------------------------------------------------- events
+
+$("raceChart").addEventListener("pointerover", e => {
+  const g = e.target.closest(".line"); if (!g) return;
+  document.querySelectorAll("#raceChart .hot").forEach(x => x.classList.remove("hot"));
+  g.classList.add("hot");
+  $("raceChart").appendChild(g);   // bring it to the front
+  $("raceCaption").innerHTML = raceCaption(Number(g.dataset.id));
+});
+$("raceChart").addEventListener("pointerleave", () => {
+  document.querySelectorAll("#raceChart .hot").forEach(x => x.classList.remove("hot"));
+  $("raceCaption").innerHTML = raceDefaultCaption();
+});
+$("h2hTable").addEventListener("click", e => {
+  const row = e.target.closest("tr[data-id]"); if (!row) return;
+  const id = Number(row.dataset.id);
+  picked = picked === id ? null : id;
+  renderPicked();
+});
+$("loadForm").addEventListener("submit", e => { e.preventDefault(); loadLeague($("leagueId").value.trim()); });
+$("copyLink").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText($("shareLink").value); }
+  catch (e) { $("shareLink").select(); return; }   // no clipboard access: select it so they can copy by hand
+  $("copyLink").textContent = "Copied";
+  setTimeout(() => { $("copyLink").textContent = "Copy link"; }, 2000);
+});
+
+// who you are: from the link (?team=...) or the last team used on the main page. This only
+// highlights you; the page works for anyone with the league link.
+const params = new URLSearchParams(location.search);
+let stored = null;
+try { stored = localStorage.getItem("teamId"); } catch (e) { /* no storage: nothing to highlight */ }
+const mineText = params.get("team") || stored;
+if (/^[0-9]+$/.test(mineText || "")) {
+  me = Number(mineText);
+  $("backLink").href = "/?team=" + mineText; $("backLink").classList.remove("hidden");
+}
+// a shared link looks like /charts?league=12345
+const leagueParam = params.get("league");
+if (/^[0-9]+$/.test(leagueParam || "")) {
+  $("leagueId").value = leagueParam;
+  loadLeague(leagueParam);
+}
+</script>
+</body>
+</html>

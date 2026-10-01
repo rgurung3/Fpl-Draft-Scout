@@ -88,35 +88,6 @@
   .roster .label { color: var(--muted); font-size: .85rem; margin-top: 6px; }
   .roster .bench { color: var(--muted); }
   .roster .tradewith { justify-self: start; margin: 2px 0 6px; }
-
-  /* league race */
-  .minihead { font-family: var(--display); font-weight: 600; font-size: 1.3rem; margin: 26px 0 2px; }
-  .racecap { margin: 0 0 6px; min-height: 1.5em; font-size: .95rem; }
-  .racecap strong { font-weight: 600; }
-  .chartwrap { background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 8px 6px 2px; }
-  .race { display: block; width: 100%; height: auto; }
-  .race text { font-family: var(--body); font-size: 12px; fill: var(--muted); }
-  .race text.lbl { fill: var(--ink); font-weight: 600; }
-  .race .grid { stroke: var(--line); }
-  .race .ink { fill: none; stroke: var(--muted); stroke-opacity: .45; stroke-width: 1.5;
-    stroke-linejoin: round; stroke-linecap: round; }
-  .race .hit { fill: none; stroke: transparent; stroke-width: 14; cursor: pointer; }
-  .race .dot { fill: var(--muted); fill-opacity: .6; }
-  .race .wkdot { display: none; fill: var(--muted); stroke: var(--surface); stroke-width: 1.5; }
-  .race .me .wkdot { display: inline; fill: var(--amber); }
-  .race .hot .wkdot { display: inline; fill: var(--ink); }
-  .race .me .ink { stroke: var(--amber); stroke-opacity: 1; stroke-width: 3; }
-  .race .me .dot { fill: var(--amber); fill-opacity: 1; stroke: var(--surface); stroke-width: 2; }
-  .race .hot .ink { stroke: var(--ink); stroke-opacity: 1; stroke-width: 3; }
-  .race .hot .dot { fill: var(--ink); fill-opacity: 1; }
-  table.weeks { width: auto; border-collapse: separate; border-spacing: 2px; font-size: .9rem; }
-  table.weeks th, table.weeks td { padding: 5px 6px; border: 0; cursor: default; }
-  table.weeks th { text-align: center; font-weight: 500; }
-  table.weeks td.team { position: sticky; left: 0; z-index: 1; background: var(--surface);
-    max-width: 11rem; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
-  table.weeks tr.me td.team { color: var(--ink); font-weight: 600; }
-  table.weeks td.wk { min-width: 3.4em; text-align: center; border-radius: 3px; font-variant-numeric: tabular-nums; }
-  table.weeks .res { font-size: .7rem; color: var(--muted); margin-left: 3px; }
 </style>
 </head>
 <body>
@@ -158,6 +129,7 @@
     <nav class="pagelinks" aria-label="More pages">
       <a class="btn ghost" id="tradeLink" href="/trade">Trade analyzer</a>
       <a class="btn ghost" id="banterLink" href="/banter">League banter</a>
+      <a class="btn ghost" id="chartsLink" href="/charts">League charts</a>
     </nav>
     <div class="mylink">
       <span>Bookmark your link:</span>
@@ -198,19 +170,6 @@
       <h2>League squads</h2>
       <p class="sub">Average rating of each manager's best legal eleven: one keeper, at least three defenders, two midfielders and one forward. Yours is open below; select any team to see its squad.</p>
       <div class="strength" id="strength"></div>
-    </section>
-
-    <section id="raceSection">
-      <h2>League race</h2>
-      <p class="sub">Each manager's league points after every gameweek, climbing from 0 (3 for a win, 1 for a draw). Your line has a dot for each week. Hover or tap a line to see whose it is.</p>
-      <div id="raceEmpty" class="empty hidden"></div>
-      <div id="raceArea">
-        <p class="racecap" id="raceCaption" aria-live="polite"></p>
-        <div class="chartwrap"><svg class="race" id="raceChart" role="img"></svg></div>
-        <h3 class="minihead">Points each gameweek</h3>
-        <p class="sub">Shaded against that week's league average: green above, red below. W, D or L is the head-to-head result.</p>
-        <div class="tablewrap" id="weeksWrap"><table class="weeks" id="weeksTable"></table></div>
-      </div>
     </section>
 
     <p class="note" id="scoreNote"></p>
@@ -319,6 +278,7 @@ function render() {
     `<option value="${id}" ${id === DATA.league_id ? "selected" : ""}>${id === DATA.league_id ? esc(DATA.league_name) : "League " + id}</option>`).join("");
 
   $("tradeLink").href = pageLink("/trade");
+  $("chartsLink").href = pageLink("/charts");   // carries your team so your line is highlighted
   $("banterLink").href = "/banter?league=" + DATA.league_id;   // the banter page is about the whole league, so anyone can open it
   $("myLink").value = location.origin + location.pathname + linkQuery();
 
@@ -328,7 +288,7 @@ function render() {
       : "Switch to Until the break to look further ahead, with less weight on recent form. ")
     + "Each stat is measured against the top 5% of regular players, so one standout week doesn't skew everyone else. It's a guide, not a prediction.";
 
-  renderSwaps(); renderTable(); renderStrength(); renderRace();
+  renderSwaps(); renderTable(); renderStrength();
 }
 
 const player = id => DATA.players.find(p => p.id === id);
@@ -479,121 +439,7 @@ function renderStrength() {
   }).join("");
 }
 
-// ---------------------------------------------------------------- league race
-// DATA.history is worked out by league_history in app.py; this only draws it
-
-const teamName = id => DATA.managers.find(m => m.entry_id === id)?.team_name ?? `Team ${id}`;
-const place = n => n + (["th", "st", "nd", "rd"][(n % 100 - 20) % 10] || ["th", "st", "nd", "rd"][n % 100] || "th");
-
-function raceDefaultCaption() {
-  const h = DATA.history, i = h.managers.findIndex(m => m.entry_id === state.me);
-  if (i < 0) return "Hover or tap a line to see whose it is.";
-  const m = h.managers[i], behind = m.behind.at(-1);
-  return `<strong>You</strong> are ${place(i + 1)} with ${m.league_points.at(-1)} league points`
-    + (behind ? `, ${behind} behind the leader.` : ", level with the lead.");
-}
-
-function raceCaption(id) {
-  const h = DATA.history, i = h.managers.findIndex(m => m.entry_id === id), m = h.managers[i];
-  const behind = m.behind.at(-1);
-  return `<strong>${esc(teamName(id))}</strong>: ${place(i + 1)}, ${m.league_points.at(-1)} league points`
-    + (behind ? `, ${behind} behind the leader.` : ", level with the lead.");
-}
-
-function renderRace() {
-  const h = DATA.history;
-  $("raceEmpty").classList.toggle("hidden", !!h);
-  $("raceArea").classList.toggle("hidden", !h);
-  if (!h) {
-    $("raceEmpty").textContent = "The league race appears once a gameweek has finished. It needs a head-to-head league, because it's built from the match results.";
-    return;
-  }
-
-  // chart geometry: gameweeks across (starting from "Start" = 0 points), league points upwards
-  const W = 720, H = 270, L = 44, R = 190, T = 14, B = 30, n = h.gws.length + 1;
-  const most = Math.max(...h.managers.map(m => m.league_points.at(-1)), 3);
-  const step = Math.max(3, Math.ceil(most / 4 / 3) * 3);
-  const top = Math.ceil(most / step) * step;
-  const x = i => L + i * (W - L - R) / (n - 1);
-  const y = v => T + (top - v) * (H - T - B) / top;
-  // league points move in steps of 3, so lines often sit on top of each other.
-  // Nudge each manager's line by a pixel or two (by table position) so ties stay visible.
-  const nudge = id => (h.managers.findIndex(m => m.entry_id === id) - (h.managers.length - 1) / 2) * 1.8;
-
-  let svg = "";
-  for (let v = 0; v <= top; v += step) {
-    svg += `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/>`
-      + `<text x="${L - 8}" y="${y(v) + 4}" text-anchor="end">${v}</text>`;
-  }
-  const every = Math.ceil(n / 10);
-  svg += `<text x="${x(0)}" y="${H - 8}" text-anchor="middle">Start</text>`;
-  h.gws.forEach((gw, i) => {
-    if ((i + 1) % every === 0 || i === n - 2) svg += `<text x="${x(i + 1)}" y="${H - 8}" text-anchor="middle">GW${gw}</text>`;
-  });
-
-  // other managers first, so your line is drawn on top
-  const order = [...h.managers].sort((a, b) => (a.entry_id === state.me) - (b.entry_id === state.me));
-  order.forEach(m => {
-    const series = [0, ...m.league_points], nd = nudge(m.entry_id);
-    const pts = series.map((v, i) => `${x(i).toFixed(1)},${(y(v) + nd).toFixed(1)}`).join(" ");
-    const dots = m.league_points.map((v, i) => {
-      const r = m.results[i], word = { W: "won", D: "drew", L: "lost" }[r];
-      return `<circle class="wkdot" cx="${x(i + 1).toFixed(1)}" cy="${(y(v) + nd).toFixed(1)}" r="3.5">`
-        + `<title>GW${h.gws[i]}: ${v} league points${word ? ", " + word : ""}</title></circle>`;
-    }).join("");
-    svg += `<g class="line ${m.entry_id === state.me ? "me" : ""}" data-id="${m.entry_id}">`
-      + `<title>${esc(teamName(m.entry_id))}</title>`
-      + `<polyline class="ink" points="${pts}"/><polyline class="hit" points="${pts}"/>${dots}`
-      + `<circle class="dot" cx="${x(n - 1)}" cy="${y(series.at(-1)) + nd}" r="${m.entry_id === state.me ? 5 : 3}"/></g>`;
-  });
-
-  // labels at the end: the leader, and you (nudged apart if they'd overlap)
-  const leader = h.managers[0], mine = h.managers.find(m => m.entry_id === state.me);
-  const leaderY = y(leader.league_points.at(-1));
-  if (leader !== mine) svg += `<text class="lbl" x="${x(n - 1) + 12}" y="${leaderY + 4}">${esc(teamName(leader.entry_id))}, 1st</text>`;
-  if (mine) {
-    let myY = y(mine.league_points.at(-1));
-    if (leader !== mine && Math.abs(myY - leaderY) < 16) myY = leaderY + 16;
-    const behind = mine.behind.at(-1);
-    svg += `<text class="lbl" x="${x(n - 1) + 12}" y="${myY + 4}">You, ${mine.league_points.at(-1)} pts${behind ? ", −" + behind : ""}</text>`;
-  }
-
-  const chart = $("raceChart");
-  chart.setAttribute("viewBox", `0 0 ${W} ${H}`);
-  chart.setAttribute("aria-label", `Line chart of league points for ${h.managers.length} managers, GW${h.gws[0]} to GW${h.gws.at(-1)}.`);
-  chart.innerHTML = svg;
-  $("raceCaption").innerHTML = raceDefaultCaption();
-
-  // the weekly grid, newest weeks visible first on small screens
-  const head = `<tr><th></th>${h.gws.map(gw => `<th>GW${gw}</th>`).join("")}</tr>`;
-  const rows = h.managers.map(m => {
-    const cells = m.points.map((p, i) => {
-      if (p == null) return `<td class="wk">–</td>`;
-      const avg = h.average[i], diff = p - avg, share = Math.min(Math.abs(diff) / 20, 1) * 55;
-      const bg = `color-mix(in srgb, var(${diff >= 0 ? "--pitch" : "--rival"}) ${share.toFixed(0)}%, transparent)`;
-      const r = m.results[i], word = { W: "won", D: "drew", L: "lost" }[r];
-      const title = `GW${h.gws[i]}: ${p} points (league average ${avg})${word ? ", " + word : ""}`;
-      return `<td class="wk" style="background:${bg}" title="${title}">${p}${r ? `<span class="res">${r}</span>` : ""}</td>`;
-    }).join("");
-    const me = m.entry_id === state.me;
-    return `<tr class="${me ? "me" : ""}"><td class="team">${esc(teamName(m.entry_id))}${me ? " (you)" : ""}</td>${cells}</tr>`;
-  }).join("");
-  $("weeksTable").innerHTML = head + rows;
-  $("weeksWrap").scrollLeft = $("weeksWrap").scrollWidth;
-}
-
 // events
-$("raceChart").addEventListener("pointerover", e => {
-  const g = e.target.closest(".line"); if (!g) return;
-  document.querySelectorAll("#raceChart .hot").forEach(x => x.classList.remove("hot"));
-  g.classList.add("hot");
-  $("raceChart").appendChild(g);   // bring it to the front
-  $("raceCaption").innerHTML = raceCaption(Number(g.dataset.id));
-});
-$("raceChart").addEventListener("pointerleave", () => {
-  document.querySelectorAll("#raceChart .hot").forEach(x => x.classList.remove("hot"));
-  $("raceCaption").innerHTML = raceDefaultCaption();
-});
 $("loadForm").addEventListener("submit", e => { e.preventDefault(); loadTeam($("teamId").value.trim()); });
 $("leagueSelect").addEventListener("change", e => loadTeam(state.team, e.target.value));
 $("viewTabs").addEventListener("click", e => {

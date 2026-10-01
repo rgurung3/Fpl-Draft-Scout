@@ -1298,3 +1298,105 @@ def test_team_endpoint_can_skip_the_swaps(fake_api):
 
 def test_shared_stylesheet_is_served():
     assert app.app.test_client().get("/static/common.css").status_code == 200
+
+
+# ---------------------------------------------------------------- league charts
+
+def charts_for(matches):
+    return app.league_charts(banter_league(matches))
+
+
+def versus(charts, team, opponent):
+    row = next(r for r in charts["head_to_head"] if r["entry_id"] == team)
+    return next((o for o in row["vs"] if o["entry_id"] == opponent), None)
+
+
+def test_charts_need_a_finished_gameweek():
+    assert charts_for([match(1, 10, 0, 11, 0, finished=False)]) is None
+    assert app.league_charts({"league_entries": [{"id": 10, "entry_id": 100}]}) is None
+
+
+def test_charts_include_the_race_history():
+    charts = charts_for(BANTER_WEEKS)
+    assert charts["history"]["gws"] == [1, 2]
+    race_order = [m["entry_id"] for m in charts["history"]["managers"]]
+    assert [m["entry_id"] for m in charts["managers"]] == race_order
+
+
+def test_head_to_head_counts_wins_losses_and_points():
+    charts = charts_for(BANTER_WEEKS)
+    assert versus(charts, 100, 101) == {"entry_id": 101, "won": 1, "drawn": 0, "lost": 0,
+                                        "points_for": 60, "points_against": 40}
+    assert versus(charts, 101, 100) == {"entry_id": 100, "won": 0, "drawn": 0, "lost": 1,
+                                        "points_for": 40, "points_against": 60}   # the same match, other side
+    assert versus(charts, 100, 102)["won"] == 1                                    # won 70-69
+
+
+def test_head_to_head_counts_draws_and_skips_unmet_opponents():
+    charts = app.league_charts(h2h(TWO_WEEKS))
+    draw = versus(charts, 102, 103)
+    assert (draw["won"], draw["drawn"], draw["lost"]) == (0, 1, 0)
+    assert versus(charts, 100, 103) is None        # their GW3 match isn't finished, so they haven't met
+
+
+def test_head_to_head_adds_up_repeat_meetings():
+    weeks = [match(1, 10, 60, 11, 40), match(2, 11, 70, 10, 50), match(3, 10, 30, 11, 30)]
+    record = versus(charts_for(weeks), 100, 101)
+    assert (record["won"], record["drawn"], record["lost"]) == (1, 1, 1)
+    assert (record["points_for"], record["points_against"]) == (140, 140)
+
+
+def test_charts_total_points_scored_and_conceded():
+    by_team = {m["entry_id"]: m for m in charts_for(BANTER_WEEKS)["managers"]}
+    assert (by_team[100]["points_for"], by_team[100]["points_against"]) == (130, 109)
+    assert (by_team[104]["points_for"], by_team[104]["points_against"]) == (20, 50)
+    assert by_team[102]["team"] == "Team 2" and by_team[102]["manager"] == "M 2"
+
+
+def test_charts_weekly_range_ignores_a_bye():
+    by_team = {m["entry_id"]: m for m in charts_for(BANTER_WEEKS)["managers"]}
+    assert by_team[100]["low"] == {"gw": 1, "points": 60}
+    assert by_team[100]["high"] == {"gw": 2, "points": 70}
+    assert by_team[100]["average"] == 65
+    assert by_team[104]["low"] == by_team[104]["high"] == {"gw": 2, "points": 20}   # no GW1 match
+
+
+def test_charts_leave_out_unfinished_matches():
+    charts = charts_for(BANTER_WEEKS)                  # GW3 and GW4 aren't played
+    assert versus(charts, 103, 104) is None
+    assert all(m["points_for"] for m in charts["managers"] if m["entry_id"] != 104)
+
+
+def test_charts_route_returns_the_league_name_and_charts(fake_api, monkeypatch):
+    fake = app.get_json
+
+    def with_matches(url):
+        if url.endswith("/league/123/details"):
+            return banter_league(BANTER_WEEKS)
+        return fake(url)
+
+    monkeypatch.setattr(app, "get_json", with_matches)
+    data = app.app.test_client().get("/api/league/123/charts").get_json()
+    assert data["league_name"] == "Banter League"
+    assert len(data["charts"]["head_to_head"]) == 5
+
+
+def test_charts_route_is_empty_for_a_league_without_matches(fake_api):
+    assert app.app.test_client().get("/api/league/123/charts").get_json()["charts"] is None
+
+
+def test_charts_route_gives_a_friendly_error(monkeypatch):
+    def not_found(url):
+        raise requests.HTTPError(response=type("R", (), {"status_code": 404})())
+
+    monkeypatch.setattr(app, "get_json", not_found)
+    res = app.app.test_client().get("/api/league/999/charts")
+    assert res.status_code == 400
+    assert "No Draft league found" in res.get_json()["error"]
+
+
+def test_charts_page_is_served():
+    res = app.app.test_client().get("/charts")
+    assert res.status_code == 200
+    assert b"League charts" in res.data
+    res.close()
