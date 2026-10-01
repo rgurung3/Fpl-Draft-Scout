@@ -4,7 +4,8 @@ FPL servers and always give the same result.
 
 Run with:  pytest -v
 """
-from datetime import timedelta
+import json
+from datetime import datetime, timedelta
 
 import pytest
 import requests
@@ -1421,3 +1422,130 @@ def test_old_page_links_open_the_hub_on_that_tab(old, tab):
 def test_old_page_link_without_a_league_still_opens_the_hub():
     res = app.app.test_client().get("/charts")
     assert res.headers["Location"] == "/league?tab=charts"
+
+
+# ---------------------------------------------------------------- saved seasons and rivalries
+
+def snapshot_for(matches, today=None):
+    return app.snapshot_league(banter_league(matches), today=today)
+
+
+@pytest.mark.parametrize("day,label", [
+    (datetime(2026, 10, 1), "2026-27"), (datetime(2027, 5, 20), "2026-27"),
+    (datetime(2027, 7, 1), "2027-28"), (datetime(2099, 12, 31), "2099-00")])
+def test_season_label_starts_in_july(day, label):
+    assert app.season_label(day) == label
+
+
+def test_snapshot_keeps_finished_matches_by_team_id():
+    snap = snapshot_for(BANTER_WEEKS, today=datetime(2026, 10, 1))
+    assert snap["season"] == "2026-27" and snap["league_name"] == "Banter League"
+    assert {"gw": 1, "a": 100, "b": 101, "a_points": 60, "b_points": 40} in snap["matches"]
+    assert all(m["gw"] in (1, 2) for m in snap["matches"])           # GW3 and GW4 aren't played
+    assert {m["entry_id"] for m in snap["managers"]} == {100, 101, 102, 103, 104}
+
+
+def test_snapshot_is_none_before_a_gameweek_finishes():
+    assert snapshot_for([match(1, 10, 0, 11, 0, finished=False)]) is None
+
+
+def test_save_snapshot_writes_a_file_and_never_replaces_a_fuller_one(tmp_path):
+    full = snapshot_for(BANTER_WEEKS, today=datetime(2026, 10, 1))
+    path = app.save_snapshot(52607, full, folder=tmp_path)
+    assert path == tmp_path / "2026-27" / "league_52607.json"
+    assert json.loads(path.read_text(encoding="utf-8"))["league_id"] == 52607
+    assert app.save_snapshot(52607, full, folder=tmp_path) is None            # nothing new
+    smaller = snapshot_for(BANTER_WEEKS[:1], today=datetime(2026, 10, 1))
+    assert app.save_snapshot(52607, smaller, folder=tmp_path) is None         # e.g. the league reset
+    assert len(json.loads(path.read_text(encoding="utf-8"))["matches"]) == len(full["matches"])
+    assert app.save_snapshot(52607, None, folder=tmp_path) is None
+
+
+def test_save_snapshot_updates_when_more_matches_are_finished(tmp_path):
+    day = datetime(2026, 10, 1)
+    app.save_snapshot(1, snapshot_for(BANTER_WEEKS[:1], today=day), folder=tmp_path)
+    assert app.save_snapshot(1, snapshot_for(BANTER_WEEKS, today=day), folder=tmp_path) is not None
+
+
+def test_saved_snapshots_come_back_oldest_first_and_skip_bad_files(tmp_path):
+    app.save_snapshot(7, snapshot_for(BANTER_WEEKS, today=datetime(2027, 8, 1)), folder=tmp_path)
+    app.save_snapshot(7, snapshot_for(BANTER_WEEKS, today=datetime(2026, 8, 1)), folder=tmp_path)
+    (tmp_path / "2028-29").mkdir()
+    (tmp_path / "2028-29" / "league_7.json").write_text("not json", encoding="utf-8")
+    other_league = snapshot_for(BANTER_WEEKS, today=datetime(2026, 8, 1))
+    app.save_snapshot(8, other_league, folder=tmp_path)
+    assert [s["season"] for s in app.saved_snapshots(7, folder=tmp_path)] == ["2026-27", "2027-28"]
+
+
+def season(label, *games):
+    """A snapshot for the rivalry tests: games are (gw, a, a_points, b, b_points)."""
+    return {"season": label, "managers": [],
+            "matches": [{"gw": g, "a": a, "b": b, "a_points": pa, "b_points": pb}
+                        for g, a, pa, b, pb in games]}
+
+
+def test_rivalry_counts_meetings_whichever_way_round_they_were_listed():
+    last = season("2026-27", (1, 100, 60, 101, 40), (9, 101, 50, 100, 50), (4, 100, 30, 102, 99))
+    this = season("2027-28", (3, 101, 70, 100, 55))
+    r = app.league_rivalry([last, this], 100, 101)
+    assert [(m["season"], m["gw"], m["a_points"], m["b_points"], m["winner"]) for m in r["meetings"]] == [
+        ("2026-27", 1, 60, 40, "a"), ("2026-27", 9, 50, 50, None), ("2027-28", 3, 55, 70, "b")]
+    assert r["record"] == {"a_won": 1, "b_won": 1, "drawn": 1, "a_points": 165, "b_points": 160}
+
+
+def test_rivalry_with_no_meetings_is_empty():
+    r = app.league_rivalry([season("2026-27", (1, 100, 60, 102, 40))], 100, 101)
+    assert r["meetings"] == [] and r["record"]["a_won"] == 0
+
+
+def test_rivalries_combine_saved_seasons_with_live_results(tmp_path):
+    old = season("2025-26", (1, 100, 10, 101, 90))
+    old["managers"] = [{"entry_id": 100, "team": "Old Name", "manager": "M 0"}]
+    (tmp_path / "2025-26").mkdir()
+    (tmp_path / "2025-26" / "league_5.json").write_text(json.dumps(old), encoding="utf-8")
+    data = app.league_rivalries(banter_league(BANTER_WEEKS), 5, 100, 101, folder=tmp_path)
+    assert data["seasons"] == ["2025-26", app.season_label()]
+    assert [m["winner"] for m in data["rivalry"]["meetings"]] == ["b", "a"]    # last season, then this one
+    assert {m["entry_id"]: m["team"] for m in data["managers"]}[100] == "Team 0"   # the newest name wins
+
+
+def test_rivalries_live_results_replace_the_saved_copy_of_this_season(tmp_path):
+    app.save_snapshot(5, snapshot_for(BANTER_WEEKS[:1]), folder=tmp_path)
+    data = app.league_rivalries(banter_league(BANTER_WEEKS), 5, 100, 102, folder=tmp_path)
+    assert data["seasons"] == [app.season_label()]                  # not listed twice
+    assert len(data["rivalry"]["meetings"]) == 1                    # 100 v 102 is only in the live data
+
+
+def test_rivalries_without_a_pair_only_list_the_managers(tmp_path):
+    data = app.league_rivalries(banter_league(BANTER_WEEKS), 5, folder=tmp_path)
+    assert data["rivalry"] is None and len(data["managers"]) == 5
+    assert app.league_rivalries(banter_league(BANTER_WEEKS), 5, 100, 100, folder=tmp_path)["rivalry"] is None
+
+
+def test_rivalries_route_returns_the_pair_history(fake_api, monkeypatch):
+    fake = app.get_json
+
+    def with_matches(url):
+        return banter_league(BANTER_WEEKS) if url.endswith("/league/123/details") else fake(url)
+
+    monkeypatch.setattr(app, "get_json", with_matches)
+    data = app.app.test_client().get("/api/league/123/rivalries?a=100&b=101").get_json()
+    assert data["league_name"] == "Banter League"
+    assert data["rivalry"]["record"]["a_won"] == 1
+
+
+def test_rivalries_route_gives_a_friendly_error(monkeypatch):
+    def not_found(url):
+        raise requests.HTTPError(response=type("R", (), {"status_code": 404})())
+
+    monkeypatch.setattr(app, "get_json", not_found)
+    res = app.app.test_client().get("/api/league/999/rivalries?a=1&b=2")
+    assert res.status_code == 400
+    assert "No Draft league found" in res.get_json()["error"]
+
+
+def test_league_hub_offers_rivalries_to_everyone():
+    res = app.app.test_client().get("/league?league=123")
+    page = res.data.decode()
+    res.close()
+    assert '<button class="choice" type="button" data-tab="rivalries"' in page      # not fullonly

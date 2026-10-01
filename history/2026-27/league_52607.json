@@ -1,0 +1,279 @@
+{
+ "league_id": 52607,
+ "season": "2026-27",
+ "league_name": "Ballahulics",
+ "managers": [
+  {
+   "entry_id": 276911,
+   "team": "R Sanchez save me",
+   "manager": "Colton Baldwin"
+  },
+  {
+   "entry_id": 276912,
+   "team": "All Press, No Stress",
+   "manager": "Christina Haber"
+  },
+  {
+   "entry_id": 276913,
+   "team": "Steezar FC",
+   "manager": "Cesar Lucena"
+  },
+  {
+   "entry_id": 276914,
+   "team": "NepaliRonaldo",
+   "manager": "Rakshak Gurung"
+  },
+  {
+   "entry_id": 276915,
+   "team": "1st or your Last",
+   "manager": "George Thiewes"
+  },
+  {
+   "entry_id": 276917,
+   "team": "Balding Momo Monks",
+   "manager": "Noah Clark"
+  },
+  {
+   "entry_id": 276918,
+   "team": "goblin gang",
+   "manager": "jimmy garcia"
+  },
+  {
+   "entry_id": 277009,
+   "team": "Italy WC 2030",
+   "manager": "Khanh Le"
+  },
+  {
+   "entry_id": 288378,
+   "team": "Tiki Taka Toe",
+   "manager": "Diego Frausto"
+  },
+  {
+   "entry_id": 289243,
+   "team": "Bet88",
+   "manager": "Lan Vu"
+  },
+  {
+   "entry_id": 309630,
+   "team": "Mandems fantasy",
+   "manager": "phillip B"
+  },
+  {
+   "entry_id": 310078,
+   "team": "Larpers United",
+   "manager": "Devin Burke"
+  }
+ ],
+ "matches": [
+  {
+   "gw": 1,
+   "a": 276912,
+   "b": 276913,
+   "a_points": 33,
+   "b_points": 40
+  },
+  {
+   "gw": 1,
+   "a": 277009,
+   "b": 276911,
+   "a_points": 33,
+   "b_points": 58
+  },
+  {
+   "gw": 1,
+   "a": 288378,
+   "b": 276918,
+   "a_points": 45,
+   "b_points": 48
+  },
+  {
+   "gw": 1,
+   "a": 289243,
+   "b": 276917,
+   "a_points": 66,
+   "b_points": 22
+  },
+  {
+   "gw": 1,
+   "a": 309630,
+   "b": 276915,
+   "a_points": 17,
+   "b_points": 25
+  },
+  {
+   "gw": 1,
+   "a": 310078,
+   "b": 276914,
+   "a_points": 45,
+   "b_points": 43
+  },
+  {
+   "gw": 2,
+   "a": 276911,
+   "b": 276912,
+   "a_points": 49,
+   "b_points": 31
+  },
+  {
+   "gw": 2,
+   "a": 276913,
+   "b": 310078,
+   "a_points": 45,
+   "b_points": 66
+  },
+  {
+   "gw": 2,
+   "a": 276914,
+   "b": 309630,
+   "a_points": 41,
+   "b_points": 25
+  },
+  {
+   "gw": 2,
+   "a": 276915,
+   "b": 289243,
+   "a_points": 30,
+   "b_points": 55
+  },
+  {
+   "gw": 2,
+   "a": 276917,
+   "b": 288378,
+   "a_points": 30,
+   "b_points": 37
+  },
+  {
+   "gw": 2,
+   "a": 276918,
+   "b": 277009,
+   "a_points": 40,
+   "b_points": 39
+  },
+  {
+   "gw": 3,
+   "a": 276912,
+   "b": 276915,
+   "a_points": 31,
+   "b_points": 37
+  },
+  {
+   "gw": 3,
+   "a": 276913,
+   "b": 276914,
+   "a_points": 37,
+   "b_points": 38
+  },
+  {
+   "gw": 3,
+   "a": 288378,
+   "b": 276911,
+   "a_points": 53,
+   "b_points": 43
+  },
+  {
+   "gw": 3,
+   "a": 289243,
+   "b": 277009,
+   "a_points": 33,
+   "b_points": 31
+  },
+  {
+   "gw": 3,
+   "a": 309630,
+   "b": 276918,
+   "a_points": 26,
+   "b_points": 38
+  },
+  {
+   "gw": 3,
+   "a": 310078,
+   "b": 276917,
+   "a_points": 44,
+   "b_points": 30
+  },
+  {
+   "gw": 4,
+   "a": 276911,
+   "b": 276913,
+   "a_points": 69,
+   "b_points": 40
+  },
+  {
+   "gw": 4,
+   "a": 276914,
+   "b": 276912,
+   "a_points": 49,
+   "b_points": 47
+  },
+  {
+   "gw": 4,
+   "a": 276915,
+   "b": 310078,
+   "a_points": 33,
+   "b_points": 37
+  },
+  {
+   "gw": 4,
+   "a": 276917,
+   "b": 309630,
+   "a_points": 42,
+   "b_points": 24
+  },
+  {
+   "gw": 4,
+   "a": 276918,
+   "b": 289243,
+   "a_points": 40,
+   "b_points": 45
+  },
+  {
+   "gw": 4,
+   "a": 277009,
+   "b": 288378,
+   "a_points": 44,
+   "b_points": 29
+  },
+  {
+   "gw": 5,
+   "a": 276912,
+   "b": 276918,
+   "a_points": 36,
+   "b_points": 42
+  },
+  {
+   "gw": 5,
+   "a": 276913,
+   "b": 276917,
+   "a_points": 37,
+   "b_points": 34
+  },
+  {
+   "gw": 5,
+   "a": 276914,
+   "b": 276915,
+   "a_points": 39,
+   "b_points": 27
+  },
+  {
+   "gw": 5,
+   "a": 289243,
+   "b": 276911,
+   "a_points": 40,
+   "b_points": 51
+  },
+  {
+   "gw": 5,
+   "a": 309630,
+   "b": 288378,
+   "a_points": 25,
+   "b_points": 45
+  },
+  {
+   "gw": 5,
+   "a": 310078,
+   "b": 277009,
+   "a_points": 47,
+   "b_points": 44
+  }
+ ]
+}

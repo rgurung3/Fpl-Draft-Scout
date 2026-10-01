@@ -87,6 +87,17 @@
   .picked li { display: flex; justify-content: space-between; gap: 16px; max-width: 520px; }
   .picked .rec { font-variant-numeric: tabular-nums; color: var(--muted); }
 
+  /* rivalries */
+  .pickers { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: end; margin-bottom: 16px; }
+  .pickers label { display: grid; gap: 2px; font-size: .9rem; color: var(--muted); }
+  .pickers select { min-width: 200px; max-width: 100%; padding: 8px 10px; border: 1px solid var(--line);
+    border-radius: 6px; background: var(--surface); color: var(--ink); font-size: .95rem; }
+  .rivalry .score { font-family: var(--display); font-weight: 600; font-size: 2.2rem; line-height: 1.1; }
+  .rivalry .line { color: var(--muted); }
+  .meetings { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+  .meetings li { display: flex; justify-content: space-between; gap: 16px; max-width: 520px; font-variant-numeric: tabular-nums; }
+  .meetings .when { color: var(--muted); }
+
   /* scatter and spread */
   .plot { display: block; width: 100%; height: auto; }
   .plot text { font-family: var(--body); font-size: 12px; fill: var(--muted); }
@@ -136,6 +147,8 @@
         <span class="t">Banter</span><span class="d">This week's match-ups and facts to argue about</span></button>
       <button class="choice" type="button" data-tab="charts" aria-pressed="false">
         <span class="t">Charts</span><span class="d">The league race, head-to-head records and who's scoring</span></button>
+      <button class="choice" type="button" data-tab="rivalries" aria-pressed="false">
+        <span class="t">Rivalries</span><span class="d">Every match between two managers, with seasons saved from now on</span></button>
       <button class="choice fullonly hidden" type="button" data-tab="team" aria-pressed="false">
         <span class="t">My team</span><span class="d">Waiver targets, trades and squads for your own team</span></button>
     </div>
@@ -187,6 +200,28 @@
       </div>
     </div>
 
+    <div id="panel-rivalries" class="hidden">
+      <div id="rivalriesEmpty" class="empty hidden"></div>
+      <div id="rivalriesBody">
+        <h2>Rivalries</h2>
+        <p class="sub" id="rivalSeasons"></p>
+        <div class="pickers">
+          <label>Manager
+            <select id="rivalA" aria-label="First manager"></select></label>
+          <label>against
+            <select id="rivalB" aria-label="Second manager"></select></label>
+        </div>
+        <div id="rivalResult" class="hidden">
+          <div class="picked rivalry" id="rivalSummary"></div>
+          <h3 class="minihead">Margin in each meeting</h3>
+          <p class="sub" id="rivalChartSub"></p>
+          <div class="chartwrap"><svg class="plot" id="rivalChart" role="img"></svg></div>
+          <h3 class="minihead">Every meeting</h3>
+          <ul class="meetings" id="rivalList"></ul>
+        </div>
+      </div>
+    </div>
+
     <div id="panel-team" class="hidden">
       <div class="teambox">
         <h2>My team</h2>
@@ -206,15 +241,16 @@
 const $ = id => document.getElementById(id);
 const FACTS_SHOWN = 2;   // facts shown at first; "Show more" reveals the rest
 const FULL = new URLSearchParams(location.search).get("full") === "1";   // the full version: My team and the way back
-const TABS = FULL ? ["banter", "charts", "team"] : ["banter", "charts"];
+const TABS = FULL ? ["banter", "charts", "rivalries", "team"] : ["banter", "charts", "rivalries"];
 let leagueId = null;     // the league this page is open on
 let tab = null;          // the choice currently open (none until a friend picks one)
-const loaded = { banter: null, charts: null };   // which league each choice's data is for, so each loads only once
+const loaded = { banter: null, charts: null, rivalries: null };   // which league each choice's data is for, so each loads only once
 let BANTER = null, showAll = false;
 let CH = null;           // the charts the server sent (see league_charts in app.py); this page only draws them
 let myId = null;         // your team ID, if we know it, so your line and row stand out
 let me = null;           // myId, if that team is in this league
 let picked = null;       // the manager whose head-to-head record is open
+let RIV = null;          // the Rivalries data: the managers and seasons (see league_rivalries in app.py)
 
 function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 const place = n => n + (n % 100 >= 11 && n % 100 <= 13 ? "th" : ({ 1: "st", 2: "nd", 3: "rd" }[n % 10] || "th"));
@@ -252,7 +288,9 @@ async function openTab(name) {
     const data = await getJson(`/api/league/${forLeague}/${name}`);
     if (forLeague !== leagueId) return;   // they opened another league while this was loading
     $("leagueLine").textContent = data.league_name;
-    if (name === "banter") renderBanter(data); else renderCharts(data);
+    if (name === "banter") renderBanter(data);
+    else if (name === "charts") renderCharts(data);
+    else renderRivalries(data);
     loaded[name] = forLeague;
   } catch (e) {
     if (tab === name) { $("error").textContent = e.message; $("error").classList.remove("hidden"); }
@@ -263,7 +301,8 @@ async function openTab(name) {
 
 function openLeague(id, firstTab) {
   leagueId = id;
-  loaded.banter = loaded.charts = null;
+  loaded.banter = loaded.charts = loaded.rivalries = null;
+  RIV = null;
   tab = null;
   $("app").classList.remove("hidden");
   $("error").classList.add("hidden");
@@ -527,7 +566,88 @@ function renderSpread() {
   chart.innerHTML = svg;
 }
 
+// ---------------------------------------------------------------- rivalries
+
+function renderRivalries(data) {
+  RIV = data;
+  const has = data.managers.length > 1;
+  $("rivalriesEmpty").classList.toggle("hidden", has);
+  $("rivalriesBody").classList.toggle("hidden", !has);
+  $("rivalResult").classList.add("hidden");
+  if (!has) {
+    $("rivalriesEmpty").textContent = "Rivalries start once a gameweek has finished. They need a head-to-head league, because they're built from the match results.";
+    return;
+  }
+  $("rivalSeasons").textContent = `Pick two managers to see every match between them. Results we have: ${data.seasons.join(", ")}. `
+    + "Past seasons only exist from the day saving started, because the Draft site wipes a league's results when it renews.";
+  const options = data.managers.map(m => `<option value="${m.entry_id}">${esc(m.team)} (${esc(m.manager)})</option>`).join("");
+  $("rivalA").innerHTML = options;
+  $("rivalB").innerHTML = options;
+  const mine = data.managers.some(m => m.entry_id === myId) ? myId : data.managers[0].entry_id;
+  $("rivalA").value = String(mine);
+  $("rivalB").selectedIndex = data.managers.findIndex(m => m.entry_id !== mine);
+  loadRivalry();
+}
+
+async function loadRivalry() {
+  const a = Number($("rivalA").value), b = Number($("rivalB").value), forLeague = leagueId;
+  if (a === b) { $("rivalResult").classList.add("hidden"); return; }
+  try {
+    const data = await getJson(`/api/league/${forLeague}/rivalries?a=${a}&b=${b}`);
+    if (forLeague !== leagueId || a !== Number($("rivalA").value) || b !== Number($("rivalB").value)) return;   // the pick changed meanwhile
+    $("error").classList.add("hidden");
+    drawRivalry(data.rivalry, a, b);
+  } catch (e) { $("error").textContent = e.message; $("error").classList.remove("hidden"); }
+}
+
+function drawRivalry(r, a, b) {
+  const name = id => RIV.managers.find(m => m.entry_id === id)?.team ?? `Team ${id}`;
+  const A = name(a), B = name(b), rec = r.record, ms = r.meetings;
+  $("rivalResult").classList.remove("hidden");
+  if (!ms.length) {
+    $("rivalSummary").innerHTML = `<strong>${esc(A)}</strong> and <strong>${esc(B)}</strong> haven't met yet.`;
+    $("rivalChart").innerHTML = ""; $("rivalList").innerHTML = ""; $("rivalChartSub").textContent = "";
+    return;
+  }
+  const lead = rec.a_won === rec.b_won ? "All square." : `${rec.a_won > rec.b_won ? A : B} leads the rivalry.`;
+  $("rivalSummary").innerHTML = `<div class="score">${rec.a_won} – ${rec.drawn} – ${rec.b_won}</div>`
+    + `<div><strong>${esc(A)}</strong> won ${rec.a_won}, drew ${rec.drawn}, lost ${rec.b_won} against <strong>${esc(B)}</strong>. ${lead}</div>`
+    + `<div class="line">Points: ${rec.a_points}–${rec.b_points} across ${ms.length} meeting${ms.length === 1 ? "" : "s"}.</div>`;
+  $("rivalList").innerHTML = ms.map(m => {
+    const res = m.winner === "a" ? `${esc(A)} won` : m.winner === "b" ? `${esc(B)} won` : "Draw";
+    return `<li><span class="when">${esc(m.season)} GW${m.gw}</span><span>${m.a_points}–${m.b_points} · ${res}</span></li>`;
+  }).join("");
+
+  // one bar per meeting: up if A won by that many points, down if B did
+  const W = 720, H = 240, L = 44, R = 16, T = 14, Bt = 40, n = ms.length;
+  const reach = Math.max(10, Math.ceil(Math.max(...ms.map(m => Math.abs(m.a_points - m.b_points))) / 10) * 10);
+  const y = v => T + (reach - v) * (H - T - Bt) / (2 * reach);
+  const slot = (W - L - R) / n, bw = Math.min(40, slot * 0.7);
+  let svg = `<text x="${L - 8}" y="${y(reach) + 4}" text-anchor="end">+${reach}</text>`
+    + `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(0)}" y2="${y(0)}"/><text x="${L - 8}" y="${y(0) + 4}" text-anchor="end">0</text>`
+    + `<text x="${L - 8}" y="${y(-reach) + 4}" text-anchor="end">−${reach}</text>`
+    + `<text x="${L + 4}" y="${T + 10}">${esc(short(A, 24))} won</text><text x="${L + 4}" y="${H - Bt - 4}">${esc(short(B, 24))} won</text>`;
+  const every = Math.ceil(n / 12);
+  ms.forEach((m, i) => {
+    const d = m.a_points - m.b_points, cx = L + slot * (i + 0.5);
+    const top = Math.min(y(0), y(d)), h = Math.max(Math.abs(y(d) - y(0)), 2);
+    svg += `<g><title>${esc(m.season)} GW${m.gw}: ${esc(A)} ${m.a_points}, ${esc(B)} ${m.b_points}</title>`
+      + `<rect x="${(cx - bw / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="2" `
+      + `style="fill:var(${d > 0 ? "--pitch" : d < 0 ? "--rival" : "--muted"});fill-opacity:.85"/></g>`;
+    if (i % every === 0) svg += `<text x="${cx.toFixed(1)}" y="${H - 22}" text-anchor="middle">${esc(m.season.slice(2, 4) + "/" + m.season.slice(5))}</text>`
+      + `<text x="${cx.toFixed(1)}" y="${H - 8}" text-anchor="middle">GW${m.gw}</text>`;
+  });
+  const chart = $("rivalChart");
+  chart.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  chart.setAttribute("aria-label", `Bar chart of the points margin in each of ${n} meetings between ${A} and ${B}.`);
+  chart.innerHTML = svg;
+  $("rivalChartSub").textContent = `Each bar is one match: green when ${A} won, red when ${B} won, and how many points by.`;
+}
+
 // ---------------------------------------------------------------- events
+
+$("rivalA").addEventListener("change", loadRivalry);
+$("rivalB").addEventListener("change", loadRivalry);
 
 $("raceChart").addEventListener("pointerover", e => {
   const g = e.target.closest(".line"); if (!g) return;
@@ -573,7 +693,7 @@ $("teamForm").addEventListener("submit", e => {
   location.href = "/?team=" + team + "&league=" + leagueId;
 });
 
-// a shared link looks like /league?league=12345 (add &tab=banter or &tab=charts to open straight on one).
+// a shared link looks like /league?league=12345 (add &tab=banter, &tab=charts or &tab=rivalries to open straight on one).
 // Without &full=1 the page has no way into the rest of Draft Scout, so it can be shared as a view-only page.
 // With &full=1 (the link for one friend) it also shows the way back and My team. That's a convenience, not
 // a lock: anyone who adds &full=1 to the address gets it.
