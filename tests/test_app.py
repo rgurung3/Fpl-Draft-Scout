@@ -1395,12 +1395,20 @@ def test_charts_route_gives_a_friendly_error(monkeypatch):
     assert "No Draft league found" in res.get_json()["error"]
 
 
-def test_league_hub_offers_the_three_choices():
+def test_league_hub_keeps_my_team_and_the_way_back_for_the_full_link_only():
     res = app.app.test_client().get("/league?league=123")
     assert res.status_code == 200
-    for choice in (b'data-tab="banter"', b'data-tab="charts"', b'data-tab="team"'):
-        assert choice in res.data
+    page = res.data.decode()
     res.close()
+    assert 'data-tab="banter"' in page and 'data-tab="charts"' in page
+    # My team, the way back and the full link are on the page but hidden unless the address has &full=1
+    assert 'class="choice fullonly hidden" type="button" data-tab="team"' in page
+    assert 'class="back fullonly hidden"' in page
+    assert 'const FULL = new URLSearchParams(location.search).get("full") === "1"' in page
+    # the league ID box is hidden for view-only visitors whose link already has a league
+    assert 'if (!FULL) $("loadForm").classList.add("hidden")' in page
+    # the only link out of the page is the hidden way back
+    assert page.count('href="/"') == 1
 
 
 @pytest.mark.parametrize("old,tab", [("/banter", "banter"), ("/charts", "charts")])
