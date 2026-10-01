@@ -102,7 +102,15 @@
 - facts (in this order, first FACT_COUNT = 5 that apply): luck (table place at least LUCK_MIN_GAP = 2 below points-scored place), harsh (highest score that still lost), streak (current winning or losing run of STREAK_MIN = 3 or more), thrashing, closest, low, high. The page shows 2, the rest behind "Show more". Text is written from the numbers, mild teasing, no AI.
 - Last season's facts (head-to-head records between managers across seasons, finish vs last year) are not built yet: checked on 2026-09-30: the Draft API only returns the current season. The league (52607) is marked is_renewed and keeps the same ID and entry IDs, but its team history, matches and standings start again at GW1, and a season parameter is ignored. Player totals for past seasons exist on the classic site (element-summary history_past, matched by player code), but nothing about managers. So this needs last season's results entered by hand (e.g. a final standings screenshot), or snapshots saved from this season on.
 
+## How saved seasons and rivalries work
+- The Draft API only returns the current season and wipes a league's results when it renews, so we keep our own copy. snapshot_league(details) in app.py turns the finished matches into a small record (season label, managers, and each match as gw, a, b, a_points, b_points using team IDs, which stay the same across seasons). Season label comes from the date (a season starts in July, SEASON_STARTS_IN), e.g. "2026-27".
+- save_snapshot.py <league id> writes it to history/<season>/league_<id>.json. save_snapshot() only writes when there are more finished matches than the saved file has, so running it often is harmless and a reset league can never overwrite a fuller record.
+- .github/workflows/snapshot.yml runs it every day at 06:00 UTC for league 52607 and commits the file if it changed (can also be run by hand from the Actions tab). The first snapshot (30 matches, GW1-5 of 2026-27) was saved by hand on 2026-10-01.
+- league_rivalries(details, league_id, a, b) combines the saved files with this season's live results (live replaces the saved copy of the same season), and league_rivalry() lists every meeting between two managers plus their record. Route: /api/league/<id>/rivalries?a=&b= (without a and b you only get the manager list).
+- The Rivalries choice in the league hub (view-only link too) has two pickers, a record summary, a bar chart of the points margin in each meeting (green = first manager won) and a list of every meeting.
+
 ## Decisions
+- Snapshots live in the repo's history/ folder on main, not a database or a separate branch. The repo is a free permanent store with nothing new to set up, and the app just reads local files. Cost: each daily change is a commit to main, so Render redeploys that day (harmless; the cache just resets). If that gets annoying, move history to its own branch and read it over HTTP, or use a database.
 - Flask backend, because the Draft site blocks requests made directly from a browser page.
 - Weights differ by position and live in WEIGHTS in app.py; the fixture window is LOOKAHEAD.
 - Ownership: element-status owner is the manager's entry_id (not the league entry id). Confirmed against the real API.
@@ -130,7 +138,7 @@
 4. Trade analyzer (done)
 5. "Why this pick?" explanations: short, from the numbers (done). AI long version dropped
 6. Season view (now "Until the break"): a longer-term rating alongside Next 5, so players like Porro (poor form, but an attacking full back) aren't dropped too early (built; tune weights against the real league next)
-7. Banter with last season's league (head-to-head records between managers, places gained or lost). Blocked: the API doesn't keep last season's league (see Banter notes). Options: enter last season's final standings by hand, or save a snapshot each gameweek from now on
+7. Banter with last season's league (head-to-head records between managers, places gained or lost). Blocked for last season: the API doesn't keep it (see Banter notes). Snapshots are now saved daily (done, see "How saved seasons and rivalries work"), so this works from next season on. Still open: enter last season's results by hand in the same file format (history/2025-26/league_52607.json), and use the saved seasons in Banter facts (places gained or lost)
 8. One AI feature where AI writes words and Python does the maths (ideas: trade pitch message, weekly league recap)
 9. Accounts/login (needed for watchlists + limiting AI usage)
 
@@ -138,7 +146,8 @@ Idea for later: trade finder. "I want Joao Pedro and I'll give Fernandes": sugge
 
 ## Known issues / ideas
 - The hub's view-only mode only hides links; the main app at the site's root address is still public: anyone who knows the address can open it and enter any team ID (it's all public Draft data). Hiding the links stops friends wandering in; it doesn't lock anyone out. A passcode would be needed for real access control (also needed before showing friends' photos).
-- Charts: head-to-head records are this season only (last season's data isn't available from the API: the Draft site replaces a league's data when it renews). Ideas not built: a luck chart (league points vs a play-everyone table), a rank-over-time chart, saving a snapshot each gameweek so next season can compare with this one.
+- Charts: head-to-head records are this season only (last season's data isn't available from the API: the Draft site replaces a league's data when it renews). Ideas not built: a luck chart (league points vs a play-everyone table), a rank-over-time chart. Snapshots are saved daily now, and the Rivalries choice uses them.
+- Rivalries: only league 52607 is saved automatically (the ID is in snapshot.yml). The daily job runs on GitHub's servers, so Cloudflare may 403 it; if the Actions tab shows red runs, run `python save_snapshot.py 52607` on my computer instead and commit history/. Only finished matches are saved, and the last gameweek before a renewal is only kept if a daily run happens after it finishes and before the league renews. Snapshots hold scores and managers' names at the time, not squads or transfers.
 - Banter: facts use team names, and two teams with the same name would be confusing. Before any gameweek finishes there's nothing to show. The hot match ignores squad strength (only the table).
 - The FPL Draft data feed isn't officially documented and could change.
 - The Draft site sits behind Cloudflare and may block cloud servers (403). It worked from Render at deploy time, but Cloudflare can change its mind; if the live site starts showing the 403 message, that's the cause, not a bug in the app.

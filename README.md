@@ -8,6 +8,7 @@ league, rates every player, and shows you:
 - **League hub** (its own page, `/league?league=<league id>`: the one link to send to the whole league). The normal link is view-only: it opens on two choices, **Banter** and **Charts**, and loads only what a friend picks, with no link into the rest of Draft Scout. Add `&full=1` to get the full version for one friend: it also has a **My team** choice and a way back to the main page, and shows both links to copy. This is a convenience, not a lock (anyone who adds `&full=1` gets it). Add `&tab=banter` or `&tab=charts` to open straight on one. Old `/banter` and `/charts` links still work and redirect here. Banter: three cards for the coming gameweek (the hot match of the week, a "Battle for 3rd" and a "Wooden spoon watch", each a different match, so nobody is on two), and facts to argue about (unluckiest manager, harshest loss, winning and losing runs, biggest beating, closest match, lowest and best scores). Two facts show at first, with a button for the rest. Mild teasing, all worked out from the numbers
 - **Free agents**: a sortable, filterable table of everyone unowned in your league, with both ratings (next 5 and until the break) and upcoming fixtures. It shows the top 15 at first, with a button for more
 - **Charts** (in the league hub; head-to-head leagues only): the **league race** (each manager's league points climbing from 0 after every gameweek, plus a grid of weekly scores shaded against the league average with each week's W, D or L), a **head-to-head grid** (every manager's won-drawn-lost record against every other manager this season, with the points when you select a row), **points scored and conceded** (one dot per manager, so you can see who's strong and who's been lucky), and **weekly scores** (each manager's lowest, average and best week, so you can see who's steady and who's boom or bust)
+- **Rivalries** (in the league hub): pick two managers and see every match between them, who won, the overall record and a bar chart of the margin in each meeting. Seasons are saved automatically from now on (see Saved seasons and Rivalries below), so next year this shows this season too
 - **Next 5 / Until the break**: a toggle that switches every rating on the page between the next 5 gameweeks and everything up to the next international break
 - **League squads**: how every manager's best legal eleven (one keeper, 3-5 DEF, 2-5 MID, 1-3 FWD) stacks up, with your squad highlighted
 
@@ -162,6 +163,22 @@ Your choice goes into your link (`&view=season`), so a bookmark remembers it.
 You can tweak the weights in `WEIGHTS` and `SEASON_WEIGHTS`, the fixture windows in `LOOKAHEAD` and `SEASON_LOOKAHEAD`,
 the scale in `SCALE_PERCENTILE` and `MIN_MINUTES`, and the trade verdict
 thresholds in `TRADE_MIN_GAIN` and `FAIR_MARGIN`, all at the top of `app.py`.
+
+## Saved seasons and Rivalries
+
+The Draft site deletes a league's results when it renews for a new season, so
+Draft Scout keeps its own copy in the `history/` folder:
+
+```bash
+python save_snapshot.py 52607   # saves history/<season>/league_52607.json
+```
+
+A GitHub Action (`.github/workflows/snapshot.yml`) does this every day and
+commits the file if it changed, so you don't have to. The **Rivalries** choice
+in the league hub reads those files plus this season's live results: pick two
+managers and see every match between them, who won, and the overall record.
+It only has seasons from the day saving started. Last season can't be
+recovered from the API.
 
 ## Notes
 

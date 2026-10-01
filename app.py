@@ -3,11 +3,13 @@ Draft Scout - a helper app for FPL Draft leagues.
 
 Run:  python app.py   then open http://127.0.0.1:5000
 """
+import json
 import re
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import urlencode
 
 import requests
@@ -26,6 +28,8 @@ BREAK_GAP_DAYS = 10
 BREAK_MIN_WEEKS = 3
 BREAK_MAX_WEEKS = 10
 LAST_GW = 38
+HISTORY_DIR = Path(__file__).parent / "history"  # saved league snapshots, one folder per season
+SEASON_STARTS_IN = 7    # a new season starts in July: a snapshot taken from July on belongs to that year
 MIN_MINUTES = 180       # per-90 stats count in full from this many minutes (in proportion below it)
 SCALE_PERCENTILE = 95   # each stat is measured against this percentile of regular players
 
@@ -891,6 +895,129 @@ def league_charts(details):
     return {"history": history, "managers": managers, "head_to_head": head_to_head}
 
 
+# ---------------------------------------------------------------- saved seasons and rivalries
+
+def season_label(today=None):
+    """The season a date falls in, e.g. 2026-10-01 -> "2026-27" (a season starts in July)."""
+    today = today or datetime.now(timezone.utc)
+    start = today.year if today.month >= SEASON_STARTS_IN else today.year - 1
+    return f"{start}-{(start + 1) % 100:02d}"
+
+
+def snapshot_league(details, today=None):
+    """
+    A small, permanent record of a head-to-head league's finished matches, worked out from
+    the league details. The Draft site throws a league's results away when it renews for a
+    new season, so this is what we keep (see save_snapshot.py). None if nothing has finished.
+
+    managers: {entry_id, team, manager} for everyone in the league.
+    matches: {gw, a, b, a_points, b_points} per finished match, with a and b as team IDs
+    (entry_id). Team IDs stay the same from season to season, which is what lets us
+    compare managers across seasons.
+    """
+    entries = {e["entry_id"]: e for e in details.get("league_entries", []) if e.get("entry_id")}
+    entry_of = {e.get("id"): e["entry_id"] for e in entries.values()}
+    matches = []
+    for m in details.get("matches", []):
+        a, b = entry_of.get(m.get("league_entry_1")), entry_of.get(m.get("league_entry_2"))
+        pa, pb = m.get("league_entry_1_points"), m.get("league_entry_2_points")
+        if m.get("finished") and m.get("event") and a and b and pa is not None and pb is not None:
+            matches.append({"gw": m["event"], "a": a, "b": b, "a_points": pa, "b_points": pb})
+    if not matches:
+        return None
+    matches.sort(key=lambda m: (m["gw"], m["a"]))
+    return {
+        "season": season_label(today),
+        "league_name": details.get("league", {}).get("name", ""),
+        "managers": [{"entry_id": e["entry_id"], "team": e.get("entry_name") or f'Team {e["entry_id"]}',
+                      "manager": f'{e.get("player_first_name", "")} {e.get("player_last_name", "")}'.strip()}
+                     for e in entries.values()],
+        "matches": matches,
+    }
+
+
+def snapshot_path(league_id, season, folder=HISTORY_DIR):
+    return Path(folder) / season / f"league_{league_id}.json"
+
+
+def save_snapshot(league_id, snapshot, folder=HISTORY_DIR):
+    """
+    Write a snapshot to history/<season>/league_<id>.json. Returns the path, or None if there
+    was nothing new to save: no snapshot, or the file already holds as many matches (we never
+    replace a fuller record with a smaller one, e.g. if the league has reset).
+    """
+    if snapshot is None:
+        return None
+    path = snapshot_path(league_id, snapshot["season"], folder)
+    if path.exists():
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        if len(saved.get("matches", [])) >= len(snapshot["matches"]):
+            return None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"league_id": league_id, **snapshot}, indent=1) + "\n", encoding="utf-8")
+    return path
+
+
+def saved_snapshots(league_id, folder=HISTORY_DIR):
+    """Every saved snapshot of a league, oldest season first. Missing or unreadable files are skipped."""
+    found = []
+    for path in sorted(Path(folder).glob(f"*/league_{league_id}.json")):
+        try:
+            found.append(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            continue
+    return found
+
+
+def league_rivalry(snapshots, a, b):
+    """
+    Every meeting between two managers (team IDs) across the given snapshots, oldest first,
+    and their overall record. A snapshot's matches can list the pair either way round.
+
+    meetings: {season, gw, a_points, b_points, winner} with winner "a", "b" or None (a draw).
+    record: a_won, b_won, drawn, a_points, b_points (totals across all meetings).
+    """
+    meetings = []
+    for snap in snapshots:
+        for m in snap.get("matches", []):
+            if {m["a"], m["b"]} != {a, b}:
+                continue
+            mine, theirs = (m["a_points"], m["b_points"]) if m["a"] == a else (m["b_points"], m["a_points"])
+            meetings.append({"season": snap["season"], "gw": m["gw"], "a_points": mine, "b_points": theirs,
+                             "winner": "a" if mine > theirs else "b" if mine < theirs else None})
+    meetings.sort(key=lambda m: (m["season"], m["gw"]))
+    record = {"a_won": sum(m["winner"] == "a" for m in meetings),
+              "b_won": sum(m["winner"] == "b" for m in meetings),
+              "drawn": sum(m["winner"] is None for m in meetings),
+              "a_points": sum(m["a_points"] for m in meetings),
+              "b_points": sum(m["b_points"] for m in meetings)}
+    return {"meetings": meetings, "record": record}
+
+
+def league_rivalries(details, league_id, a=None, b=None, folder=HISTORY_DIR):
+    """
+    What the Rivalries page draws: the saved seasons plus this season's live results (so it
+    works from day one, even before the first snapshot is saved). If this season has been
+    saved too, the live results replace the saved copy, since they're fresher.
+
+    seasons: the season labels we have results for, oldest first.
+    managers: everyone who appears, {entry_id, team, manager}, with the newest names winning.
+    rivalry: league_rivalry for a and b, or None unless both are given.
+    """
+    snapshots = {s["season"]: s for s in saved_snapshots(league_id, folder)}
+    live = snapshot_league(details)
+    if live:
+        snapshots[live["season"]] = live
+    ordered = [snapshots[k] for k in sorted(snapshots)]
+    people = {}
+    for snap in ordered:   # oldest first, so newer names overwrite older ones
+        for m in snap.get("managers", []):
+            people[m["entry_id"]] = m
+    return {"seasons": [s["season"] for s in ordered],
+            "managers": sorted(people.values(), key=lambda m: m["team"].lower()),
+            "rivalry": league_rivalry(ordered, a, b) if a and b and a != b else None}
+
+
 # ---------------------------------------------------------------- talking to FPL
 
 LEAGUE_NOT_FOUND = "No Draft league found with that ID. Check the number in your league's URL."
@@ -1118,6 +1245,22 @@ def charts(league_id):
     return jsonify({"league_id": league_id,
                     "league_name": details.get("league", {}).get("name", f"League {league_id}"),
                     "charts": league_charts(details)})
+
+
+@app.route("/api/league/<int:league_id>/rivalries")
+def rivalries(league_id):
+    """
+    Head-to-head history between two managers across saved seasons and this one
+    (see league_rivalries). ?a= and ?b= are team IDs; without them only the manager list comes back.
+    """
+    try:
+        details = fetch(f"{DRAFT}/league/{league_id}/details", LEAGUE_NOT_FOUND)
+    except FplError as e:
+        return jsonify({"error": e.message}), e.status
+    return jsonify({"league_id": league_id,
+                    "league_name": details.get("league", {}).get("name", f"League {league_id}"),
+                    **league_rivalries(details, league_id, request.args.get("a", type=int),
+                                       request.args.get("b", type=int))})
 
 
 @app.route("/api/team/<int:entry_id>")
