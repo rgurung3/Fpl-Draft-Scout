@@ -23,9 +23,10 @@
 - Smarter swaps: a "Small sample" line when a player has under 300 minutes, a Keep button (protects a player from being suggested as a drop, saved in the link as &keep=), a "Your best eleven" line (does the drop start, and strength before/after), and a "Minutes, GW2-5" line with each player's last four gameweeks
 - Per-90 stats no longer have a cliff at 180 minutes: they count in proportion below it (Barcola on 168 minutes had xGI counted as 0)
 - Trade analyzer moved to its own page (/trade) so the main page is less cluttered. Links on the main page carry team, league and view across ("Build a trade with this team" adds &with=). Shared styles now live in static/common.css
-- League banter page (/banter?league=<id>, for sharing with the league): hot match of the week, Battle for 3rd, Wooden spoon watch, and up to 5 facts (2 shown, rest behind Show more). This season only for now. Checked against the real league (league 52607); layout checked in the browser
-- League charts page (/charts?league=<id>, for sharing with the league): the league race and weekly grid moved here from the main page, plus a head-to-head grid (W-D-L between every pair, click a row for the points), a points scored vs conceded scatter and a weekly score range chart. Main page has a "League charts" link that carries team, league and view. Checked against the real league (52607) in the browser, desktop and phone width
-- Tests (pytest, 180 passing) and CI (GitHub Actions); ruff clean
+- League banter (now a choice on the league hub, /league?league=<id>&tab=banter; /banter redirects there): hot match of the week, Battle for 3rd, Wooden spoon watch, and up to 5 facts (2 shown, rest behind Show more). This season only for now. Checked against the real league (league 52607); layout checked in the browser
+- League charts (now a choice on the league hub; /charts redirects there): the league race and weekly grid moved here from the main page, plus a head-to-head grid (W-D-L between every pair, click a row for the points), a points scored vs conceded scatter and a weekly score range chart. Main page has a "League charts" link that carries team, league and view. Checked against the real league (52607) in the browser, desktop and phone width
+- League hub (/league?league=<id>): the single link to share. It opens on three big buttons (Banter, Charts, My team) with nothing loaded; picking one loads that data (once) and shows it below. My team takes a team ID and goes to /?team=<id>&league=<id>. Old /banter and /charts links redirect to the hub on that tab (keeping league and team). The main page's two links became one, "Banter and charts". Checked against the real league in the browser, desktop and phone width
+- Tests (pytest, 183 passing) and CI (GitHub Actions); ruff clean
 
 ## How it works
 - app.py fetches data from the FPL Draft site (team → league lookup, league details, who owns whom) and the classic FPL site (fixtures + difficulty), then rates every player 0–100.
@@ -56,7 +57,7 @@
 - The page: toggle in the league bar reloads with ?view=, the link keeps &view=season, the free agents table shows both ratings (chosen one in bold, sorted by it), fixture strips show the view's window, trades send the view.
 
 ## How the league charts page works
-- league_charts(details) in app.py, route /api/league/<id>/charts, page static/charts.html (route /charts). Built from the league details (finished matches and the table), so no extra requests. None until a gameweek has finished or if the league isn't head-to-head.
+- league_charts(details) in app.py, route /api/league/<id>/charts, drawn by static/league.html. Built from the league details (finished matches and the table), so no extra requests. None until a gameweek has finished or if the league isn't head-to-head.
 - Returns "history" (league_history, for the race and the weekly grid), "managers" in table order (team, manager, league_points, points_for and points_against over their finished matches, and low/high/average weekly score) and "head_to_head": per manager, a record against each opponent met so far (won, drawn, lost, points_for, points_against). Opponents not yet met are left out, so the grid shows a dot.
 - The page only draws this, with plain SVG (no chart library). It highlights you from ?team= or the team ID the main page last used; the share link has only ?league=. Scatter labels move up or down to avoid overlapping each other.
 - The race and its grid now live on this page only. load_league still returns "history" (check_league.py uses it), but the main page no longer draws it.
@@ -83,9 +84,9 @@
 - League squads = average rating of each team's best legal eleven: take the minimum at each position (1 GKP, 3 DEF, 2 MID, 1 FWD), then fill the last 4 places with the best players left without breaking a maximum (1 GKP, 5 DEF, 5 MID, 3 FWD). My squad is opened and highlighted, with formation and bench.
 
 ## How the pages fit together
-- static/index.html (main), static/trade.html (/trade), static/banter.html (/banter). Shared styles are in static/common.css; each page keeps its own script.
+- static/index.html (main), static/trade.html (/trade), static/league.html (/league, the hub with the banter and charts choices). /banter and /charts are redirects to the hub (to_league_page in app.py). Shared styles are in static/common.css; each page keeps its own script.
 - trade.html loads /api/team/<id>?swaps=0 (players and managers only: no waiver suggestions and none of their per-player minute requests), then uses the same trade route as before.
-- banter.html takes ?league=<id> only, so the link works for anyone in the league. It calls /api/league/<id>/banter.
+- league.html takes ?league=<id> (and optionally &tab= and &team=), so the link works for anyone in the league. Banter calls /api/league/<id>/banter and Charts calls /api/league/<id>/charts, each only when picked and only once per league. &team= (or the team ID the main page last used) only highlights you in the charts and prefills My team; the share link doesn't include it.
 
 ## How the trade analyzer works
 - evaluate_trade(players, me, them, give, get) in app.py. Route: /api/team/<me>/trade?with=<them>&give=12,34&get=56&league=<id>.

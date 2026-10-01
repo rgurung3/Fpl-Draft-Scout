@@ -3,16 +3,45 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>League charts - Draft Scout</title>
+<title>League hub - Draft Scout</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/common.css">
 <style>
-  .sharebar { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; color: var(--muted); font-size: .9rem; margin-bottom: 28px; }
+  .sharebar { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; color: var(--muted); font-size: .9rem; margin-bottom: 20px; }
   .sharebar input { flex: 1 1 240px; max-width: 360px; padding: 7px 10px; border: 1px solid var(--line);
     border-radius: 6px; background: var(--surface); color: var(--ink); font-size: .9rem; }
   .back { display: inline-block; margin-bottom: 8px; color: var(--pitch); font-weight: 600; text-decoration: none; }
+
+  /* the choices: big buttons, the content appears below the one picked */
+  .choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 32px; }
+  .choice { text-align: left; background: var(--surface); border: 1px solid var(--line); border-left: 5px solid var(--line);
+    border-radius: 4px; padding: 14px 16px; cursor: pointer; display: grid; gap: 4px; }
+  .choice:hover { border-left-color: var(--pitch); }
+  .choice[aria-pressed="true"] { border-left-color: var(--amber); background: var(--amber-soft); }
+  .choice .t { font-family: var(--display); font-weight: 600; font-size: 1.4rem; line-height: 1.1; }
+  .choice .d { color: var(--muted); font-size: .92rem; }
+  .teambox { background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 16px; max-width: 520px; }
+  .teambox form { display: flex; gap: 8px; flex-wrap: wrap; align-items: end; margin-top: 10px; }
+  .teambox label { display: grid; gap: 2px; font-size: .9rem; color: var(--muted); }
+  .teambox input { width: 160px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; margin-bottom: 36px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-left: 5px solid var(--pitch);
+    border-radius: 4px; padding: 14px 16px; display: grid; gap: 8px; align-content: start; }
+  .card.hot { border-left-color: var(--amber); }
+  .card.spoon { border-left-color: var(--rival); }
+  .card .tag { font-family: var(--display); font-weight: 600; font-size: 1.25rem; }
+  .versus { display: grid; grid-template-columns: 1fr auto 1fr; gap: 8px; align-items: center; }
+  .versus .side { min-width: 0; }
+  .versus .side:last-child { text-align: right; }
+  .versus .team { font-weight: 600; overflow-wrap: anywhere; }
+  .versus .who { color: var(--muted); font-size: .85rem; }
+  .versus .v { color: var(--muted); font-family: var(--display); font-size: 1.3rem; }
+  .card .line { color: var(--muted); font-size: .95rem; }
+  .facts { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 8px; }
+  .facts li { background: var(--surface); border: 1px solid var(--line); border-left: 5px solid var(--amber);
+    border-radius: 4px; padding: 12px 16px; }
   .tablewrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; }
 
   /* league race */
@@ -77,14 +106,14 @@
   <header class="top">
     <div>
       <a class="back hidden" id="backLink" href="/">← Back to Draft Scout</a>
-      <h1>League charts</h1>
-      <p class="sub" style="margin:4px 0 0" id="leagueLine">The race, head-to-head records and who's scoring</p>
+      <h1>League hub</h1>
+      <p class="sub" style="margin:4px 0 0" id="leagueLine">Banter, charts and your own team, all in one place</p>
     </div>
     <form class="load" id="loadForm">
       <label>League ID
         <input id="leagueId" inputmode="numeric" pattern="[0-9]+" required placeholder="the number in your league's URL">
       </label>
-      <button class="btn" id="loadBtn" type="submit">Show charts</button>
+      <button class="btn" id="loadBtn" type="submit">Open league</button>
     </form>
   </header>
 
@@ -96,46 +125,90 @@
       <input id="shareLink" readonly aria-label="Link to share">
       <button class="btn ghost" id="copyLink" type="button">Copy link</button>
     </div>
-    <div id="empty" class="empty hidden"></div>
 
-    <div id="charts">
-      <section>
-        <h2>League race</h2>
-        <p class="sub">Each manager's league points after every gameweek, climbing from 0 (3 for a win, 1 for a draw). Your line has a dot for each week. Hover or tap a line to see whose it is.</p>
-        <p class="racecap" id="raceCaption" aria-live="polite"></p>
-        <div class="chartwrap"><svg class="race" id="raceChart" role="img"></svg></div>
-        <h3 class="minihead">Points each gameweek</h3>
-        <p class="sub">Shaded against that week's league average: green above, red below. W, D or L is the head-to-head result.</p>
-        <div class="tablewrap" id="weeksWrap"><table class="weeks" id="weeksTable"></table></div>
-      </section>
+    <div class="choices" id="choices" role="group" aria-label="What would you like to see?">
+      <button class="choice" type="button" data-tab="banter" aria-pressed="false">
+        <span class="t">Banter</span><span class="d">This week's match-ups and facts to argue about</span></button>
+      <button class="choice" type="button" data-tab="charts" aria-pressed="false">
+        <span class="t">Charts</span><span class="d">The league race, head-to-head records and who's scoring</span></button>
+      <button class="choice" type="button" data-tab="team" aria-pressed="false">
+        <span class="t">My team</span><span class="d">Waiver targets, trades and squads for your own team</span></button>
+    </div>
+    <p class="sub" id="loading" style="display:none">Loading…</p>
 
-      <section>
-        <h2>Head to head</h2>
-        <p class="sub">Each row is a manager's record (won-drawn-lost) against the manager at the top of the column, this season so far. Green means they're ahead, red behind. Select a row to see the points too.</p>
-        <div class="tablewrap"><table class="weeks h2h" id="h2hTable"></table></div>
-        <div class="picked hidden" id="picked"></div>
+    <div id="panel-banter" class="hidden">
+      <div id="banterEmpty" class="empty hidden"></div>
+      <section id="matchups">
+        <h2>This week's match-ups</h2>
+        <p class="sub" id="matchSub"></p>
+        <div class="cards" id="cards"></div>
       </section>
+      <section id="factsSection">
+        <h2>Facts to argue about</h2>
+        <p class="sub">Worked out from this season's results. Mild teasing only.</p>
+        <ul class="facts" id="facts"></ul>
+        <button class="btn ghost hidden" id="moreFacts" type="button"></button>
+      </section>
+    </div>
 
-      <section>
-        <h2>Points scored and conceded</h2>
-        <p class="sub" id="scatterSub"></p>
-        <div class="chartwrap"><svg class="plot" id="scatter" role="img"></svg></div>
-      </section>
+    <div id="panel-charts" class="hidden">
+      <div id="chartsEmpty" class="empty hidden"></div>
+      <div id="charts">
+        <section>
+          <h2>League race</h2>
+          <p class="sub">Each manager's league points after every gameweek, climbing from 0 (3 for a win, 1 for a draw). Your line has a dot for each week. Hover or tap a line to see whose it is.</p>
+          <p class="racecap" id="raceCaption" aria-live="polite"></p>
+          <div class="chartwrap"><svg class="race" id="raceChart" role="img"></svg></div>
+          <h3 class="minihead">Points each gameweek</h3>
+          <p class="sub">Shaded against that week's league average: green above, red below. W, D or L is the head-to-head result.</p>
+          <div class="tablewrap" id="weeksWrap"><table class="weeks" id="weeksTable"></table></div>
+        </section>
+        <section>
+          <h2>Head to head</h2>
+          <p class="sub">Each row is a manager's record (won-drawn-lost) against the manager at the top of the column, this season so far. Green means they're ahead, red behind. Select a row to see the points too.</p>
+          <div class="tablewrap"><table class="weeks h2h" id="h2hTable"></table></div>
+          <div class="picked hidden" id="picked"></div>
+        </section>
+        <section>
+          <h2>Points scored and conceded</h2>
+          <p class="sub" id="scatterSub"></p>
+          <div class="chartwrap"><svg class="plot" id="scatter" role="img"></svg></div>
+        </section>
+        <section>
+          <h2>Weekly scores</h2>
+          <p class="sub">Each bar runs from a manager's lowest week to their best week, with the black mark at their average. Short bars are steady; long bars are boom or bust.</p>
+          <div class="chartwrap"><svg class="plot" id="spread" role="img"></svg></div>
+        </section>
+      </div>
+    </div>
 
-      <section>
-        <h2>Weekly scores</h2>
-        <p class="sub">Each bar runs from a manager's lowest week to their best week, with the black mark at their average. Short bars are steady; long bars are boom or bust.</p>
-        <div class="chartwrap"><svg class="plot" id="spread" role="img"></svg></div>
-      </section>
+    <div id="panel-team" class="hidden">
+      <div class="teambox">
+        <h2>My team</h2>
+        <p class="sub" style="margin:0">Enter your team ID to open your own view of this league. On draft.premierleague.com, open your team's Points page: the number after <code>/entry/</code> in the address bar is your team ID.</p>
+        <form id="teamForm">
+          <label>Team ID
+            <input id="teamId" inputmode="numeric" pattern="[0-9]+" required placeholder="e.g. 276914">
+          </label>
+          <button class="btn" type="submit">Open my team</button>
+        </form>
+      </div>
     </div>
   </div>
 </main>
 
 <script>
 const $ = id => document.getElementById(id);
-let CH = null;          // what the server sent (see league_charts in app.py); this page only draws it
-let me = null;          // your team ID, if we know it, so your line and row stand out
-let picked = null;      // the manager whose head-to-head record is open
+const FACTS_SHOWN = 2;   // facts shown at first; "Show more" reveals the rest
+const TABS = ["banter", "charts", "team"];
+let leagueId = null;     // the league this page is open on
+let tab = null;          // the choice currently open (none until a friend picks one)
+const loaded = { banter: null, charts: null };   // which league each choice's data is for, so each loads only once
+let BANTER = null, showAll = false;
+let CH = null;           // the charts the server sent (see league_charts in app.py); this page only draws them
+let myId = null;         // your team ID, if we know it, so your line and row stand out
+let me = null;           // myId, if that team is in this league
+let picked = null;       // the manager whose head-to-head record is open
 
 function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 const place = n => n + (n % 100 >= 11 && n % 100 <= 13 ? "th" : ({ 1: "st", 2: "nd", 3: "rd" }[n % 10] || "th"));
@@ -143,38 +216,112 @@ const teamName = id => CH.managers.find(m => m.entry_id === id)?.team ?? `Team $
 const short = (s, n) => s.length > n ? s.slice(0, n - 1) + "…" : s;
 const tint = (good, share) => `color-mix(in srgb, var(${good ? "--pitch" : "--rival"}) ${share.toFixed(0)}%, transparent)`;
 
-async function loadLeague(id) {
-  $("loadBtn").disabled = true; $("loadBtn").textContent = "Loading…";
+// ---------------------------------------------------------------- choosing and loading
+
+function setAddress() {
+  // the address is a link anyone can open; &team= only keeps your highlight on reload
+  history.replaceState(null, "", "?league=" + leagueId + (tab ? "&tab=" + tab : "") + (myId ? "&team=" + myId : ""));
+}
+
+async function getJson(path) {
+  let r;
+  try { r = await fetch(path); }
+  catch (e) { throw new Error("Can't reach Draft Scout. Check your connection and try again."); }
+  let j = null;
+  try { j = await r.json(); } catch (e) { /* not JSON, e.g. a crash page */ }
+  if (!r.ok || !j) throw new Error(j?.error || "Draft Scout hit an unexpected error. Try again in a moment.");
+  return j;
+}
+
+async function openTab(name) {
+  tab = name;
+  document.querySelectorAll(".choice").forEach(b => b.setAttribute("aria-pressed", b.dataset.tab === name));
+  TABS.forEach(t => $("panel-" + t).classList.toggle("hidden", t !== name));
   $("error").classList.add("hidden");
+  setAddress();
+  if (name === "team" || loaded[name] === leagueId) return;
+  const forLeague = leagueId;
+  $("loading").style.display = "";
   try {
-    let r;
-    try { r = await fetch(`/api/league/${id}/charts`); }
-    catch (e) { throw new Error("Can't reach Draft Scout. Check your connection and try again."); }
-    let j = null;
-    try { j = await r.json(); } catch (e) { /* not JSON, e.g. a crash page */ }
-    if (!r.ok || !j) throw new Error(j?.error || "Draft Scout hit an unexpected error. Try again in a moment.");
-    // the address is a link anyone in the league can open; &team= only keeps your highlight on reload
-    history.replaceState(null, "", "?league=" + id + (me ? "&team=" + me : ""));
-    render(j, id);
+    const data = await getJson(`/api/league/${forLeague}/${name}`);
+    if (forLeague !== leagueId) return;   // they opened another league while this was loading
+    $("leagueLine").textContent = data.league_name;
+    if (name === "banter") renderBanter(data); else renderCharts(data);
+    loaded[name] = forLeague;
   } catch (e) {
-    $("error").textContent = e.message; $("error").classList.remove("hidden");
+    if (tab === name) { $("error").textContent = e.message; $("error").classList.remove("hidden"); }
   } finally {
-    $("loadBtn").disabled = false; $("loadBtn").textContent = "Show charts";
+    $("loading").style.display = "none";
   }
 }
 
-function render(data, id) {
+function openLeague(id, firstTab) {
+  leagueId = id;
+  loaded.banter = loaded.charts = null;
+  tab = null;
   $("app").classList.remove("hidden");
-  $("leagueLine").textContent = data.league_name;
-  $("shareLink").value = location.origin + location.pathname + "?league=" + id;
-  CH = data.charts;
-  $("empty").classList.toggle("hidden", !!CH);
-  $("charts").classList.toggle("hidden", !CH);
-  if (!CH) {
-    $("empty").textContent = "The charts appear once a gameweek has finished. They need a head-to-head league, because they're built from the match results.";
+  $("error").classList.add("hidden");
+  $("leagueLine").textContent = "League " + id;
+  $("shareLink").value = location.origin + "/league?league=" + id;   // the link to send: it opens on the choices
+  document.querySelectorAll(".choice").forEach(b => b.setAttribute("aria-pressed", false));
+  TABS.forEach(t => $("panel-" + t).classList.add("hidden"));
+  if (TABS.includes(firstTab)) openTab(firstTab); else setAddress();
+}
+
+// ---------------------------------------------------------------- banter
+
+function side(p) {
+  return `<div class="side"><div class="team">${esc(p.team)}</div><div class="who">${esc(p.manager)} · ${place(p.position)}, ${p.league_points} pts</div></div>`;
+}
+
+function card(cls, title, a, b, line) {
+  return `<div class="card ${cls}"><div class="tag">${esc(title)}</div>
+    <div class="versus">${side(a)}<span class="v">v</span>${side(b)}</div>
+    <div class="line">${esc(line)}</div></div>`;
+}
+
+function renderBanter(data) {
+  BANTER = data;
+  const b = BANTER.banter;
+  // the server works out all of this (see league_banter in app.py); this just draws it
+  $("banterEmpty").classList.toggle("hidden", !!b);
+  $("matchups").classList.toggle("hidden", !b);
+  $("factsSection").classList.toggle("hidden", !b);
+  if (!b) {
+    $("banterEmpty").textContent = "The banter starts once a gameweek has finished. It needs a head-to-head league, because it's built from the match results.";
     return;
   }
-  if (!CH.managers.some(m => m.entry_id === me)) me = null;   // that team isn't in this league
+  const cards = [];
+  if (b.hot_match) {
+    const h = b.hot_match;
+    cards.push(card("hot", `Hot match of the week (GW${h.gw})`, h.a, h.b, h.line));
+  }
+  b.battles.forEach(x => cards.push(card(x.title === "Battle for 3rd" ? "" : "spoon", x.title, x.a, x.b, x.line)));
+  $("matchSub").textContent = b.hot_match ? `Looking ahead to gameweek ${b.hot_match.gw}.` : "No matches left to play.";
+  $("cards").innerHTML = cards.join("") || `<div class="empty">Nothing to show yet.</div>`;
+  renderFacts();
+}
+
+function renderFacts() {
+  const facts = BANTER.banter.facts;
+  $("facts").innerHTML = (showAll ? facts : facts.slice(0, FACTS_SHOWN)).map(f => `<li>${esc(f.text)}</li>`).join("")
+    || `<li>No facts yet. Give it a few more gameweeks.</li>`;
+  $("moreFacts").classList.toggle("hidden", facts.length <= FACTS_SHOWN);
+  $("moreFacts").textContent = showAll ? `Show ${FACTS_SHOWN} only` : `Show more (${facts.length - FACTS_SHOWN} more)`;
+}
+
+
+// ---------------------------------------------------------------- charts
+
+function renderCharts(data) {
+  CH = data.charts;
+  $("chartsEmpty").classList.toggle("hidden", !!CH);
+  $("charts").classList.toggle("hidden", !CH);
+  if (!CH) {
+    $("chartsEmpty").textContent = "The charts appear once a gameweek has finished. They need a head-to-head league, because they're built from the match results.";
+    return;
+  }
+  me = CH.managers.some(m => m.entry_id === myId) ? myId : null;   // that team might not be in this league
   picked = null;
   renderRace(); renderGrid(); renderHeadToHead(); renderScatter(); renderSpread();
 }
@@ -393,7 +540,22 @@ $("h2hTable").addEventListener("click", e => {
   picked = picked === id ? null : id;
   renderPicked();
 });
-$("loadForm").addEventListener("submit", e => { e.preventDefault(); loadLeague($("leagueId").value.trim()); });
+$("choices").addEventListener("click", e => {
+  const b = e.target.closest(".choice"); if (b) openTab(b.dataset.tab);
+});
+$("moreFacts").addEventListener("click", () => { showAll = !showAll; renderFacts(); });
+$("loadForm").addEventListener("submit", e => {
+  e.preventDefault();
+  const id = $("leagueId").value.trim();
+  if (/^[0-9]+$/.test(id)) openLeague(id, null);
+});
+$("teamForm").addEventListener("submit", e => {
+  e.preventDefault();
+  const team = $("teamId").value.trim();
+  if (!/^[0-9]+$/.test(team)) return;
+  try { localStorage.setItem("teamId", team); } catch (err) { /* no storage: the link still carries the team */ }
+  location.href = "/?team=" + team + "&league=" + leagueId;
+});
 $("copyLink").addEventListener("click", async () => {
   try { await navigator.clipboard.writeText($("shareLink").value); }
   catch (e) { $("shareLink").select(); return; }   // no clipboard access: select it so they can copy by hand
@@ -401,21 +563,20 @@ $("copyLink").addEventListener("click", async () => {
   setTimeout(() => { $("copyLink").textContent = "Copy link"; }, 2000);
 });
 
-// who you are: from the link (?team=...) or the last team used on the main page. This only
-// highlights you; the page works for anyone with the league link.
+// a shared link looks like /league?league=12345 (add &tab=banter, charts or team to open straight on one)
 const params = new URLSearchParams(location.search);
 let stored = null;
 try { stored = localStorage.getItem("teamId"); } catch (e) { /* no storage: nothing to highlight */ }
-const mineText = params.get("team") || stored;
-if (/^[0-9]+$/.test(mineText || "")) {
-  me = Number(mineText);
-  $("backLink").href = "/?team=" + mineText; $("backLink").classList.remove("hidden");
+const teamText = params.get("team") || stored;
+if (/^[0-9]+$/.test(teamText || "")) {
+  myId = Number(teamText);
+  $("teamId").value = teamText;
+  $("backLink").href = "/?team=" + teamText; $("backLink").classList.remove("hidden");
 }
-// a shared link looks like /charts?league=12345
 const leagueParam = params.get("league");
 if (/^[0-9]+$/.test(leagueParam || "")) {
   $("leagueId").value = leagueParam;
-  loadLeague(leagueParam);
+  openLeague(leagueParam, params.get("tab"));
 }
 </script>
 </body>

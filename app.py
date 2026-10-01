@@ -8,9 +8,10 @@ import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from urllib.parse import urlencode
 
 import requests
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, redirect, request, send_from_directory
 
 DRAFT = "https://draft.premierleague.com/api"
 CLASSIC = "https://fantasy.premierleague.com/api"
@@ -1055,14 +1056,26 @@ def trade_page():
     return send_from_directory(app.static_folder, "trade.html")
 
 
+@app.route("/league")
+def league_page():
+    """The page to share: choose Banter, Charts or My team (see static/league.html)."""
+    return send_from_directory(app.static_folder, "league.html")
+
+
+def to_league_page(tab):
+    """Old /banter and /charts links open the league page on that tab, keeping league and team."""
+    wanted = {k: v for k, v in request.args.items() if k in ("league", "team")}
+    return redirect("/league?" + urlencode({**wanted, "tab": tab}))
+
+
 @app.route("/banter")
 def banter_page():
-    return send_from_directory(app.static_folder, "banter.html")
+    return to_league_page("banter")
 
 
 @app.route("/charts")
 def charts_page():
-    return send_from_directory(app.static_folder, "charts.html")
+    return to_league_page("charts")
 
 
 @app.route("/health")

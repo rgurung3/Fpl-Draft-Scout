@@ -128,8 +128,7 @@
     </div>
     <nav class="pagelinks" aria-label="More pages">
       <a class="btn ghost" id="tradeLink" href="/trade">Trade analyzer</a>
-      <a class="btn ghost" id="banterLink" href="/banter">League banter</a>
-      <a class="btn ghost" id="chartsLink" href="/charts">League charts</a>
+      <a class="btn ghost" id="leagueLink" href="/league">Banter and charts</a>
     </nav>
     <div class="mylink">
       <span>Bookmark your link:</span>
@@ -278,8 +277,7 @@ function render() {
     `<option value="${id}" ${id === DATA.league_id ? "selected" : ""}>${id === DATA.league_id ? esc(DATA.league_name) : "League " + id}</option>`).join("");
 
   $("tradeLink").href = pageLink("/trade");
-  $("chartsLink").href = pageLink("/charts");   // carries your team so your line is highlighted
-  $("banterLink").href = "/banter?league=" + DATA.league_id;   // the banter page is about the whole league, so anyone can open it
+  $("leagueLink").href = "/league?league=" + DATA.league_id + "&team=" + state.team;   // carries your team so your line is highlighted
   $("myLink").value = location.origin + location.pathname + linkQuery();
 
   $("scoreNote").textContent = "Rating is 0–100, built from recent form, points per game, attacking threat (xGI per 90), share of minutes played and fixture difficulty over the next " + DATA.lookahead + " gameweeks, then scaled down for injury doubts. "

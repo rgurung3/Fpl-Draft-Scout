@@ -1283,7 +1283,7 @@ def test_ordinal(n, text):
 
 # ---------------------------------------------------------------- trade and banter pages
 
-@pytest.mark.parametrize("path,text", [("/trade", b"Trade analyzer"), ("/banter", b"League banter")])
+@pytest.mark.parametrize("path,text", [("/trade", b"Trade analyzer"), ("/league", b"League hub")])
 def test_extra_pages_load(path, text):
     res = app.app.test_client().get(path)
     assert res.status_code == 200
@@ -1395,8 +1395,21 @@ def test_charts_route_gives_a_friendly_error(monkeypatch):
     assert "No Draft league found" in res.get_json()["error"]
 
 
-def test_charts_page_is_served():
-    res = app.app.test_client().get("/charts")
+def test_league_hub_offers_the_three_choices():
+    res = app.app.test_client().get("/league?league=123")
     assert res.status_code == 200
-    assert b"League charts" in res.data
+    for choice in (b'data-tab="banter"', b'data-tab="charts"', b'data-tab="team"'):
+        assert choice in res.data
     res.close()
+
+
+@pytest.mark.parametrize("old,tab", [("/banter", "banter"), ("/charts", "charts")])
+def test_old_page_links_open_the_hub_on_that_tab(old, tab):
+    res = app.app.test_client().get(old + "?league=123&team=100&junk=1")
+    assert res.status_code == 302
+    assert res.headers["Location"] == f"/league?league=123&team=100&tab={tab}"   # junk is dropped
+
+
+def test_old_page_link_without_a_league_still_opens_the_hub():
+    res = app.app.test_client().get("/charts")
+    assert res.headers["Location"] == "/league?tab=charts"
