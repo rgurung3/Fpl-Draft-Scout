@@ -267,8 +267,8 @@ const tint = (good, share) => `color-mix(in srgb, var(${good ? "--pitch" : "--ri
 // ---------------------------------------------------------------- choosing and loading
 
 function setAddress() {
-  // the address is a link anyone can open; &team= only keeps your highlight on reload
-  history.replaceState(null, "", "?league=" + leagueId + (tab ? "&tab=" + tab : "") + (myId ? "&team=" + myId : "") + (FULL ? "&full=1" : ""));
+  // the address is a link anyone can open, so it never carries your team ID (see "your team" at the bottom)
+  history.replaceState(null, "", "?league=" + leagueId + (tab ? "&tab=" + tab : "") + (FULL ? "&full=1" : ""));
 }
 
 async function getJson(path) {
@@ -739,14 +739,16 @@ $("teamForm").addEventListener("submit", e => {
 // With &full=1 (the link for one friend) it also shows the way back and My team. That's a convenience, not
 // a lock: anyone who adds &full=1 to the address gets it.
 if (FULL) document.querySelectorAll(".fullonly").forEach(el => el.classList.remove("hidden"));
+// Your team (highlighted in the charts, prefilled in My team) is the one this browser last used in Draft Scout.
+// It's never read from or written to the address: a link copied from here can't carry your team ID, and an
+// old link that still has &team= in it doesn't make someone else's team look like "you".
 const params = new URLSearchParams(location.search);
 let stored = null;
 try { stored = localStorage.getItem("teamId"); } catch (e) { /* no storage: nothing to highlight */ }
-const teamText = params.get("team") || stored;
-if (/^[0-9]+$/.test(teamText || "")) {
-  myId = Number(teamText);
-  $("teamId").value = teamText;
-  $("backLink").href = "/?team=" + teamText;
+if (/^[0-9]+$/.test(stored || "")) {
+  myId = Number(stored);
+  $("teamId").value = stored;
+  $("backLink").href = "/?team=" + stored;
 }
 const leagueParam = params.get("league");
 if (/^[0-9]+$/.test(leagueParam || "")) {

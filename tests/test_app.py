@@ -1418,7 +1418,7 @@ def test_league_hub_keeps_my_team_and_the_way_back_for_the_full_link_only():
 def test_old_page_links_open_the_hub_on_that_tab(old, tab):
     res = app.app.test_client().get(old + "?league=123&team=100&junk=1")
     assert res.status_code == 302
-    assert res.headers["Location"] == f"/league?league=123&team=100&tab={tab}"   # junk is dropped
+    assert res.headers["Location"] == f"/league?league=123&tab={tab}"   # the team ID and the junk are dropped
 
 
 def test_old_page_link_without_a_league_still_opens_the_hub():
@@ -1551,6 +1551,23 @@ def test_league_hub_offers_rivalries_to_everyone():
     page = res.data.decode()
     res.close()
     assert '<button class="choice" type="button" data-tab="rivalries"' in page      # not fullonly
+
+
+def test_league_hub_address_never_carries_a_team_id():
+    res = app.app.test_client().get("/league?league=123")
+    page = res.data.decode()
+    res.close()
+    setter = page.split("function setAddress()")[1].split("\n}")[0]
+    code = "\n".join(line for line in setter.splitlines() if not line.strip().startswith("//"))
+    assert "team" not in code                    # a copied address has the league, tab and full: never a team
+    assert 'params.get("team")' not in page      # and an old link's &team= can't make a team look like "you"
+
+
+def test_main_page_links_to_the_hub_without_a_team_id():
+    res = app.app.test_client().get("/")
+    page = res.data.decode()
+    res.close()
+    assert '"/league?league=" + DATA.league_id + "&full=1"' in page
 
 
 # ---------------------------------------------------------------- luck (league points vs playing everyone)

@@ -1235,8 +1235,8 @@ def league_page():
 
 
 def to_league_page(tab):
-    """Old /banter and /charts links open the league page on that tab, keeping league and team."""
-    wanted = {k: v for k, v in request.args.items() if k in ("league", "team")}
+    """Old /banter and /charts links open the league page on that tab, keeping the league but never a team."""
+    wanted = {k: v for k, v in request.args.items() if k == "league"}
     return redirect("/league?" + urlencode({**wanted, "tab": tab}))
 
 
