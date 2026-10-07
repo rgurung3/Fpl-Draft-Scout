@@ -98,6 +98,15 @@
   .meetings li { display: flex; justify-content: space-between; gap: 16px; max-width: 520px; font-variant-numeric: tabular-nums; }
   .meetings .when { color: var(--muted); }
 
+  /* recap */
+  .byline { color: var(--muted); font-size: .9rem; margin: 0 0 14px; }
+  .recap p { margin: 0 0 12px; max-width: 70ch; font-size: 1.05rem; }
+  .board { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 8px; }
+  .board li { background: var(--surface); border: 1px solid var(--line); border-left: 5px solid var(--pitch);
+    border-radius: 4px; padding: 10px 16px; }
+  .board .pairing { font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .board .state { color: var(--muted); font-size: .92rem; }
+
   /* scatter and spread */
   .plot { display: block; width: 100%; height: auto; }
   .plot text { font-family: var(--body); font-size: 12px; fill: var(--muted); }
@@ -145,6 +154,8 @@
     <div class="choices" id="choices" role="group" aria-label="What would you like to see?">
       <button class="choice" type="button" data-tab="banter" aria-pressed="false">
         <span class="t">Banter</span><span class="d">This week's match-ups and facts to argue about</span></button>
+      <button class="choice" type="button" data-tab="recap" aria-pressed="false">
+        <span class="t">Recap</span><span class="d">The gameweek in words, updated as the games finish</span></button>
       <button class="choice" type="button" data-tab="charts" aria-pressed="false">
         <span class="t">Charts</span><span class="d">The league race, head-to-head records and who's scoring</span></button>
       <button class="choice" type="button" data-tab="rivalries" aria-pressed="false">
@@ -172,6 +183,20 @@
         <p class="sub">Each week, how would a manager have done if they'd played everyone instead of one opponent? Add that up and you get the league points they <em>deserved</em>. Bars to the right (green) are managers with more points than that: lucky. Bars to the left (red) have fewer: unlucky.</p>
         <p class="racecap" id="luckCaption"></p>
         <div class="chartwrap"><svg class="plot" id="luck" role="img"></svg></div>
+      </section>
+    </div>
+
+    <div id="panel-recap" class="hidden">
+      <div id="recapEmpty" class="empty hidden"></div>
+      <section id="recapBody">
+        <h2 id="recapTitle">Recap</h2>
+        <p class="byline" id="recapBy"></p>
+        <div class="recap" id="recapText"></div>
+        <h3 class="minihead" id="boardHead">Scoreboard</h3>
+        <p class="sub hidden" id="boardSub"></p>
+        <ul class="board" id="board"></ul>
+        <p class="racecap hidden" id="starLine"></p>
+        <p class="racecap hidden" id="moveLine"></p>
       </section>
     </div>
 
@@ -247,10 +272,10 @@
 const $ = id => document.getElementById(id);
 const FACTS_SHOWN = 2;   // facts shown at first; "Show more" reveals the rest
 const FULL = new URLSearchParams(location.search).get("full") === "1";   // the full version: My team and the way back
-const TABS = FULL ? ["banter", "charts", "rivalries", "team"] : ["banter", "charts", "rivalries"];
+const TABS = FULL ? ["banter", "recap", "charts", "rivalries", "team"] : ["banter", "recap", "charts", "rivalries"];
 let leagueId = null;     // the league this page is open on
 let tab = null;          // the choice currently open (none until a friend picks one)
-const loaded = { banter: null, charts: null, rivalries: null };   // which league each choice's data is for, so each loads only once
+const loaded = { banter: null, recap: null, charts: null, rivalries: null };   // which league each choice's data is for, so each loads only once
 let BANTER = null, showAll = false;
 let CH = null;           // the charts the server sent (see league_charts in app.py); this page only draws them
 let myId = null;         // your team ID, if we know it, so your line and row stand out
@@ -267,8 +292,8 @@ const tint = (good, share) => `color-mix(in srgb, var(${good ? "--pitch" : "--ri
 // ---------------------------------------------------------------- choosing and loading
 
 function setAddress() {
-  // the address is a link anyone can open; &team= only keeps your highlight on reload
-  history.replaceState(null, "", "?league=" + leagueId + (tab ? "&tab=" + tab : "") + (myId ? "&team=" + myId : "") + (FULL ? "&full=1" : ""));
+  // the address is a link anyone can open, so it never carries your team ID (see "your team" at the bottom)
+  history.replaceState(null, "", "?league=" + leagueId + (tab ? "&tab=" + tab : "") + (FULL ? "&full=1" : ""));
 }
 
 async function getJson(path) {
@@ -287,7 +312,9 @@ async function openTab(name) {
   TABS.forEach(t => $("panel-" + t).classList.toggle("hidden", t !== name));
   $("error").classList.add("hidden");
   setAddress();
-  if (name === "team" || loaded[name] === leagueId) return;
+  // the recap is asked for every time it's opened, because it changes as games finish
+  // (the server keeps what the AI wrote, so asking again doesn't write it again)
+  if (name === "team" || (loaded[name] === leagueId && name !== "recap")) return;
   const forLeague = leagueId;
   $("loading").style.display = "";
   try {
@@ -295,6 +322,7 @@ async function openTab(name) {
     if (forLeague !== leagueId) return;   // they opened another league while this was loading
     $("leagueLine").textContent = data.league_name;
     if (name === "banter") renderBanter(data);
+    else if (name === "recap") renderRecap(data);
     else if (name === "charts") renderCharts(data);
     else renderRivalries(data);
     loaded[name] = forLeague;
@@ -307,7 +335,7 @@ async function openTab(name) {
 
 function openLeague(id, firstTab) {
   leagueId = id;
-  loaded.banter = loaded.charts = loaded.rivalries = null;
+  loaded.banter = loaded.recap = loaded.charts = loaded.rivalries = null;
   RIV = null;
   tab = null;
   $("app").classList.remove("hidden");
@@ -363,6 +391,51 @@ function renderFacts() {
   $("moreFacts").textContent = showAll ? `Show ${FACTS_SHOWN} only` : `Show more (${facts.length - FACTS_SHOWN} more)`;
 }
 
+
+// ---------------------------------------------------------------- recap
+
+function boardRow(m) {
+  const a = m.a, b = m.b;
+  let note;
+  if (m.outlook == null) {   // the gameweek is over: the official result
+    note = m.leader == null ? "A draw." : `${esc(m.ahead)} won by ${m.margin}.`;
+  } else if (m.leader == null) {
+    note = `Level, with ${a.left} v ${b.left} players still to play.`;
+  } else {
+    const behind = m.leader === "a" ? b : a;
+    note = `${esc(m.ahead)} lead by ${m.margin}. ${esc(m.behind)} `
+      + (behind.left === 0 ? "have nobody left to play" : `have ${behind.left} still to play`) + `: ${esc(m.outlook)}.`;
+  }
+  return `<li><div class="pairing">${esc(a.team)} ${a.points} – ${b.points} ${esc(b.team)}</div><div class="state">${note}</div></li>`;
+}
+
+function renderRecap(data) {
+  const r = data.recap;
+  $("recapEmpty").classList.toggle("hidden", !!r);
+  $("recapBody").classList.toggle("hidden", !r);
+  if (!r) {
+    $("recapEmpty").textContent = "The recap starts once the first game of a gameweek has finished. It needs a head-to-head league, because it's built from the match results.";
+    return;
+  }
+  // the server works out every score and fact (see load_recap in app.py); this just draws them
+  const final = r.stage === "final";
+  $("recapTitle").textContent = `Gameweek ${r.gameweek}: ${r.label}`;
+  $("recapText").innerHTML = r.text.split(/\n\s*\n/).map(p => `<p>${esc(p.trim())}</p>`).join("");
+  const at = r.written_at ? new Date(r.written_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+  $("recapBy").textContent = r.written_by === "ai"
+    ? `Written by AI at ${at}, from the scores below. It's written once for each stage of the gameweek.`
+    : "Put together from the scores below.";
+  $("boardHead").textContent = final ? "Results" : "Scoreboard so far";
+  $("boardSub").textContent = "Starting elevens before auto-subs, so these can still change when the gameweek ends.";
+  $("boardSub").classList.toggle("hidden", final);
+  $("board").innerHTML = r.matches.map(boardRow).join("") || `<li>No scores to show yet.</li>`;
+  $("starLine").innerHTML = "<strong>Stars:</strong> "
+    + r.stars.map(s => `${esc(s.player)} ${s.points} (${esc(s.team)})`).join(" · ");
+  $("starLine").classList.toggle("hidden", !r.stars.length);
+  $("moveLine").innerHTML = "<strong>Table moves:</strong> "
+    + r.moves.map(m => `${esc(m.team)} ${m.to < m.from ? "up" : "down"} from ${place(m.from)} to ${place(m.to)}`).join(" · ");
+  $("moveLine").classList.toggle("hidden", !r.moves.length);
+}
 
 // ---------------------------------------------------------------- charts
 
@@ -734,19 +807,21 @@ $("teamForm").addEventListener("submit", e => {
   location.href = "/?team=" + team + "&league=" + leagueId;
 });
 
-// a shared link looks like /league?league=12345 (add &tab=banter, &tab=charts or &tab=rivalries to open straight on one).
+// a shared link looks like /league?league=12345 (add &tab=banter, &tab=recap, &tab=charts or &tab=rivalries to open straight on one).
 // Without &full=1 the page has no way into the rest of Draft Scout, so it can be shared as a view-only page.
 // With &full=1 (the link for one friend) it also shows the way back and My team. That's a convenience, not
 // a lock: anyone who adds &full=1 to the address gets it.
 if (FULL) document.querySelectorAll(".fullonly").forEach(el => el.classList.remove("hidden"));
+// Your team (highlighted in the charts, prefilled in My team) is the one this browser last used in Draft Scout.
+// It's never read from or written to the address: a link copied from here can't carry your team ID, and an
+// old link that still has &team= in it doesn't make someone else's team look like "you".
 const params = new URLSearchParams(location.search);
 let stored = null;
 try { stored = localStorage.getItem("teamId"); } catch (e) { /* no storage: nothing to highlight */ }
-const teamText = params.get("team") || stored;
-if (/^[0-9]+$/.test(teamText || "")) {
-  myId = Number(teamText);
-  $("teamId").value = teamText;
-  $("backLink").href = "/?team=" + teamText;
+if (/^[0-9]+$/.test(stored || "")) {
+  myId = Number(stored);
+  $("teamId").value = stored;
+  $("backLink").href = "/?team=" + stored;
 }
 const leagueParam = params.get("league");
 if (/^[0-9]+$/.test(leagueParam || "")) {

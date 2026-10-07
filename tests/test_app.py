@@ -7,6 +7,7 @@ Run with:  pytest -v
 import json
 from datetime import datetime, timedelta
 
+import anthropic
 import pytest
 import requests
 
@@ -1418,7 +1419,7 @@ def test_league_hub_keeps_my_team_and_the_way_back_for_the_full_link_only():
 def test_old_page_links_open_the_hub_on_that_tab(old, tab):
     res = app.app.test_client().get(old + "?league=123&team=100&junk=1")
     assert res.status_code == 302
-    assert res.headers["Location"] == f"/league?league=123&team=100&tab={tab}"   # junk is dropped
+    assert res.headers["Location"] == f"/league?league=123&tab={tab}"   # the team ID and the junk are dropped
 
 
 def test_old_page_link_without_a_league_still_opens_the_hub():
@@ -1553,6 +1554,23 @@ def test_league_hub_offers_rivalries_to_everyone():
     assert '<button class="choice" type="button" data-tab="rivalries"' in page      # not fullonly
 
 
+def test_league_hub_address_never_carries_a_team_id():
+    res = app.app.test_client().get("/league?league=123")
+    page = res.data.decode()
+    res.close()
+    setter = page.split("function setAddress()")[1].split("\n}")[0]
+    code = "\n".join(line for line in setter.splitlines() if not line.strip().startswith("//"))
+    assert "team" not in code                    # a copied address has the league, tab and full: never a team
+    assert 'params.get("team")' not in page      # and an old link's &team= can't make a team look like "you"
+
+
+def test_main_page_links_to_the_hub_without_a_team_id():
+    res = app.app.test_client().get("/")
+    page = res.data.decode()
+    res.close()
+    assert '"/league?league=" + DATA.league_id + "&full=1"' in page
+
+
 # ---------------------------------------------------------------- luck (league points vs playing everyone)
 
 def luck_of(matches):
@@ -1634,3 +1652,543 @@ def test_league_hub_has_a_luck_chart():
     res.close()
     assert 'id="luck"' in page and "function renderLuck" in page
     assert page.index('id="luckSection"') < page.index('id="panel-charts"')   # in Banter, not Charts
+
+
+# ---------------------------------------------------------------- weekly recap
+
+def game(finished=False, started=False, day=10, hour=15):
+    """One game for the recap tests, on a day in October 2026: finished, or started (part-way through)."""
+    return {"kickoff": app.parse_time(f"2026-10-{day:02d}T{hour:02d}:00:00Z"),
+            "started": started or finished, "finished": finished}
+
+
+def recap_league(matches=()):
+    """A 4-team head-to-head league: league entries 10-13 are teams 100-103, named Team 0 to Team 3."""
+    entries = [{"id": 10 + i, "entry_id": 100 + i, "entry_name": f"Team {i}",
+                "player_first_name": "M", "player_last_name": str(i)} for i in range(4)]
+    return {"league": {"name": "Recap League"}, "league_entries": entries,
+            "matches": list(matches), "standings": []}
+
+
+# GW1: Team 0 beats 1, Team 2 beats 3. GW2: Team 1 beats 2 (90-50), Team 3 beats 0 (70-60). That moves
+# Team 1 from 4th to 1st and Team 2 from 2nd to 4th. GW3 hasn't been played: 0 v 1 and 2 v 3.
+RECAP_WEEKS = [match(1, 10, 60, 11, 40), match(1, 12, 50, 13, 45),
+               match(2, 11, 90, 12, 50), match(2, 13, 70, 10, 60),
+               match(3, 10, 0, 11, 0, finished=False), match(3, 12, 0, 13, 0, finished=False)]
+
+# what live_scores needs: club 1's game is over, club 2 is mid-game, club 3 hasn't kicked off
+PLAYERS = {1: {"name": "Saka", "club": 1, "ppg": 6.0}, 2: {"name": "Palmer", "club": 2, "ppg": 5.0},
+           3: {"name": "Salah", "club": 3, "ppg": 8.0}, 4: {"name": "Bench Boy", "club": 3, "ppg": 2.0}}
+GAMES_BY_TEAM = {1: [game(True, day=10, hour=12)], 2: [game(started=True, day=10, hour=15)],
+                 3: [game(day=11, hour=14)]}
+STATS = {1: {"points": 12, "minutes": 90}, 2: {"points": 3, "minutes": 45},
+         3: {"points": 0, "minutes": 0}, 4: {"points": 9, "minutes": 90}}
+
+
+def live_picture():
+    """Live scores for GW3: Team 0 leads Team 1 45-31 (2 players left against 5), Teams 2 and 3 are level."""
+    def row(points, left, expected, star=None):
+        return {"points": points, "left": left, "playing": 0, "expected": expected, "star": star}
+
+    return {100: row(45, 2, 10.0, {"name": "Saka", "points": 14}),
+            101: row(31, 5, 25.0, {"name": "Palmer", "points": 5}),
+            102: row(20, 3, 15.0), 103: row(20, 3, 15.0)}
+
+
+def final_facts(**changes):
+    scores = live_picture()
+    return {**app.recap_facts(recap_league(RECAP_WEEKS), 2, "final", None, scores), **changes}
+
+
+# which games have been played
+
+def test_progress_counts_games_and_finished_match_days():
+    # Friday: one game, played. Saturday: three games, two played. Sunday: two games, not yet.
+    games = [game(True, day=9, hour=20), game(True, day=10, hour=12), game(True, day=10, hour=15),
+             game(day=10, hour=17), game(day=11, hour=14), game(day=11, hour=16)]
+    assert app.gameweek_progress(games) == {"games": 6, "played": 3, "days": 3, "days_done": 1}
+
+
+def test_progress_is_none_without_games():
+    assert app.gameweek_progress([]) is None
+    assert app.gameweek_progress(None) is None
+
+
+@pytest.mark.parametrize("played,days_done,official,expected", [
+    (0, 0, False, None),                          # nothing to say before a game has finished
+    (1, 0, False, 0),                             # the first games of a day: an early look
+    (3, 1, False, 1),
+    (9, 4, False, 4),
+    (10, 7, False, app.RECAP_MAX_LIVE_STAGES),    # a long gameweek stops adding recaps
+    (10, 4, True, "final"),                       # the official results are in
+])
+def test_recap_stage(played, days_done, official, expected):
+    progress = {"games": 10, "played": played, "days": 8, "days_done": days_done}
+    assert app.recap_stage(progress, official) == expected
+
+
+def test_recap_stage_without_fixtures_waits_for_the_official_results():
+    assert app.recap_stage(None, False) is None
+    assert app.recap_stage(None, True) == "final"
+
+
+def test_a_lone_friday_game_gives_a_short_recap():
+    # Friday's only game is done (1 of 10 games). That completes a match day, but it's still an early look.
+    games = [game(True, day=9, hour=20)] + [game(day=10, hour=15) for _ in range(9)]
+    progress = app.gameweek_progress(games)
+    assert app.recap_stage(progress, False) == 1
+    facts = app.recap_facts(recap_league(RECAP_WEEKS), 3, 1, progress, live_picture())
+    assert facts["length"] == "short"
+    assert facts["games"] == {"played": 1, "total": 10}
+
+
+def test_recaps_are_full_length_once_enough_games_are_played():
+    progress = {"games": 10, "played": 3, "days": 4, "days_done": 1}
+    assert app.recap_facts(recap_league(RECAP_WEEKS), 3, 1, progress, live_picture())["length"] == "full"
+
+
+def test_gameweek_games_reads_which_games_have_started_and_finished(monkeypatch):
+    clubs = [{"id": i, "short_name": n, "name": n} for i, n in enumerate(["ARS", "CHE", "LIV", "MCI"], 1)]
+    fixtures = [
+        # full time, with the bonus points not confirmed yet
+        {"event": 3, "team_h": 1, "team_a": 2, "kickoff_time": "2026-10-10T11:30:00Z",
+         "started": True, "finished": False, "finished_provisional": True},
+        {"event": 3, "team_h": 3, "team_a": 4, "kickoff_time": "2026-10-11T14:00:00Z",
+         "started": False, "finished": False},
+        {"event": 4, "team_h": 1, "team_a": 3, "kickoff_time": "2026-10-18T14:00:00Z"},
+        {"event": None, "team_h": 2, "team_a": 4}]                                   # postponed
+    monkeypatch.setattr(app, "get_json", lambda url: {"teams": clubs} if "bootstrap" in url else fixtures)
+    games, by_team = app.gameweek_games(clubs, 3)
+    assert [g["finished"] for g in games] == [True, False]
+    assert [g["started"] for g in games] == [True, False]
+    assert by_team[1] == by_team[2] == [games[0]] and by_team[3] == by_team[4] == [games[1]]
+
+
+def test_gameweek_games_is_none_when_the_fixtures_cant_be_read(monkeypatch):
+    def down(url):
+        raise requests.ConnectionError("down")
+
+    monkeypatch.setattr(app, "get_json", down)
+    assert app.gameweek_games([{"id": 1, "short_name": "ARS"}], 3) is None
+
+
+# live scores
+
+def test_live_stats_reads_either_shape_of_feed():
+    as_dict = {"elements": {"1": {"stats": {"total_points": 12, "minutes": 90}}, "2": {"stats": {}}}}
+    as_list = {"elements": [{"id": 1, "stats": {"total_points": 12, "minutes": 90}}, {"id": 2, "stats": {}}]}
+    expected = {1: {"points": 12, "minutes": 90}, 2: {"points": 0, "minutes": 0}}
+    assert app.live_stats(as_dict) == expected
+    assert app.live_stats(as_list) == expected
+
+
+@pytest.mark.parametrize("junk", [None, [], "oops", {"elements": 5}, {"elements": {"x": {"stats": {}}}}])
+def test_live_stats_gives_nothing_for_an_unexpected_feed(junk):
+    assert app.live_stats(junk) == {}
+
+
+def test_starting_eleven_is_places_1_to_11():
+    picks = {"picks": [{"element": 100 + i, "position": i} for i in range(1, 16)]}
+    assert app.starting_eleven(picks) == list(range(101, 112))
+    assert app.starting_eleven(None) == [] and app.starting_eleven({"picks": None}) == []
+
+
+def test_live_scores_add_up_the_starters_and_count_who_is_still_to_play():
+    scores = app.live_scores({100: [1, 2, 3]}, STATS, PLAYERS, GAMES_BY_TEAM)
+    # Saka's game is over (12). Palmer is half-way through his (3 so far, half his usual 5 to come).
+    # Salah hasn't kicked off (his usual 8 to come). The bench player's 9 points don't count.
+    assert scores[100] == {"points": 15, "left": 2, "playing": 1, "expected": 10.5,
+                           "star": {"name": "Saka", "points": 12}}
+
+
+def test_live_scores_ignore_unknown_players_and_clubs_without_a_game():
+    scores = app.live_scores({100: [1, 99]}, STATS, PLAYERS, {})
+    assert scores[100]["points"] == 12
+    assert scores[100]["left"] == 0            # no games listed, so nothing left to play
+
+
+def test_a_player_with_a_double_gameweek_still_has_the_second_game_to_come():
+    games = {1: [game(True, day=10), game(day=14)]}
+    scores = app.live_scores({100: [1]}, STATS, PLAYERS, games)
+    assert scores[100]["left"] == 1 and scores[100]["expected"] == 6.0
+
+
+@pytest.mark.parametrize("args,label", [
+    ((0, 3, 3, 9, 9), "level"),
+    ((30, 0, 2, 0, 10), "all but over"),         # the side behind has nobody left to play
+    ((2, 5, 5, 25, 25), "wide open"),
+    ((8, 4, 4, 20, 20), "still alive"),
+    ((12, 3, 3, 15, 15), "a long shot"),
+    ((40, 1, 1, 5, 5), "needs a miracle"),
+])
+def test_outlook(args, label):
+    assert app.outlook(*args) == label
+
+
+def test_a_side_expected_to_score_more_than_the_gap_is_wide_open():
+    # 4 behind, but they have four players to play (about 30 points) against one (about 4)
+    assert app.outlook(4, 4, 1, 30, 4) == "wide open"
+
+
+def test_the_longer_odds_are_the_less_likely():
+    chances = [app.comeback_chance(m, 3, 3, 15, 15) for m in (0, 5, 10, 20, 40)]
+    assert chances == sorted(chances, reverse=True) and chances[0] == 0.5
+
+
+# matches and facts
+
+def test_live_matches_show_who_leads_and_how_the_other_side_is_placed():
+    first, second = app.recap_matches(recap_league(RECAP_WEEKS), 3, live_picture())
+    assert (first["ahead"], first["behind"], first["margin"]) == ("Team 0", "Team 1", 14)
+    assert first["leader"] == "a" and (first["a"]["left"], first["b"]["left"]) == (2, 5)
+    assert first["outlook"] == "wide open"        # Team 1 has 5 players left to Team 0's 2
+    assert (second["leader"], second["ahead"], second["outlook"]) == (None, None, "level")
+
+
+def test_official_matches_are_the_finished_results_with_nobody_left_to_play():
+    first, second = app.recap_matches(recap_league(RECAP_WEEKS), 2)
+    assert (first["ahead"], first["behind"], first["margin"]) == ("Team 1", "Team 2", 40)
+    assert (first["a"]["points"], first["b"]["points"]) == (90, 50)
+    assert (second["ahead"], second["margin"]) == ("Team 3", 10)       # Team 3 was the second match's "a"
+    assert first["outlook"] is None and first["a"]["left"] == 0
+    assert app.recap_matches(recap_league(RECAP_WEEKS), 3) == []        # unfinished matches aren't results
+
+
+def test_a_bye_is_left_out():
+    assert app.recap_matches(recap_league([match(3, 10, 0, None, None)]), 3, live_picture()) == []
+
+
+def test_final_facts_have_the_results_stars_table_moves_and_next_up():
+    facts = final_facts()
+    assert facts["state"] == "final" and facts["length"] == "full" and facts["gameweek"] == 2
+    assert facts["league"] == "Recap League"
+    assert [m["ahead"] for m in facts["matches"]] == ["Team 1", "Team 3"]
+    assert facts["stars"] == [{"player": "Saka", "points": 14, "team": "Team 0"}]    # Palmer's 5 isn't a star
+    assert [(r["place"], r["team"]) for r in facts["table"]] == [(1, "Team 1"), (2, "Team 0"),
+                                                                 (3, "Team 3"), (4, "Team 2")]
+    assert facts["moves"] == [{"team": "Team 1", "from": 4, "to": 1}, {"team": "Team 2", "from": 2, "to": 4}]
+    next_up = facts["next_up"]
+    assert next_up["gameweek"] == 3 and {next_up["a"], next_up["b"]} == {"Team 0", "Team 1"}
+    assert 0 < len(facts["season_notes"]) <= 3
+
+
+def test_live_facts_have_the_scoreboard_but_no_moves_or_next_up():
+    progress = {"games": 10, "played": 6, "days": 4, "days_done": 2}
+    facts = app.recap_facts(recap_league(RECAP_WEEKS), 3, 2, progress, live_picture())
+    assert facts["state"] == "in progress" and facts["games"] == {"played": 6, "total": 10}
+    assert [m["margin"] for m in facts["matches"]] == [14, 0]
+    assert facts["moves"] == [] and facts["next_up"] is None and facts["season_notes"] == []
+    assert facts["table"][0]["team"] == "Team 1"          # the official table, before this gameweek's results
+
+
+def test_live_facts_without_live_scores_have_no_matches():
+    progress = {"games": 10, "played": 6, "days": 4, "days_done": 2}
+    facts = app.recap_facts(recap_league(RECAP_WEEKS), 3, 2, progress, None)
+    assert facts["matches"] == [] and facts["stars"] == []
+
+
+def test_the_first_gameweek_has_no_table_yet():
+    league = recap_league([match(1, 10, 0, 11, 0, finished=False), match(1, 12, 0, 13, 0, finished=False)])
+    progress = {"games": 10, "played": 2, "days": 4, "days_done": 0}
+    assert app.recap_facts(league, 1, 0, progress, live_picture())["table"] is None
+
+
+def test_clean_name_strips_control_characters_and_long_names():
+    assert app.clean_name("Team\nOne\x00") == "Team One"
+    assert len(app.clean_name("x" * 100)) == 40
+    assert app.clean_name(None) == ""
+
+
+# the plain recap
+
+def test_plain_recap_for_a_finished_gameweek():
+    text = app.plain_recap(final_facts())
+    assert text.startswith("Gameweek 2 is done. Team 1 beat Team 2 90-50. Team 3 beat Team 0 70-60.")
+    assert "Best performances: Saka 14 (for Team 0)." in text
+    assert "Team 1 up from 4th to 1st; Team 2 down from 2nd to 4th." in text
+    assert "Next up in gameweek 3: Team 0 v Team 1." in text
+    assert text.count("\n\n") == 1                                    # the results, then the extras
+
+
+def test_plain_recap_for_an_early_look_is_short():
+    progress = {"games": 10, "played": 1, "days": 4, "days_done": 0}
+    facts = app.recap_facts(recap_league(RECAP_WEEKS), 3, 0, progress, live_picture())
+    text = app.plain_recap(facts)
+    assert facts["length"] == "short"
+    assert text == ("1 of 10 games played in gameweek 3. Team 0 lead Team 1 45-31. "
+                    "Team 1 have 5 to play against 2: wide open.")
+
+
+def test_plain_recap_while_the_gameweek_is_on_covers_every_match():
+    progress = {"games": 10, "played": 6, "days": 4, "days_done": 2}
+    text = app.plain_recap(app.recap_facts(recap_league(RECAP_WEEKS), 3, 2, progress, live_picture()))
+    assert text.startswith("6 of 10 games played in gameweek 3.")
+    assert "Team 0 lead Team 1 45-31." in text and "Team 2 and Team 3 are level on 20." in text
+
+
+def test_plain_recap_says_so_when_the_live_scores_are_missing():
+    progress = {"games": 10, "played": 6, "days": 4, "days_done": 2}
+    text = app.plain_recap(app.recap_facts(recap_league(RECAP_WEEKS), 3, 2, progress, None))
+    assert text == "6 of 10 games played in gameweek 3. The live scores aren't available right now."
+
+
+# what the AI is asked
+
+def test_the_request_asks_for_the_right_length():
+    assert "2 or 3 sentences" in app.recap_request(final_facts(length="short"))
+    assert "2 or 3 short paragraphs" in app.recap_request(final_facts(length="full"))
+
+
+def test_the_request_for_a_live_recap_explains_the_outlook_words():
+    progress = {"games": 10, "played": 6, "days": 4, "days_done": 2}
+    live = app.recap_request(app.recap_facts(recap_league(RECAP_WEEKS), 3, 2, progress, live_picture()))
+    assert "still being played" in live and "'needs a miracle'" in live and "auto-subs" in live
+    assert "The gameweek is over" in app.recap_request(final_facts())
+
+
+def test_the_request_carries_the_facts_but_leaves_out_empty_ones():
+    progress = {"games": 10, "played": 6, "days": 4, "days_done": 2}
+    facts = app.recap_facts(recap_league(RECAP_WEEKS), 3, 2, progress, live_picture())
+    text = app.recap_request(facts)
+    assert '"Team 0"' in text and '"margin": 14' in text and '"outlook": "wide open"' in text
+    assert '"moves"' not in text and '"next_up"' not in text
+
+
+# the AI call
+
+class FakeAI:
+    """Stands in for the Anthropic client: records each request and replies with what it was given."""
+
+    def __init__(self, text="Ha!", stop_reason="end_turn", error=None):
+        self.calls, self.text, self.stop_reason, self.error = [], text, stop_reason, error
+        self.messages = self   # so client.messages.create(...) lands in create()
+
+    def create(self, **request):
+        self.calls.append(request)
+        if self.error:
+            raise self.error
+        block = type("Block", (), {"type": "text", "text": self.text})()
+        return type("Reply", (), {"stop_reason": self.stop_reason, "content": [block]})()
+
+
+def test_write_recap_sends_the_facts_to_the_model_named_in_the_environment(monkeypatch):
+    monkeypatch.setenv("RECAP_MODEL", "test-model")
+    ai = FakeAI("  A fine week.  ")
+    facts = final_facts()
+    assert app.write_recap(facts, ai) == "A fine week."
+    request = ai.calls[0]
+    assert request["model"] == "test-model" and request["system"] == app.RECAP_SYSTEM
+    assert request["max_tokens"] == app.RECAP_MAX_TOKENS
+    assert request["output_config"] == {"effort": app.RECAP_EFFORT}
+    assert request["messages"] == [{"role": "user", "content": app.recap_request(facts)}]
+
+
+def test_write_recap_does_nothing_without_a_model(monkeypatch):
+    monkeypatch.delenv("RECAP_MODEL", raising=False)
+    ai = FakeAI()
+    assert app.write_recap(final_facts(), ai) is None and ai.calls == []
+
+
+@pytest.mark.parametrize("ai", [
+    FakeAI(error=anthropic.AnthropicError("down")),
+    FakeAI(error=TypeError("Could not resolve authentication method")),   # the SDK's error when no key is set
+    FakeAI(stop_reason="refusal"),
+    FakeAI(stop_reason="max_tokens"),
+    FakeAI(text="   "),
+])
+def test_write_recap_gives_up_quietly_when_the_ai_cant_deliver(monkeypatch, ai):
+    monkeypatch.setenv("RECAP_MODEL", "test-model")
+    assert app.write_recap(final_facts(), ai) is None
+
+
+@pytest.fixture
+def ai_recaps(monkeypatch):
+    """The AI switched on for league 52607, with nothing written yet."""
+    monkeypatch.setenv("RECAP_MODEL", "test-model")
+    monkeypatch.setattr(app, "RECAP_LEAGUES", {52607})
+    monkeypatch.setattr(app, "_recaps", {})
+    monkeypatch.setattr(app, "_recap_failed", {})
+
+
+def test_an_ai_recap_is_written_once_per_stage(ai_recaps):
+    ai, facts = FakeAI("Words."), final_facts()
+    first = app.get_recap(52607, facts, 1, now=1000, client=ai)
+    assert first == ("Words.", "ai", 1000)
+    assert app.get_recap(52607, facts, 1, now=2000, client=ai) == first       # kept: nobody pays twice
+    assert len(ai.calls) == 1
+    app.get_recap(52607, facts, 2, now=3000, client=ai)                       # a new stage is written afresh
+    assert len(ai.calls) == 2
+
+
+def test_other_leagues_get_the_plain_recap_for_free(ai_recaps):
+    ai, facts = FakeAI(), final_facts()
+    assert app.get_recap(999, facts, "final", client=ai) == (app.plain_recap(facts), "plain", None)
+    assert ai.calls == []
+
+
+def test_without_a_model_the_recap_is_plain(ai_recaps, monkeypatch):
+    monkeypatch.delenv("RECAP_MODEL")
+    ai, facts = FakeAI(), final_facts()
+    assert app.get_recap(52607, facts, "final", client=ai)[1] == "plain" and ai.calls == []
+
+
+def test_a_failed_ai_call_falls_back_and_waits_before_trying_again(ai_recaps):
+    facts, broken = final_facts(), FakeAI(error=anthropic.AnthropicError("down"))
+    assert app.get_recap(52607, facts, 1, now=1000, client=broken)[1] == "plain"
+    app.get_recap(52607, facts, 1, now=1000 + app.RECAP_RETRY_SECONDS - 1, client=broken)
+    assert len(broken.calls) == 1                                             # still waiting
+    again = app.get_recap(52607, facts, 1, now=1000 + app.RECAP_RETRY_SECONDS, client=FakeAI("Back!"))
+    assert again[:2] == ("Back!", "ai")
+
+
+def test_only_the_latest_recaps_are_kept(ai_recaps, monkeypatch):
+    monkeypatch.setattr(app, "RECAP_KEPT", 2)
+    ai, facts = FakeAI(), final_facts()
+    for stage in (0, 1, 2):
+        app.get_recap(52607, facts, stage, now=stage, client=ai)
+    assert list(app._recaps) == [(52607, 2, 1), (52607, 2, 2)]
+
+
+# the recap route
+
+RECAP_CLUBS = [{"id": i, "short_name": n, "name": n} for i, n in enumerate(["ARS", "CHE", "LIV", "MCI"], 1)]
+
+
+@pytest.fixture
+def recap_world(monkeypatch):
+    """
+    Fake Draft and classic sites for the recap route. The league is RECAP_WEEKS and it's gameweek 3:
+    ARS v CHE (Saturday) is over, LIV v MCI (Sunday) hasn't kicked off. Each team starts two players
+    (and has a bench player on 20 points, who must not count). Saka (ARS) has 8 points and Palmer (CHE) 3,
+    so Team 0 leads Team 1 8-3. The returned dict can be changed before the first request,
+    e.g. world["fixtures"] = None takes that feed down.
+    """
+    world = {
+        "matches": list(RECAP_WEEKS),
+        "fixtures": [
+            {"event": 3, "team_h": 1, "team_a": 2, "kickoff_time": "2026-10-10T11:30:00Z",
+             "started": True, "finished": True},
+            {"event": 3, "team_h": 3, "team_a": 4, "kickoff_time": "2026-10-11T14:00:00Z",
+             "started": False, "finished": False}],
+        "live": {"elements": {"1": {"stats": {"total_points": 8, "minutes": 90}},
+                              "2": {"stats": {"total_points": 3, "minutes": 90}},
+                              "9": {"stats": {"total_points": 20, "minutes": 90}}}},
+    }
+    names = {1: "Saka", 2: "Palmer", 3: "Salah", 4: "Foden"}
+    elements = [{**make_player(i, team=(i - 1) % 4 + 1), "web_name": names.get(i, f"Player{i}"),
+                 "points_per_game": "5.0"} for i in range(1, 10)]
+    starters = {100: [1, 3], 101: [2, 4], 102: [5, 7], 103: [6, 8]}
+
+    def fake(url):
+        if "fantasy" in url:                                              # the classic site
+            if "bootstrap" in url:
+                return {"teams": RECAP_CLUBS}
+            if world["fixtures"] is None:
+                raise requests.ConnectionError("down")
+            return world["fixtures"]
+        if url.endswith("/bootstrap-static"):
+            return {"events": {"current": 3, "next": 4}, "teams": RECAP_CLUBS, "elements": elements}
+        if url.endswith("/details"):
+            return recap_league(world["matches"])
+        if "/live" in url:
+            if world["live"] is None:
+                raise requests.ConnectionError("down")
+            return world["live"]
+        if "/entry/" in url:
+            team_id = int(url.split("/entry/")[1].split("/")[0])
+            picks = [{"element": pid, "position": n} for n, pid in enumerate(starters[team_id], 1)]
+            return {"picks": picks + [{"element": 9, "position": 12}]}
+        raise AssertionError(f"Unexpected URL {url}")
+
+    monkeypatch.setattr(app, "get_json", fake)
+    monkeypatch.setattr(app, "_recaps", {})
+    monkeypatch.setattr(app, "_recap_failed", {})
+    monkeypatch.delenv("RECAP_MODEL", raising=False)
+    return world
+
+
+def get_recap_page(league=123):
+    return app.app.test_client().get(f"/api/league/{league}/recap").get_json()
+
+
+def test_recap_route_shows_the_live_scoreboard_with_a_plain_recap(recap_world):
+    data = get_recap_page()
+    recap = data["recap"]
+    assert data["league_name"] == "Recap League"
+    assert (recap["gameweek"], recap["stage"], recap["label"]) == (3, 1, "After 1 of 2 games")
+    assert recap["games"] == {"played": 1, "total": 2}
+    assert (recap["written_by"], recap["written_at"]) == ("plain", None)
+    first, second = recap["matches"]
+    assert (first["a"]["points"], first["b"]["points"], first["leader"]) == (8, 3, "a")   # no bench points
+    assert (first["a"]["left"], first["b"]["left"], first["outlook"]) == (1, 1, "still alive")
+    assert (second["leader"], second["outlook"]) == (None, "level")
+    assert recap["stars"] == [{"player": "Saka", "points": 8, "team": "Team 0"}]
+    assert recap["text"].startswith("1 of 2 games played in gameweek 3. Team 0 lead Team 1 8-3.")
+
+
+def test_recap_route_uses_the_ai_for_a_listed_league(recap_world, monkeypatch):
+    monkeypatch.setenv("RECAP_MODEL", "test-model")
+    monkeypatch.setattr(app, "write_recap", lambda facts, client=None: "AI words.")
+    recap = get_recap_page(52607)["recap"]
+    assert (recap["text"], recap["written_by"]) == ("AI words.", "ai")
+    assert recap["written_at"].endswith("+00:00")
+    assert get_recap_page(123)["recap"]["written_by"] == "plain"        # not a listed league
+
+
+def test_recap_route_gives_the_final_recap_once_the_official_results_are_in(recap_world):
+    recap_world["matches"] = RECAP_WEEKS[:4] + [match(3, 10, 70, 11, 60), match(3, 12, 50, 13, 40)]
+    recap = get_recap_page()["recap"]
+    assert (recap["gameweek"], recap["stage"], recap["label"]) == (3, "final", "Final recap")
+    assert [(m["a"]["points"], m["b"]["points"]) for m in recap["matches"]] == [(70, 60), (50, 40)]
+    assert recap["text"].startswith("Gameweek 3 is done.")
+
+
+def test_recap_route_keeps_last_weeks_final_recap_until_a_game_finishes(recap_world):
+    for fixture in recap_world["fixtures"]:
+        fixture["finished"] = fixture["started"] = False
+    recap = get_recap_page()["recap"]
+    assert (recap["gameweek"], recap["label"]) == (2, "Final recap")
+    assert recap["matches"][0]["a"]["points"] == 90
+
+
+def test_recap_route_still_works_when_the_fixtures_feed_is_down(recap_world):
+    recap_world["fixtures"] = None
+    recap = get_recap_page()["recap"]
+    assert (recap["gameweek"], recap["label"]) == (2, "Final recap")
+
+
+def test_recap_route_writes_with_less_when_the_live_feed_is_down(recap_world):
+    recap_world["live"] = None
+    recap = get_recap_page()["recap"]
+    assert recap["label"] == "After 1 of 2 games" and recap["matches"] == [] and recap["stars"] == []
+    assert recap["text"] == "1 of 2 games played in gameweek 3. The live scores aren't available right now."
+
+
+def test_recap_route_is_empty_before_any_game_has_finished(recap_world):
+    recap_world["matches"] = [match(3, 10, 0, 11, 0, finished=False), match(3, 12, 0, 13, 0, finished=False)]
+    for fixture in recap_world["fixtures"]:
+        fixture["finished"] = fixture["started"] = False
+    assert get_recap_page()["recap"] is None
+
+
+def test_recap_route_is_empty_for_a_league_without_matches(recap_world):
+    recap_world["matches"] = []
+    assert get_recap_page()["recap"] is None
+
+
+def test_recap_route_gives_a_friendly_error(monkeypatch):
+    def not_found(url):
+        raise requests.HTTPError(response=type("R", (), {"status_code": 404})())
+
+    monkeypatch.setattr(app, "get_json", not_found)
+    res = app.app.test_client().get("/api/league/999/recap")
+    assert res.status_code == 400
+    assert "No Draft league found" in res.get_json()["error"]
+
+
+def test_league_hub_offers_the_recap_to_everyone():
+    res = app.app.test_client().get("/league?league=123")
+    page = res.data.decode()
+    res.close()
+    assert '<button class="choice" type="button" data-tab="recap"' in page         # not fullonly
+    assert 'id="panel-recap"' in page and "function renderRecap" in page

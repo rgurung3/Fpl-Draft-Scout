@@ -277,7 +277,7 @@ function render() {
     `<option value="${id}" ${id === DATA.league_id ? "selected" : ""}>${id === DATA.league_id ? esc(DATA.league_name) : "League " + id}</option>`).join("");
 
   $("tradeLink").href = pageLink("/trade");
-  $("leagueLink").href = "/league?league=" + DATA.league_id + "&team=" + state.team + "&full=1";   // the full hub: your line is highlighted and there's a way back
+  $("leagueLink").href = "/league?league=" + DATA.league_id + "&full=1";   // the full hub: it finds your team from this browser, so the link has no team ID
   $("myLink").value = location.origin + location.pathname + linkQuery();
 
   $("scoreNote").textContent = "Rating is 0–100, built from recent form, points per game, attacking threat (xGI per 90), share of minutes played and fixture difficulty over the next " + DATA.lookahead + " gameweeks, then scaled down for injury doubts. "
