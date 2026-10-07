@@ -49,7 +49,7 @@ RECAP_TIMEOUT_SECONDS = 30  # gunicorn allows a request 60 seconds in all, so th
 RECAP_RETRY_SECONDS = 300   # after an AI call fails, use the plain recap for this long before trying again
 RECAP_KEPT = 60             # how many written recaps stay in memory
 STAR_MIN_POINTS = 6         # a starter needs this many points in a gameweek to be named as a star
-MOVE_MIN_PLACES = 2         # a manager has to move this many table places in a gameweek to be mentioned
+MOVE_MIN_PLACES = 1         # a manager has to move this many table places in a gameweek to be mentioned
 PLAYER_POINTS_SD = 3.5      # how far a player's points in one game typically stray from his average
 # the chance (0-1) the side behind comes back, and what we call it; anything lower is "needs a miracle"
 COMEBACK_LEVELS = ((0.35, "wide open"), (0.12, "still alive"), (0.03, "a long shot"))

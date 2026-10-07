@@ -1867,8 +1867,14 @@ def test_final_facts_have_the_results_highlights_table_and_moves():
                                                   "loser_points": 50, "margin": 40}
     assert [(r["place"], r["team"]) for r in facts["table"]] == [(1, "Team 1"), (2, "Team 0"),
                                                                  (3, "Team 3"), (4, "Team 2")]
-    assert facts["moves"] == [{"team": "Team 1", "from": 4, "to": 1}, {"team": "Team 2", "from": 2, "to": 4}]
+    assert facts["moves"] == [{"team": "Team 1", "from": 4, "to": 1}, {"team": "Team 2", "from": 2, "to": 4},
+                              {"team": "Team 0", "from": 1, "to": 2}]     # biggest first; Team 3 stayed 3rd
     assert 0 < len(facts["season_notes"]) <= 3
+
+
+def test_small_table_moves_can_be_left_out(monkeypatch):
+    monkeypatch.setattr(app, "MOVE_MIN_PLACES", 2)
+    assert [m["team"] for m in final_facts()["moves"]] == ["Team 1", "Team 2"]   # Team 0 moved one place
 
 
 def test_a_final_recap_has_no_stars_and_no_next_up_even_with_live_scores():
@@ -2230,7 +2236,8 @@ def test_recap_route_gives_the_final_recap_once_the_official_results_are_in(reca
     assert [(m["a"]["points"], m["b"]["points"]) for m in recap["matches"]] == [(70, 60), (50, 40)]
     assert recap["text"].startswith("Gameweek 3 is done.\nBiggest win: ")
     assert recap["stars"] == []                                    # a final recap has no stars
-    assert {(m["team"], m["from"], m["to"]) for m in recap["moves"]} == {("Team 2", 4, 2), ("Team 1", 1, 3)}
+    # Teams 1 and 2 moved two places each; of the two one-place movers only three moves are listed in all
+    assert {m["team"] for m in recap["moves"][:2]} == {"Team 1", "Team 2"} and len(recap["moves"]) == 3
     assert not asked_for_live_data(recap_world)                    # written from the official results alone
 
 
