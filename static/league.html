@@ -100,12 +100,16 @@
 
   /* recap */
   .byline { color: var(--muted); font-size: .9rem; margin: 0 0 14px; }
-  .recap p { margin: 0 0 12px; max-width: 70ch; font-size: 1.05rem; }
+  .recap p { margin: 0 0 12px; max-width: 70ch; font-size: 1.05rem; white-space: pre-line; }   /* keep line breaks */
   .board { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 8px; }
   .board li { background: var(--surface); border: 1px solid var(--line); border-left: 5px solid var(--pitch);
     border-radius: 4px; padding: 10px 16px; }
-  .board .pairing { font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .board .pairing { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
   .board .state { color: var(--muted); font-size: .92rem; }
+  .moves { margin: 4px 0 14px; padding-left: 1.3rem; }
+  .moves li { margin: 3px 0; }
+  .moves .up { color: var(--pitch); font-weight: 600; }
+  .moves .down { color: var(--rival); font-weight: 600; }
 
   /* scatter and spread */
   .plot { display: block; width: 100%; height: auto; }
@@ -192,11 +196,14 @@
         <h2 id="recapTitle">Recap</h2>
         <p class="byline" id="recapBy"></p>
         <div class="recap" id="recapText"></div>
+        <div id="movesSection" class="hidden">
+          <h3 class="minihead">Table moves</h3>
+          <ul class="moves" id="movesList"></ul>
+        </div>
         <h3 class="minihead" id="boardHead">Scoreboard</h3>
         <p class="sub hidden" id="boardSub"></p>
         <ul class="board" id="board"></ul>
         <p class="racecap hidden" id="starLine"></p>
-        <p class="racecap hidden" id="moveLine"></p>
       </section>
     </div>
 
@@ -395,18 +402,19 @@ function renderFacts() {
 // ---------------------------------------------------------------- recap
 
 function boardRow(m) {
-  const a = m.a, b = m.b;
+  const a = m.a, b = m.b, lead = m.leader === "a" ? a : m.leader === "b" ? b : null;
+  const name = s => s === lead ? `<strong>${esc(s.team)}</strong>` : esc(s.team);   // the side ahead, or the winner, in bold
   let note;
   if (m.outlook == null) {   // the gameweek is over: the official result
-    note = m.leader == null ? "A draw." : `${esc(m.ahead)} won by ${m.margin}.`;
-  } else if (m.leader == null) {
+    note = lead ? `Won by ${m.margin}.` : "A draw.";
+  } else if (!lead) {
     note = `Level, with ${a.left} v ${b.left} players still to play.`;
   } else {
-    const behind = m.leader === "a" ? b : a;
-    note = `${esc(m.ahead)} lead by ${m.margin}. ${esc(m.behind)} `
+    const behind = lead === a ? b : a;
+    note = `${esc(lead.team)} lead by ${m.margin}. ${esc(behind.team)} `
       + (behind.left === 0 ? "have nobody left to play" : `have ${behind.left} still to play`) + `: ${esc(m.outlook)}.`;
   }
-  return `<li><div class="pairing">${esc(a.team)} ${a.points} – ${b.points} ${esc(b.team)}</div><div class="state">${note}</div></li>`;
+  return `<li><div class="pairing">${name(a)} ${a.points} – ${b.points} ${name(b)}</div><div class="state">${note}</div></li>`;
 }
 
 function renderRecap(data) {
@@ -422,19 +430,23 @@ function renderRecap(data) {
   $("recapTitle").textContent = `Gameweek ${r.gameweek}: ${r.label}`;
   $("recapText").innerHTML = r.text.split(/\n\s*\n/).map(p => `<p>${esc(p.trim())}</p>`).join("");
   const at = r.written_at ? new Date(r.written_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+  const source = final ? "results" : "scores";
   $("recapBy").textContent = r.written_by === "ai"
-    ? `Written by AI at ${at}, from the scores below. It's written once for each stage of the gameweek.`
-    : "Put together from the scores below.";
+    ? `Written by AI at ${at}, from the ${source} below. It's written once for each stage of the gameweek.`
+    : `Put together from the ${source} below.`;
+  // the table moves as bullet points (a final recap only: the server sends none while the games are on)
+  $("movesList").innerHTML = r.moves.map(m => {
+    const up = m.to < m.from;
+    return `<li>${esc(m.team)} <span class="${up ? "up" : "down"}">${up ? "up" : "down"}</span> from ${place(m.from)} to ${place(m.to)}</li>`;
+  }).join("");
+  $("movesSection").classList.toggle("hidden", !r.moves.length);
   $("boardHead").textContent = final ? "Results" : "Scoreboard so far";
   $("boardSub").textContent = "Starting elevens before auto-subs, so these can still change when the gameweek ends.";
   $("boardSub").classList.toggle("hidden", final);
   $("board").innerHTML = r.matches.map(boardRow).join("") || `<li>No scores to show yet.</li>`;
   $("starLine").innerHTML = "<strong>Stars:</strong> "
     + r.stars.map(s => `${esc(s.player)} ${s.points} (${esc(s.team)})`).join(" · ");
-  $("starLine").classList.toggle("hidden", !r.stars.length);
-  $("moveLine").innerHTML = "<strong>Table moves:</strong> "
-    + r.moves.map(m => `${esc(m.team)} ${m.to < m.from ? "up" : "down"} from ${place(m.from)} to ${place(m.to)}`).join(" · ");
-  $("moveLine").classList.toggle("hidden", !r.moves.length);
+  $("starLine").classList.toggle("hidden", !r.stars.length);   // stars so far: only while the games are on
 }
 
 // ---------------------------------------------------------------- charts

@@ -1314,29 +1314,61 @@ def table_moves(history, team):
     return sorted(moved, key=lambda r: abs(r["from"] - r["to"]), reverse=True)[:3]
 
 
+def recap_highlights(matches):
+    """
+    The talking points of a finished gameweek, from recap_matches: the biggest win, the closest of the
+    other matches (a draw counts) and the highest and lowest score. The written recap uses these
+    instead of going through every result, because the page lists the results as well.
+
+    biggest_win and closest_match are {"winner", "loser", "winner_points", "loser_points", "margin"},
+    or for a draw {"draw": [team, team], "points", "margin": 0}. highest_score and lowest_score are
+    {"team", "points"}. Each is None when there's nothing to say: the closest match needs a second
+    match, and the highest and lowest scores need two matches and to be different.
+    """
+    def told(m):
+        if m["leader"] is None:
+            return {"draw": [m["a"]["team"], m["b"]["team"]], "points": m["a"]["points"], "margin": 0}
+        win, lose = (m["a"], m["b"]) if m["leader"] == "a" else (m["b"], m["a"])
+        return {"winner": win["team"], "loser": lose["team"], "winner_points": win["points"],
+                "loser_points": lose["points"], "margin": m["margin"]}
+
+    biggest = max((m for m in matches if m["leader"]), key=lambda m: m["margin"], default=None)
+    closest = min((m for m in matches if m is not biggest), key=lambda m: m["margin"], default=None)
+    sides = [s for m in matches for s in (m["a"], m["b"])]
+    top = max(sides, key=lambda s: s["points"]) if len(matches) > 1 else None
+    low = min(sides, key=lambda s: s["points"]) if len(matches) > 1 else None
+    if top and top["points"] == low["points"]:
+        top = low = None
+    return {"biggest_win": told(biggest) if biggest else None,
+            "closest_match": told(closest) if closest else None,
+            "highest_score": {"team": top["team"], "points": top["points"]} if top else None,
+            "lowest_score": {"team": low["team"], "points": low["points"]} if low else None}
+
+
 def recap_facts(details, gw, stage, progress=None, scores=None):
     """
     Everything a recap is written from, all of it worked out here: the AI only chooses the words.
     stage is "final" (the official results are in) or the match-day count from recap_stage, progress
     is gameweek_progress and scores is live_scores (either is None if that data couldn't be read).
+    A final recap is written from the league details alone, so it ignores scores.
 
     state: "final" or "in progress". length: "short" (an early look: under RECAP_SHORT_SHARE of the
     games are played) or "full". games: {"played", "total"} or None. matches: see recap_matches (the
-    live picture while it's on, the official results when it's final). stars: up to three starters
-    with at least STAR_MIN_POINTS. table: the top three and last place (after this gameweek when final,
-    before it otherwise). moves: who moved most places (final only). And for a final recap only:
-    season_notes (up to three banter facts) and next_up (the hot match of the next gameweek).
+    live picture while it's on, the official results when it's final). table: the top three and last
+    place (after this gameweek when final, before it otherwise). While it's on only: stars, up to three
+    starters with at least STAR_MIN_POINTS. For a final recap only: highlights (see recap_highlights),
+    moves (who moved most places in the table) and season_notes (up to three banter facts).
     """
     final = stage == "final"
     entries = {e["entry_id"]: e for e in details.get("league_entries", []) if e.get("entry_id")}
     team = {t: clean_name(e.get("entry_name")) or f"Team {t}" for t, e in entries.items()}
     early = not final and progress is not None and progress["played"] / progress["games"] < RECAP_SHORT_SHARE
 
-    stars = sorted(({"player": row["star"]["name"], "points": row["star"]["points"],
-                     "team": team.get(t, f"Team {t}")}
-                    for t, row in (scores or {}).items()
-                    if row["star"] and row["star"]["points"] >= STAR_MIN_POINTS),
-                   key=lambda s: -s["points"])[:3]
+    stars = [] if final else sorted(
+        ({"player": row["star"]["name"], "points": row["star"]["points"], "team": team.get(t, f"Team {t}")}
+         for t, row in (scores or {}).items()
+         if row["star"] and row["star"]["points"] >= STAR_MIN_POINTS),
+        key=lambda s: -s["points"])[:3]
 
     history = league_history(details)
     table, moves = None, []
@@ -1349,68 +1381,68 @@ def recap_facts(details, gw, stage, progress=None, scores=None):
         moves = table_moves(history, team) if final else []
 
     banter = (league_banter(details) or {}) if final else {}
-    hot = banter.get("hot_match")
+    matches = recap_matches(details, gw, None if final else scores or {})
     return {
         "league": clean_name(details.get("league", {}).get("name")),
         "gameweek": gw,
         "state": "final" if final else "in progress",
         "length": "short" if early else "full",
         "games": {"played": progress["played"], "total": progress["games"]} if progress else None,
-        "matches": recap_matches(details, gw, None if final else scores or {}),
+        "matches": matches,
+        "highlights": recap_highlights(matches) if final and matches else None,
         "stars": stars,
         "table": table,
         "moves": moves,
         "season_notes": [f["text"][:200] for f in banter.get("facts", [])[:3]],
-        "next_up": ({"gameweek": hot["gw"], "line": hot["line"],
-                     "a": clean_name(hot["a"]["team"]), "b": clean_name(hot["b"]["team"])} if hot else None),
     }
 
 
-def match_sentence(m, final):
+def match_sentence(m):
     """
-    One match in a sentence: "A beat B 60-55." when it's over, and while it's on "A lead B 45-31.
-    B have 5 to play against 2: still alive."
+    A match that's still being played, in a sentence: "A lead B 45-31. B have 5 to play against 2:
+    still alive." (A final recap doesn't go through the results, see recap_highlights.)
     """
     a, b = m["a"], m["b"]
     if m["leader"] is None:
-        return (f"{a['team']} and {b['team']} drew {a['points']}-{b['points']}." if final
-                else f"{a['team']} and {b['team']} are level on {a['points']}.")
+        return f"{a['team']} and {b['team']} are level on {a['points']}."
     win, lose = (a, b) if m["leader"] == "a" else (b, a)
-    score = f"{win['points']}-{lose['points']}"
-    if final:
-        return f"{win['team']} beat {lose['team']} {score}."
-    return (f"{win['team']} lead {lose['team']} {score}. {lose['team']} have {lose['left']} to play "
-            f"against {win['left']}: {m['outlook']}.")
+    return (f"{win['team']} lead {lose['team']} {win['points']}-{lose['points']}. {lose['team']} have "
+            f"{lose['left']} to play against {win['left']}: {m['outlook']}.")
 
 
 def plain_recap(facts):
     """
     The recap written straight from the numbers, with no AI. It's what shows when the AI is switched
-    off, isn't allowed for this league, or fails. Paragraphs are separated by a blank line.
+    off, isn't allowed for this league, or fails.
     """
     gw, final = facts["gameweek"], facts["state"] == "final"
     matches = sorted(facts["matches"], key=lambda m: m["margin"], reverse=True)
     if final:
-        text = [f"Gameweek {gw} is done. " + " ".join(match_sentence(m, True) for m in matches)]
-        extra = []
-        if facts["stars"]:
-            extra.append("Best performances: " + ", ".join(
-                f"{s['player']} {s['points']} (for {s['team']})" for s in facts["stars"]) + ".")
-        if facts["moves"]:
-            extra.append("Table moves: " + "; ".join(
-                f"{r['team']} {'up' if r['to'] < r['from'] else 'down'} from {ordinal(r['from'])} to "
-                f"{ordinal(r['to'])}" for r in facts["moves"]) + ".")
-        if facts["next_up"]:
-            extra.append(f"Next up in gameweek {facts['next_up']['gameweek']}: "
-                         f"{facts['next_up']['a']} v {facts['next_up']['b']}.")
-        return "\n\n".join(text + ([" ".join(extra)] if extra else []))
+        # the talking points only: the page lists every result and the table moves itself
+        said = [f"Gameweek {gw} is done."]
+        found = facts["highlights"] or {}
+        win, close = found.get("biggest_win"), found.get("closest_match")
+        top, low = found.get("highest_score"), found.get("lowest_score")
+        if win:
+            said.append(f"Biggest win: {win['winner']} beat {win['loser']} "
+                        f"{win['winner_points']}-{win['loser_points']}, by {win['margin']} "
+                        f"point{'s' if win['margin'] != 1 else ''}.")
+        if close:
+            said.append(f"Closest match: {close['draw'][0]} and {close['draw'][1]} drew "
+                        f"{close['points']}-{close['points']}." if "draw" in close else
+                        f"Closest match: {close['winner']} beat {close['loser']} "
+                        f"{close['winner_points']}-{close['loser_points']}.")
+        if top and low:
+            said.append(f"Highest score: {top['team']} with {top['points']}. "
+                        f"Lowest: {low['team']} with {low['points']}.")
+        return "\n".join(said)   # one talking point to a line, which the page keeps as line breaks
     games = facts["games"]
     opener = f"{games['played']} of {games['total']} games played in gameweek {gw}." if games \
         else f"Gameweek {gw} is under way."
     if not matches:
         return f"{opener} The live scores aren't available right now."
     shown = matches[:1] if facts["length"] == "short" else matches
-    return opener + " " + " ".join(match_sentence(m, False) for m in shown)
+    return opener + " " + " ".join(match_sentence(m) for m in shown)
 
 
 RECAP_SYSTEM = (
@@ -1426,8 +1458,10 @@ RECAP_SYSTEM = (
 def recap_request(facts):
     """The message sent to the AI: what to write about, how much of it, and the facts."""
     if facts["state"] == "final":
-        ask = ("The gameweek is over. Recap the results, mention the star players and who moved up or down "
-               "the table, and finish by looking ahead to next week's match if next_up is given.")
+        ask = ("The gameweek is over. The page already lists every result and the table moves next to your "
+               "text, so don't go through them one by one. Tell the story of the week instead, using the "
+               "highlights (biggest win, closest match, highest and lowest score) and anything else that "
+               "stands out.")
     else:
         ask = ("The gameweek is still being played, so nothing is settled. Say who is ahead in the matches. "
                "For the lopsided or close ones, mention how many players each side still has to play and use "
@@ -1686,8 +1720,9 @@ def load_recap(league_id):
 
     The recap is for the gameweek in progress once one of its games has finished; before that, the
     final recap of the gameweek just played. Everything in it is worked out in recap_facts from the
-    league details, the classic fixtures (which games are done), the Draft site's live points and each
-    manager's picks. If the live points or picks can't be read, the recap is written with less.
+    league details, the classic fixtures (which games are done) and, while the gameweek is on, the
+    Draft site's live points and each manager's picks. If the live points or picks can't be read, the
+    recap is written with less. A final recap is written from the league details alone.
     """
     boot = fetch(f"{DRAFT}/bootstrap-static", LEAGUE_NOT_FOUND)
     details = fetch(f"{DRAFT}/league/{league_id}/details", LEAGUE_NOT_FOUND)
@@ -1705,17 +1740,19 @@ def load_recap(league_id):
     progress = gameweek_progress(games[0]) if games else None
     stage = recap_stage(progress, over(gw))
     if stage is None and gw > 1 and over(gw - 1):
-        gw, stage = gw - 1, "final"   # nothing has finished yet this gameweek: keep last week's final recap
-        games = gameweek_games(boot["teams"], gw)
-        progress = gameweek_progress(games[0]) if games else None
+        # nothing has finished yet this gameweek: keep last week's final recap
+        gw, stage, progress = gw - 1, "final", None
     if stage is None:
         return nothing
 
-    team_ids = [e["entry_id"] for e in details.get("league_entries", []) if e.get("entry_id")]
-    stats, starters = recap_inputs(gw, team_ids)
-    players = {el["id"]: {"name": el.get("web_name") or f'Player {el["id"]}', "club": el["team"],
-                          "ppg": num(el.get("points_per_game"))} for el in boot["elements"]}
-    scores = live_scores(starters, stats, players, games[1] if games else {}) if stats and starters else None
+    scores = None
+    if stage != "final":   # a final recap is written from the official results, so it needs no live data
+        team_ids = [e["entry_id"] for e in details.get("league_entries", []) if e.get("entry_id")]
+        stats, starters = recap_inputs(gw, team_ids)
+        players = {el["id"]: {"name": el.get("web_name") or f'Player {el["id"]}', "club": el["team"],
+                              "ppg": num(el.get("points_per_game"))} for el in boot["elements"]}
+        scores = (live_scores(starters, stats, players, games[1] if games else {})
+                  if stats and starters else None)
 
     facts = recap_facts(details, gw, stage, progress, scores)
     text, written_by, at = get_recap(league_id, facts, stage)
