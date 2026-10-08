@@ -1677,18 +1677,22 @@ RECAP_WEEKS = [match(1, 10, 60, 11, 40), match(1, 12, 50, 13, 45),
                match(3, 10, 0, 11, 0, finished=False), match(3, 12, 0, 13, 0, finished=False)]
 
 # what live_scores needs: club 1's game is over, club 2 is mid-game, club 3 hasn't kicked off
-PLAYERS = {1: {"name": "Saka", "club": 1, "ppg": 6.0}, 2: {"name": "Palmer", "club": 2, "ppg": 5.0},
-           3: {"name": "Salah", "club": 3, "ppg": 8.0}, 4: {"name": "Bench Boy", "club": 3, "ppg": 2.0}}
-GAMES_BY_TEAM = {1: [game(True, day=10, hour=12)], 2: [game(started=True, day=10, hour=15)],
-                 3: [game(day=11, hour=14)]}
+PLAYERS = {1: {"name": "Saka", "club": 1, "ppg": 6.0, "rating": 70.0},
+           2: {"name": "Palmer", "club": 2, "ppg": 5.0, "rating": 40.0},
+           3: {"name": "Salah", "club": 3, "ppg": 8.0, "rating": 80.0},
+           4: {"name": "Bench Boy", "club": 3, "ppg": 2.0, "rating": 20.0}}
+GAMES_BY_TEAM = {1: [game(True, day=10, hour=12)],
+                 2: [{**game(started=True, day=10, hour=15), "opp": "LIV", "home": True, "difficulty": 4}],
+                 3: [{**game(day=11, hour=14), "opp": "MCI", "home": False, "difficulty": 2}]}
 STATS = {1: {"points": 12, "minutes": 90}, 2: {"points": 3, "minutes": 45},
          3: {"points": 0, "minutes": 0}, 4: {"points": 9, "minutes": 90}}
 
 
 def live_picture():
     """Live scores for GW3: Team 0 leads Team 1 45-31 (2 players left against 5), Teams 2 and 3 are level."""
-    def row(points, left, expected, star=None):
-        return {"points": points, "left": left, "playing": 0, "expected": expected, "star": star}
+    def row(points, left, expected, star=None, top=(), coming=()):
+        return {"points": points, "left": left, "playing": 0, "expected": expected, "star": star,
+                "top": list(top), "coming": list(coming)}
 
     return {100: row(45, 2, 10.0, {"name": "Saka", "points": 14}),
             101: row(31, 5, 25.0, {"name": "Palmer", "points": 5}),
@@ -1752,7 +1756,8 @@ def test_gameweek_games_reads_which_games_have_started_and_finished(monkeypatch)
     fixtures = [
         # full time, with the bonus points not confirmed yet
         {"event": 3, "team_h": 1, "team_a": 2, "kickoff_time": "2026-10-10T11:30:00Z",
-         "started": True, "finished": False, "finished_provisional": True},
+         "started": True, "finished": False, "finished_provisional": True,
+         "team_h_difficulty": 2, "team_a_difficulty": 4},
         {"event": 3, "team_h": 3, "team_a": 4, "kickoff_time": "2026-10-11T14:00:00Z",
          "started": False, "finished": False},
         {"event": 4, "team_h": 1, "team_a": 3, "kickoff_time": "2026-10-18T14:00:00Z"},
@@ -1761,7 +1766,11 @@ def test_gameweek_games_reads_which_games_have_started_and_finished(monkeypatch)
     games, by_team = app.gameweek_games(clubs, 3)
     assert [g["finished"] for g in games] == [True, False]
     assert [g["started"] for g in games] == [True, False]
-    assert by_team[1] == by_team[2] == [games[0]] and by_team[3] == by_team[4] == [games[1]]
+    assert [g["finished"] for g in by_team[1] + by_team[2]] == [True, True]
+    assert [g["finished"] for g in by_team[3] + by_team[4]] == [False, False]
+    # each club also gets its opponent, whether it's at home and how hard the game is for it
+    assert (by_team[1][0]["opp"], by_team[1][0]["home"], by_team[1][0]["difficulty"]) == ("CHE", True, 2)
+    assert (by_team[2][0]["opp"], by_team[2][0]["home"], by_team[2][0]["difficulty"]) == ("ARS", False, 4)
 
 
 def test_gameweek_games_is_none_when_the_fixtures_cant_be_read(monkeypatch):
@@ -1797,8 +1806,34 @@ def test_live_scores_add_up_the_starters_and_count_who_is_still_to_play():
     scores = app.live_scores({100: [1, 2, 3]}, STATS, PLAYERS, GAMES_BY_TEAM)
     # Saka's game is over (12). Palmer is half-way through his (3 so far, half his usual 5 to come).
     # Salah hasn't kicked off (his usual 8 to come). The bench player's 9 points don't count.
-    assert scores[100] == {"points": 15, "left": 2, "playing": 1, "expected": 10.5,
-                           "star": {"name": "Saka", "points": 12}}
+    assert scores[100]["points"] == 15 and scores[100]["left"] == 2 and scores[100]["playing"] == 1
+    assert scores[100]["expected"] == 10.5 and scores[100]["star"] == {"name": "Saka", "points": 12}
+    # carrying the side: the two highest scorers so far (Salah is on 0). Still to come, best rated first
+    assert scores[100]["top"] == [{"name": "Saka", "points": 12}, {"name": "Palmer", "points": 3}]
+    assert scores[100]["coming"] == [
+        {"name": "Salah", "rating": 80.0, "opp": "MCI", "home": False, "difficulty": 2,
+         "playing": False, "standout": True},
+        {"name": "Palmer", "rating": 40.0, "opp": "LIV", "home": True, "difficulty": 4,
+         "playing": True, "standout": False}]
+
+
+@pytest.mark.parametrize("rating,difficulty,standout", [
+    (65.0, 5, True),       # a big name whatever the fixture
+    (64.9, 5, False),
+    (50.0, 2, True),       # a good player with an easy fixture
+    (49.9, 2, False),
+    (50.0, 3, False),      # ... not an easy enough one
+    (None, 2, False),      # no rating: nothing is claimed
+])
+def test_a_player_still_to_play_is_a_big_name_by_rating_or_an_easy_fixture(rating, difficulty, standout):
+    players = {1: {"name": "X", "club": 1, "ppg": 5.0, "rating": rating}}
+    games = {1: [{**game(day=11), "opp": "BHA", "home": True, "difficulty": difficulty}]}
+    assert app.live_scores({100: [1]}, {}, players, games)[100]["coming"][0]["standout"] is standout
+
+
+def test_a_player_whose_game_is_over_is_not_still_to_come():
+    games = {1: [game(True, day=10)]}
+    assert app.live_scores({100: [1]}, STATS, PLAYERS, games)[100]["coming"] == []
 
 
 def test_live_scores_ignore_unknown_players_and_clubs_without_a_game():
@@ -1858,26 +1893,37 @@ def test_a_bye_is_left_out():
     assert app.recap_matches(recap_league([match(3, 10, 0, None, None)]), 3, live_picture()) == []
 
 
-def test_final_facts_have_the_results_stars_table_moves_and_next_up():
+def test_final_facts_have_the_results_highlights_table_and_moves():
     facts = final_facts()
     assert facts["state"] == "final" and facts["length"] == "full" and facts["gameweek"] == 2
     assert facts["league"] == "Recap League"
     assert [m["ahead"] for m in facts["matches"]] == ["Team 1", "Team 3"]
-    assert facts["stars"] == [{"player": "Saka", "points": 14, "team": "Team 0"}]    # Palmer's 5 isn't a star
+    assert facts["highlights"]["biggest_win"] == {"winner": "Team 1", "loser": "Team 2", "winner_points": 90,
+                                                  "loser_points": 50, "margin": 40}
     assert [(r["place"], r["team"]) for r in facts["table"]] == [(1, "Team 1"), (2, "Team 0"),
                                                                  (3, "Team 3"), (4, "Team 2")]
-    assert facts["moves"] == [{"team": "Team 1", "from": 4, "to": 1}, {"team": "Team 2", "from": 2, "to": 4}]
-    next_up = facts["next_up"]
-    assert next_up["gameweek"] == 3 and {next_up["a"], next_up["b"]} == {"Team 0", "Team 1"}
+    assert facts["moves"] == [{"team": "Team 1", "from": 4, "to": 1}, {"team": "Team 2", "from": 2, "to": 4},
+                              {"team": "Team 0", "from": 1, "to": 2}]     # biggest first; Team 3 stayed 3rd
     assert 0 < len(facts["season_notes"]) <= 3
 
 
-def test_live_facts_have_the_scoreboard_but_no_moves_or_next_up():
+def test_small_table_moves_can_be_left_out(monkeypatch):
+    monkeypatch.setattr(app, "MOVE_MIN_PLACES", 2)
+    assert [m["team"] for m in final_facts()["moves"]] == ["Team 1", "Team 2"]   # Team 0 moved one place
+
+
+def test_a_final_recap_has_no_stars_and_no_next_up_even_with_live_scores():
+    facts = final_facts()        # final_facts passes live scores in, which a final recap ignores
+    assert facts["stars"] == [] and "next_up" not in facts
+
+
+def test_live_facts_have_the_scoreboard_and_stars_but_no_moves_or_highlights():
     progress = {"games": 10, "played": 6, "days": 4, "days_done": 2}
     facts = app.recap_facts(recap_league(RECAP_WEEKS), 3, 2, progress, live_picture())
     assert facts["state"] == "in progress" and facts["games"] == {"played": 6, "total": 10}
     assert [m["margin"] for m in facts["matches"]] == [14, 0]
-    assert facts["moves"] == [] and facts["next_up"] is None and facts["season_notes"] == []
+    assert facts["stars"] == [{"player": "Saka", "points": 14, "team": "Team 0"}]    # Palmer's 5 isn't a star
+    assert facts["moves"] == [] and facts["highlights"] is None and facts["season_notes"] == []
     assert facts["table"][0]["team"] == "Team 1"          # the official table, before this gameweek's results
 
 
@@ -1899,15 +1945,286 @@ def test_clean_name_strips_control_characters_and_long_names():
     assert app.clean_name(None) == ""
 
 
+# what's driving a match that's still on
+
+def coming(name, rating, standout=True, opp="BHA", home=True, difficulty=3, playing=False):
+    return {"name": name, "rating": rating, "opp": opp, "home": home, "difficulty": difficulty,
+            "playing": playing, "standout": standout}
+
+
+def live_row(a_points, b_points, a_left=3, b_left=3, a_top=(), b_top=(), a_coming=(), b_coming=()):
+    """A live match row between "A" and "B", as recap_matches gives it, for the story tests."""
+    def side(team, points, left, top, to_come):
+        return {"team": team, "points": points, "left": left, "top": list(top), "coming": list(to_come)}
+
+    margin = abs(a_points - b_points)
+    return {"a": side("A", a_points, a_left, a_top, a_coming),
+            "b": side("B", b_points, b_left, b_top, b_coming), "margin": margin,
+            "leader": None if margin == 0 else "a" if a_points > b_points else "b"}
+
+
+def test_coming_text_gives_the_rating_the_fixture_and_whether_it_is_easy_or_live():
+    assert app.coming_text(coming("Foden", 82.4, difficulty=2)) == (
+        "Foden (rated 82, home v BHA, an easy fixture)")
+    assert app.coming_text(coming("Salah", 71.0, opp="ARS", home=False, difficulty=4, playing=True)) == (
+        "Salah (rated 71, away at ARS, playing now)")
+    assert app.coming_text({"name": "X", "rating": 50.0, "opp": None, "home": None, "difficulty": None,
+                            "playing": False}) == "X (rated 50)"
+
+
+def test_the_story_names_who_is_carrying_and_the_big_names_still_to_come():
+    m = live_row(45, 31, a_top=[{"name": "Saka", "points": 14}],
+                 b_coming=[coming("Foden", 82.0, difficulty=2), coming("Palmer", 40.0, standout=False)])
+    assert app.live_story(m) == ("Saka's 14 is carrying A. "
+                                 "B still have Foden (rated 82, home v BHA, an easy fixture) to play.")
+
+
+def test_the_story_says_luck_when_the_side_behind_has_no_big_names_left():
+    m = live_row(45, 31, a_top=[{"name": "Saka", "points": 14}],
+                 b_coming=[coming("Palmer", 40.0, standout=False)])
+    assert app.live_story(m) == "Saka's 14 is carrying A. No big names left for B, so they'll need luck."
+
+
+def test_the_story_says_the_odds_are_with_the_leader_when_the_other_side_has_nobody_left():
+    m = live_row(60, 22, b_left=0, a_top=[{"name": "Saka", "points": 14}])
+    assert app.live_story(m) == "Saka's 14 is carrying A. B have nobody left to play: the odds are with A."
+
+
+def test_a_small_score_is_not_called_carrying():
+    m = live_row(20, 10, a_top=[{"name": "Saka", "points": 5}], b_coming=[coming("Foden", 82.0)])
+    assert "carrying" not in app.live_story(m)                       # 5 is under STAR_MIN_POINTS
+
+
+def test_a_level_match_mentions_each_sides_big_names_or_says_it_is_down_to_luck():
+    both = live_row(20, 20, a_coming=[coming("Saka", 80.0)], b_coming=[coming("Foden", 82.0)])
+    assert app.live_story(both) == ("A still have Saka (rated 80, home v BHA). "
+                                    "B still have Foden (rated 82, home v BHA).")
+    quiet = live_row(20, 20, a_coming=[coming("X", 40.0, standout=False)],
+                     b_coming=[coming("Y", 41.0, standout=False)])
+    assert app.live_story(quiet) == "Nothing between them and no big names to come, so it's down to luck."
+
+
+def test_the_story_claims_nothing_about_luck_when_ratings_are_unknown():
+    unknown = [coming("Foden", None, standout=False)]
+    assert app.live_story(live_row(45, 31, b_coming=unknown)) is None
+    assert app.live_story(live_row(20, 20, a_coming=unknown, b_coming=unknown)) is None
+    assert app.live_story(live_row(45, 31, a_top=[{"name": "Saka", "points": 14}], b_coming=unknown)) == (
+        "Saka's 14 is carrying A.")
+
+
+def test_live_matches_carry_each_sides_top_scorers_and_best_to_come():
+    scores = live_picture()
+    scores[101]["coming"] = [coming("Foden", 82.0)]
+    first, second = app.recap_matches(recap_league(RECAP_WEEKS), 3, scores)
+    assert first["b"]["coming"][0]["name"] == "Foden" and first["a"]["top"] == []
+    assert first["story"] == "Team 1 still have Foden (rated 82, home v BHA) to play."
+    assert second["story"] is None
+
+
+def test_a_final_match_has_no_story():
+    assert all("story" not in m for m in final_facts()["matches"])
+
+
+# highlights of a finished gameweek
+
+def played(a, a_points, b, b_points):
+    """One finished match as recap_matches gives it, for the highlights tests."""
+    margin = abs(a_points - b_points)
+    return {"a": {"team": a, "points": a_points}, "b": {"team": b, "points": b_points}, "margin": margin,
+            "leader": None if margin == 0 else "a" if a_points > b_points else "b"}
+
+
+def test_highlights_pick_the_biggest_win_the_closest_match_and_the_best_and_worst_scores():
+    # A beat B by 40 and E beat F by 40 (the first wins the tie); C beat D by 1, listed as the second team
+    found = app.recap_highlights(
+        [played("A", 90, "B", 50), played("D", 70, "C", 71), played("E", 60, "F", 20)])
+    assert found["biggest_win"] == {"winner": "A", "loser": "B", "winner_points": 90,
+                                    "loser_points": 50, "margin": 40}
+    assert found["closest_match"] == {"winner": "C", "loser": "D", "winner_points": 71,
+                                      "loser_points": 70, "margin": 1}
+    assert found["highest_score"] == {"team": "A", "points": 90}
+    assert found["lowest_score"] == {"team": "F", "points": 20}
+
+
+def test_highlights_for_a_single_match_are_just_the_win():
+    found = app.recap_highlights([played("A", 60, "B", 55)])
+    assert found["biggest_win"]["margin"] == 5
+    assert found["closest_match"] is None and found["highest_score"] is None and found["lowest_score"] is None
+
+
+def test_a_draw_can_be_the_closest_match():
+    found = app.recap_highlights([played("A", 80, "B", 50), played("C", 60, "D", 60)])
+    assert found["closest_match"] == {"draw": ["C", "D"], "points": 60, "margin": 0}
+
+
+def test_highlights_when_every_match_is_a_draw_have_no_biggest_win():
+    found = app.recap_highlights([played("A", 60, "B", 60), played("C", 55, "D", 55)])
+    assert found["biggest_win"] is None
+    assert found["closest_match"]["draw"] == ["A", "B"]
+
+
+def test_highlights_leave_out_highest_and_lowest_when_every_score_is_the_same():
+    found = app.recap_highlights([played("A", 50, "B", 50), played("C", 50, "D", 50)])
+    assert found["highest_score"] is None and found["lowest_score"] is None
+
+
+def test_highlights_with_no_matches_are_empty():
+    assert set(app.recap_highlights([]).values()) == {None}
+
+
+# what made a match worth talking about
+
+def story_match(a_points, b_points):
+    """A finished match between teams 100 ("A") and 101 ("B"), in the shape recap_matches gives."""
+    margin = abs(a_points - b_points)
+    return {"a": {"entry_id": 100, "team": "A", "points": a_points},
+            "b": {"entry_id": 101, "team": "B", "points": b_points}, "margin": margin,
+            "leader": None if margin == 0 else "a" if a_points > b_points else "b"}
+
+
+def story(a_points, b_points, **extra):
+    return app.add_stories([story_match(a_points, b_points)], **extra)[0]
+
+
+@pytest.mark.parametrize("a_points,b_points,tags", [
+    (60, 40, ["Stomping"]),          # won by exactly 20
+    (59, 40, []),
+    (45, 40, ["Nail-biter"]),        # won by exactly 5
+    (46, 40, []),
+    (40, 70, ["Stomping"]),          # the second team can win it too
+    (50, 50, ["Draw"]),
+])
+def test_tags_for_stompings_nail_biters_and_draws(a_points, b_points, tags):
+    assert story(a_points, b_points)["tags"] == tags
+
+
+def test_a_winner_far_below_in_the_table_is_an_upset():
+    m = story(50, 40, places={100: 9, 101: 6})
+    assert (m["tags"], m["basis"]) == (["Upset"], ["9th in the table beat 6th"])
+    assert (m["a"]["place"], m["b"]["place"]) == (9, 6)
+    assert story(50, 40, places={100: 8, 101: 6})["tags"] == []              # only two places apart
+
+
+def test_a_winner_with_a_weaker_squad_is_an_upset():
+    m = story(50, 40, strength={100: 50.0, 101: 52.0})
+    assert (m["tags"], m["basis"]) == (["Upset"], ["weaker squad on paper (50.0 v 52.0)"])
+    assert story(50, 40, strength={100: 50.1, 101: 52.0})["tags"] == []      # not weaker enough
+
+
+def test_an_upset_can_have_both_reasons_and_still_be_a_stomping():
+    m = story(80, 40, places={100: 9, 101: 2}, strength={100: 48.0, 101: 55.5})
+    assert m["tags"] == ["Upset", "Stomping"]
+    assert m["basis"] == ["9th in the table beat 2nd", "weaker squad on paper (48.0 v 55.5)"]
+
+
+def test_the_favourite_winning_is_not_an_upset_and_neither_is_a_draw():
+    assert story(50, 40, places={100: 2, 101: 9}, strength={100: 60.0, 101: 40.0})["tags"] == []
+    assert story(50, 50, places={100: 9, 101: 2}, strength={100: 40.0, 101: 60.0})["tags"] == ["Draw"]
+
+
+def test_without_a_table_or_squads_only_the_margin_counts():
+    m = story(50, 40)                                      # e.g. the first gameweek: no table yet
+    assert (m["tags"], m["basis"], m["players"]) == ([], [], None)
+    assert (m["a"]["place"], m["a"]["strength"]) == (None, None)
+
+
+PLAYERS_SEEN = {1: {"name": "Saka"}, 2: {"name": "Palmer"}, 3: {"name": "Salah"}, 4: {"name": "Foden"},
+                5: {"name": "Bench"}}
+
+
+def test_team_players_name_the_top_two_and_a_flop():
+    stats = {1: {"points": 14, "minutes": 90}, 2: {"points": 11, "minutes": 90},
+             3: {"points": 6, "minutes": 90}, 4: {"points": -2, "minutes": 60},
+             5: {"points": 0, "minutes": 0}}
+    found = app.team_players({100: [1, 2, 3, 4, 5]}, stats, PLAYERS_SEEN)
+    assert found[100] == {"top": [{"name": "Saka", "points": 14}, {"name": "Palmer", "points": 11}],
+                          "flop": {"name": "Foden", "points": -2}}      # the bench player never played
+
+
+def test_team_players_without_a_flop_or_with_nobody_scoring():
+    stats = {1: {"points": 5, "minutes": 90}, 2: {"points": 0, "minutes": 0}}
+    found = app.team_players({100: [1, 2, 99]}, stats, PLAYERS_SEEN)    # 99 isn't a known player
+    assert found[100] == {"top": [{"name": "Saka", "points": 5}], "flop": None}
+    assert app.team_players({100: [2]}, {}, PLAYERS_SEEN)[100] == {"top": [], "flop": None}
+
+
+def scorers_for(top_a=(), top_b=(), flop_b=None):
+    def top(rows):
+        return [{"name": n, "points": p} for n, p in rows]
+
+    return {100: {"top": top(top_a), "flop": None},
+            101: {"top": top(top_b), "flop": {"name": flop_b[0], "points": flop_b[1]} if flop_b else None}}
+
+
+def test_players_line_names_the_winners_top_scorers_and_the_losers_best_and_flop():
+    scorers = scorers_for([("Saka", 14), ("Palmer", 11)], [("Haaland", 6)], ("Foden", -2))
+    assert story(70, 50, scorers=scorers)["players"] == (
+        "Saka 14 and Palmer 11 led A. B's best was Haaland on 6; Foden got -2.")
+
+
+def test_players_line_with_less_to_say():
+    assert story(70, 50, scorers=scorers_for([("Saka", 14)]))["players"] == "Saka 14 led A."
+    assert story(70, 50, scorers=scorers_for(flop_b=("Foden", 0)))["players"] == "Foden got 0."
+    same = scorers_for(top_b=[("Palmer", 1)], flop_b=("Palmer", 1))      # best and flop: say it once
+    assert story(70, 50, scorers=same)["players"] == "B's best was Palmer on 1."
+    assert story(70, 50, scorers=scorers_for())["players"] is None
+    assert story(70, 50, scorers=None)["players"] is None
+
+
+def test_players_line_for_a_draw_gives_each_sides_best():
+    scorers = scorers_for([("Saka", 12)], [("Haaland", 11)])
+    assert story(50, 50, scorers=scorers)["players"] == "A's best was Saka on 12. B's best was Haaland on 11."
+
+
+def test_final_facts_use_the_table_going_into_the_gameweek_for_upsets(monkeypatch):
+    monkeypatch.setattr(app, "UPSET_MIN_PLACES", 2)
+    strength = {100: 50.0, 101: 50.0, 102: 50.0, 103: 50.0}
+    facts = app.recap_facts(recap_league(RECAP_WEEKS), 2, "final", None, None, strength, None)
+    # going into GW2 the table was Team 0, 2, 3, 1: so Team 1 (4th) beat Team 2 (2nd)
+    # and Team 3 (3rd) beat Team 0 (1st)
+    first, second = facts["matches"]
+    assert (first["tags"], first["basis"]) == (["Upset", "Stomping"], ["4th in the table beat 2nd"])
+    assert (second["tags"], second["basis"]) == (["Upset"], ["3rd in the table beat 1st"])
+    assert first["a"]["strength"] == 50.0 and first["players"] is None
+
+
+def test_a_live_recap_has_no_stories():
+    progress = {"games": 10, "played": 6, "days": 4, "days_done": 2}
+    facts = app.recap_facts(recap_league(RECAP_WEEKS), 3, 2, progress, live_picture())
+    assert all("tags" not in m for m in facts["matches"])
+
+
 # the plain recap
 
-def test_plain_recap_for_a_finished_gameweek():
+def test_plain_recap_for_a_finished_gameweek_tells_the_story_without_listing_every_result():
     text = app.plain_recap(final_facts())
-    assert text.startswith("Gameweek 2 is done. Team 1 beat Team 2 90-50. Team 3 beat Team 0 70-60.")
-    assert "Best performances: Saka 14 (for Team 0)." in text
-    assert "Team 1 up from 4th to 1st; Team 2 down from 2nd to 4th." in text
-    assert "Next up in gameweek 3: Team 0 v Team 1." in text
-    assert text.count("\n\n") == 1                                    # the results, then the extras
+    assert text == ("Gameweek 2 is done.\n"
+                    "Biggest win: Team 1 beat Team 2 90-50, by 40 points.\n"
+                    "Closest match: Team 3 beat Team 0 70-60.\n"
+                    "Highest score: Team 1 with 90. Lowest: Team 2 with 50.")     # one talking point a line
+    assert "Table moves" not in text and "Best performances" not in text and "Next up" not in text
+
+
+def final_text(*matches):
+    return app.plain_recap(app.recap_facts(recap_league(matches), 1, "final"))
+
+
+def test_plain_recap_for_a_gameweek_with_one_match():
+    assert final_text(match(1, 10, 60, 11, 55)) == (
+        "Gameweek 1 is done.\nBiggest win: Team 0 beat Team 1 60-55, by 5 points.")
+    assert final_text(match(1, 10, 56, 11, 55)).endswith("by 1 point.")
+
+
+def test_plain_recap_when_the_closest_match_was_a_draw():
+    text = final_text(match(1, 10, 80, 11, 50), match(1, 12, 60, 13, 60))
+    assert text == ("Gameweek 1 is done.\n"
+                    "Biggest win: Team 0 beat Team 1 80-50, by 30 points.\n"
+                    "Closest match: Team 2 and Team 3 drew 60-60.\n"
+                    "Highest score: Team 0 with 80. Lowest: Team 1 with 50.")
+
+
+def test_plain_recap_with_no_results_just_says_the_gameweek_is_done():
+    assert final_text(match(1, 10, 0, 11, 0, finished=False)) == "Gameweek 1 is done."
 
 
 def test_plain_recap_for_an_early_look_is_short():
@@ -1926,6 +2243,20 @@ def test_plain_recap_while_the_gameweek_is_on_covers_every_match():
     assert "Team 0 lead Team 1 45-31." in text and "Team 2 and Team 3 are level on 20." in text
 
 
+def test_plain_recap_while_it_is_on_picks_the_biggest_lead_and_the_closest_match_with_their_stories():
+    scores = live_picture()
+    scores[100]["top"] = [{"name": "Saka", "points": 14}]
+    scores[101]["coming"] = [coming("Foden", 82.0, difficulty=2)]
+    progress = {"games": 10, "played": 6, "days": 4, "days_done": 2}
+    text = app.plain_recap(app.recap_facts(recap_league(RECAP_WEEKS), 3, 2, progress, scores))
+    assert text.split("\n") == [
+        "6 of 10 games played in gameweek 3.",
+        "Biggest lead: Team 0 lead Team 1 45-31. Team 1 have 5 to play against 2: wide open. "
+        "Saka's 14 is carrying Team 0. "
+        "Team 1 still have Foden (rated 82, home v BHA, an easy fixture) to play.",
+        "Closest: Team 2 and Team 3 are level on 20."]
+
+
 def test_plain_recap_says_so_when_the_live_scores_are_missing():
     progress = {"games": 10, "played": 6, "days": 4, "days_done": 2}
     text = app.plain_recap(app.recap_facts(recap_league(RECAP_WEEKS), 3, 2, progress, None))
@@ -1939,11 +2270,25 @@ def test_the_request_asks_for_the_right_length():
     assert "2 or 3 short paragraphs" in app.recap_request(final_facts(length="full"))
 
 
+def test_the_final_request_asks_for_the_story_and_not_the_lists_the_page_already_has():
+    text = app.recap_request(final_facts())
+    assert "The gameweek is over" in text and "don't go through them one by one" in text
+    assert '"highlights"' in text and '"biggest_win"' in text and '"moves"' in text
+    assert "star players" not in text and "next week" not in text and "next_up" not in text
+
+
 def test_the_request_for_a_live_recap_explains_the_outlook_words():
     progress = {"games": 10, "played": 6, "days": 4, "days_done": 2}
     live = app.recap_request(app.recap_facts(recap_league(RECAP_WEEKS), 3, 2, progress, live_picture()))
     assert "still being played" in live and "'needs a miracle'" in live and "auto-subs" in live
     assert "The gameweek is over" in app.recap_request(final_facts())
+
+
+def test_the_live_request_asks_for_who_is_carrying_and_who_is_still_to_come():
+    progress = {"games": 10, "played": 6, "days": 4, "days_done": 2}
+    text = app.recap_request(app.recap_facts(recap_league(RECAP_WEEKS), 3, 2, progress, live_picture()))
+    assert "story line" in text and "carrying" in text and "luck" in text and "pick the two or three" in text
+    assert "Only mention players that are in the facts" in text
 
 
 def test_the_request_carries_the_facts_but_leaves_out_empty_ones():
@@ -2073,13 +2418,17 @@ def recap_world(monkeypatch):
         "live": {"elements": {"1": {"stats": {"total_points": 8, "minutes": 90}},
                               "2": {"stats": {"total_points": 3, "minutes": 90}},
                               "9": {"stats": {"total_points": 20, "minutes": 90}}}},
+        "calls": [],     # every address asked for, so a test can check what a recap did and didn't need
+        "owners": True,  # False takes the squads feed down
     }
     names = {1: "Saka", 2: "Palmer", 3: "Salah", 4: "Foden"}
     elements = [{**make_player(i, team=(i - 1) % 4 + 1), "web_name": names.get(i, f"Player{i}"),
                  "points_per_game": "5.0"} for i in range(1, 10)]
     starters = {100: [1, 3], 101: [2, 4], 102: [5, 7], 103: [6, 8]}
+    owner_of = {pid: team_id for team_id, ids in starters.items() for pid in ids}
 
     def fake(url):
+        world["calls"].append(url)
         if "fantasy" in url:                                              # the classic site
             if "bootstrap" in url:
                 return {"teams": RECAP_CLUBS}
@@ -2087,7 +2436,12 @@ def recap_world(monkeypatch):
                 raise requests.ConnectionError("down")
             return world["fixtures"]
         if url.endswith("/bootstrap-static"):
-            return {"events": {"current": 3, "next": 4}, "teams": RECAP_CLUBS, "elements": elements}
+            return {"events": {"current": 3, "next": 4}, "teams": RECAP_CLUBS, "elements": elements,
+                    "element_types": [{"id": 3, "singular_name_short": "MID"}]}
+        if url.endswith("/element-status"):
+            if not world["owners"]:
+                raise requests.HTTPError(response=type("R", (), {"status_code": 503})())
+            return {"element_status": [{"element": pid, "owner": owner_of.get(pid)} for pid in range(1, 10)]}
         if url.endswith("/details"):
             return recap_league(world["matches"])
         if "/live" in url:
@@ -2111,6 +2465,11 @@ def get_recap_page(league=123):
     return app.app.test_client().get(f"/api/league/{league}/recap").get_json()
 
 
+def asked_for_live_data(world):
+    """Did the recap ask the Draft site for live points or anyone's picks?"""
+    return any("/live" in url or "/entry/" in url for url in world["calls"])
+
+
 def test_recap_route_shows_the_live_scoreboard_with_a_plain_recap(recap_world):
     data = get_recap_page()
     recap = data["recap"]
@@ -2123,7 +2482,9 @@ def test_recap_route_shows_the_live_scoreboard_with_a_plain_recap(recap_world):
     assert (first["a"]["left"], first["b"]["left"], first["outlook"]) == (1, 1, "still alive")
     assert (second["leader"], second["outlook"]) == (None, "level")
     assert recap["stars"] == [{"player": "Saka", "points": 8, "team": "Team 0"}]
-    assert recap["text"].startswith("1 of 2 games played in gameweek 3. Team 0 lead Team 1 8-3.")
+    assert recap["text"].startswith(
+        "1 of 2 games played in gameweek 3.\nBiggest lead: Team 0 lead Team 1 8-3.")
+    assert "Saka's 8 is carrying Team 0. Team 1 still have Foden (" in first["story"]
 
 
 def test_recap_route_uses_the_ai_for_a_listed_league(recap_world, monkeypatch):
@@ -2140,7 +2501,11 @@ def test_recap_route_gives_the_final_recap_once_the_official_results_are_in(reca
     recap = get_recap_page()["recap"]
     assert (recap["gameweek"], recap["stage"], recap["label"]) == (3, "final", "Final recap")
     assert [(m["a"]["points"], m["b"]["points"]) for m in recap["matches"]] == [(70, 60), (50, 40)]
-    assert recap["text"].startswith("Gameweek 3 is done.")
+    assert recap["text"].startswith("Gameweek 3 is done.\nBiggest win: ")
+    assert recap["stars"] == []                                    # a final recap has no stars
+    # Teams 1 and 2 moved two places each; of the two one-place movers only three moves are listed in all
+    assert {m["team"] for m in recap["moves"][:2]} == {"Team 1", "Team 2"} and len(recap["moves"]) == 3
+    assert asked_for_live_data(recap_world)                        # who scored what: the live points
 
 
 def test_recap_route_keeps_last_weeks_final_recap_until_a_game_finishes(recap_world):
@@ -2155,6 +2520,45 @@ def test_recap_route_still_works_when_the_fixtures_feed_is_down(recap_world):
     recap_world["fixtures"] = None
     recap = get_recap_page()["recap"]
     assert (recap["gameweek"], recap["label"]) == (2, "Final recap")
+
+
+def test_recap_route_tags_the_matches_and_names_the_players(recap_world):
+    recap_world["matches"] = RECAP_WEEKS[:4] + [match(3, 10, 90, 11, 60), match(3, 12, 50, 13, 48)]
+    first, second = get_recap_page()["recap"]["matches"]
+    assert first["tags"] == ["Stomping"] and second["tags"] == ["Nail-biter"]
+    # the bench player's 20 points aren't counted
+    assert first["players"] == "Saka 8 led Team 0. Team 1's best was Palmer on 3."
+    assert second["players"] is None                                                  # nobody scored a point
+    assert first["a"]["place"] == 2 and first["b"]["place"] == 1       # the table going into GW3
+    assert isinstance(first["a"]["strength"], float)
+
+
+def test_recap_route_final_still_tags_the_matches_when_the_live_feed_is_down(recap_world):
+    recap_world["matches"] = RECAP_WEEKS[:4] + [match(3, 10, 90, 11, 60), match(3, 12, 50, 13, 48)]
+    recap_world["live"] = None
+    first, second = get_recap_page()["recap"]["matches"]
+    assert first["tags"] == ["Stomping"] and second["tags"] == ["Nail-biter"]
+    assert first["players"] is None and second["players"] is None
+
+
+def test_recap_route_final_still_works_when_the_squads_feed_is_down(recap_world):
+    recap_world["matches"] = RECAP_WEEKS[:4] + [match(3, 10, 90, 11, 60), match(3, 12, 50, 13, 48)]
+    recap_world["owners"] = False
+    first = get_recap_page()["recap"]["matches"][0]
+    assert first["tags"] == ["Stomping"] and first["a"]["strength"] is None
+    assert first["players"] == "Saka 8 led Team 0. Team 1's best was Palmer on 3."
+
+
+def test_recap_route_live_story_keeps_what_it_knows_when_ratings_are_unavailable(recap_world):
+    recap_world["owners"] = False                       # load_league needs this feed, so no ratings
+    first = get_recap_page()["recap"]["matches"][0]
+    assert first["story"] == "Saka's 8 is carrying Team 0."    # nothing claimed about who's to come, or luck
+    assert first["b"]["coming"][0]["rating"] is None
+
+
+def test_recap_route_asks_for_live_data_while_the_gameweek_is_on(recap_world):
+    get_recap_page()
+    assert asked_for_live_data(recap_world)
 
 
 def test_recap_route_writes_with_less_when_the_live_feed_is_down(recap_world):
