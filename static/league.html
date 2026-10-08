@@ -424,8 +424,9 @@ function boardRow(m) {
   const chips = (m.tags || []).map(t => `<span class="chip ${t.toLowerCase().replace("-", "")}">${esc(t)}</span>`).join("");
   const why = (m.basis || []).length ? `<div class="extra">Upset: ${m.basis.map(esc).join("; ")}.</div>` : "";
   const who = m.players ? `<div class="extra">${esc(m.players)}</div>` : "";
+  const story = m.story ? `<div class="extra">${esc(m.story)}</div>` : "";   // while it's on: who's carrying, who's still to come
   return `<li><div class="pairing">${name(a)} ${a.points} – ${b.points} ${name(b)}</div>`
-    + `<div class="state">${note}${chips}</div>${why}${who}</li>`;
+    + `<div class="state">${note}${chips}</div>${why}${who}${story}</li>`;
 }
 
 function renderRecap(data) {
