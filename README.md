@@ -7,7 +7,7 @@ league, rates every player, and shows you:
 - **Trade analyzer** (its own page, `/trade`): pick players from your squad and another manager's, and see how the trade changes both teams' best eleven, and whether it's a fair offer they might accept
 - **League hub** (its own page, `/league?league=<league id>`: the one link to send to the whole league). The normal link is view-only: it opens on two choices, **Banter** and **Charts**, and loads only what a friend picks, with no link into the rest of Draft Scout. Add `&full=1` to get the full version for one friend: it also has a **My team** choice and a way back to the main page, and shows both links to copy. This is a convenience, not a lock (anyone who adds `&full=1` gets it). Add `&tab=banter` or `&tab=charts` to open straight on one. Old `/banter` and `/charts` links still work and redirect here. The address never has a team ID in it, so a link copied from the address bar is safe to send (your own team is highlighted from the team this browser last used). Banter: three cards for the coming gameweek (the hot match of the week, a "Battle for 3rd" and a "Wooden spoon watch", each a different match, so nobody is on two), and a **luck chart** (each manager's real league points against the points they'd have if they'd played everyone every week: bars right are lucky, left are unlucky) and facts to argue about (unluckiest and luckiest manager, harshest loss, winning and losing runs, biggest beating, closest match, lowest and best scores). Two facts show at first, with a button for the rest. Mild teasing, all worked out from the numbers
 - **Free agents**: a sortable, filterable table of everyone unowned in your league, with both ratings (next 5 and until the break) and upcoming fixtures. It shows the top 15 at first, with a button for more
-- **Charts** (in the league hub; head-to-head leagues only): the **league race** (each manager's league points climbing from 0 after every gameweek, plus a grid of weekly scores shaded against the league average with each week's W, D or L), a **head-to-head grid** (every manager's won-drawn-lost record against every other manager this season, with the points when you select a row), **points scored and conceded** (one dot per manager, so you can see who's strong and who's been lucky), and **weekly scores** (each manager's lowest, average and best week, so you can see who's steady and who's boom or bust)
+- **Charts** (in the league hub; head-to-head leagues only): the **league race** (each manager's league points climbing from 0 after every gameweek, plus a grid of weekly scores shaded against the league average with each week's W, D or L), a **head-to-head grid** (every manager's won-drawn-lost record against every other manager this season, with the points when you select a row), **points scored and conceded** (one dot per manager, so you can see who's strong and who's been lucky), and **weekly scores** (each manager's lowest, average and best week, so you can see who's steady and who's boom or bust), and **squad strength** (every manager's best eleven ranked by its average rating, the same number as League squads on the main page, with the Next 5 / Until the break toggle; select a row to see their eleven and bench)
 - **Rivalries** (in the league hub): pick two managers and see every match between them, who won, the overall record and a bar chart of the margin in each meeting. Seasons are saved automatically from now on (see Saved seasons and Rivalries below), so next year this shows this season too
 - **Weekly recap** (in the league hub; head-to-head leagues only): the gameweek in words, updated as the games finish. While a gameweek is on, it says who's ahead in each match, how many players each side still has to play, how the side that's behind is placed ("wide open", "still alive", "a long shot", "needs a miracle" or "all but over"), who is carrying the leader and which big names the other side still has to come (or that they'll need luck). Once the official results are in, the final recap picks out the talking points of the week (the biggest win, the closest match, the highest and lowest score), lists who moved up or down the table as bullet points, and then lists every result. Each result gets a tag where it earns one (**Upset**, **Stomping**, **Nail-biter**, **Draw**), the reason an upset counts, and a line on who made the difference (for example "Saka 14 and Salah 11 led Team A. Team B's best was Palmer on 6"). A new recap is written when a match day finishes (about 3 to 5 a gameweek, with a short one after the first games), and the scores behind it are shown underneath. Draft Scout works out every number itself; an AI only chooses the words, and without the AI the page shows a plain version of the same recap (see The weekly recap below)
 - **Next 5 / Until the break**: a toggle that switches every rating on the page between the next 5 gameweeks and everything up to the next international break
@@ -189,7 +189,10 @@ can't get a score wrong:
   "Foden (rated 82, home v BHA, an easy fixture)". If the side behind has no big
   name left it says they'll need luck, and if they have nobody left to play it
   says the odds are with the leader. Nothing is said about luck when the
-  ratings couldn't be loaded.
+  ratings couldn't be loaded. These story lines sit in the scoreboard under the
+  written text; the written text itself gives the talking points so far (the
+  biggest lead, the closest match and the highest score so far) and doesn't
+  repeat the scoreboard.
 - A new recap is written each time a match day finishes, so a gameweek gets
   about 3 to 5. After only a few games (a lone Friday game, say) it's a short
   early look of 2 or 3 sentences. When the official results are in there's a
@@ -222,6 +225,15 @@ or if the AI call fails, the page shows a plain version of the same recap, so
 it never breaks. Only leagues listed in `RECAP_LEAGUES` (top of `app.py`) get
 AI recaps, because each one costs a little (a cent or so); other leagues get
 the plain version.
+
+Team (manager) names stand out in the written text: team names are often several
+words, or even contain a footballer's name, so they blur into the sentence around
+them. The server wraps each one in `**` (for example `**Wattu Wanderers** lead
+**Fat Ben** 45-31`), the AI is told to do the same, and the pages show the name in
+bold. Footballers are plain, with their points in brackets after, for example
+`Saka (14) is carrying **Team A**`. The same bold is used for team names in the
+hub's banter facts, the table moves, the live scoreboard notes and the rivalry
+sentences.
 
 Settings at the top of `app.py`: `RECAP_LEAGUES`, `RECAP_MAX_LIVE_STAGES`,
 `RECAP_SHORT_SHARE`, `RECAP_EFFORT`, `RECAP_TIMEOUT_SECONDS`,
