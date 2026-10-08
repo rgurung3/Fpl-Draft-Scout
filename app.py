@@ -360,6 +360,13 @@ PAIRS_PER_POSITION = 2
 MAX_TARGETS = 5
 SMALL_SAMPLE_MINUTES = 300   # a player with fewer minutes than this gets a "too early to trust" note
 RECENT_GAMEWEEKS = 4         # how many gameweeks of minutes to show for the players in a swap
+# A "worth holding" note for a player we suggest dropping: he scored this many points in one of the
+# last HOLD_SEASONS finished seasons (in at least HOLD_MIN_MINUTES minutes), and now he's out or in a slump.
+# The bars are roughly the top quarter of players at each position in my league.
+HOLD_POINTS = {"GKP": 135, "DEF": 140, "MID": 150, "FWD": 130}
+HOLD_MIN_MINUTES = 1500
+HOLD_SEASONS = 2
+HOLD_SLUMP_SHARE = 0.7       # a slump = points per 90 this season under this share of his proven rate
 
 
 def by_score(players):
@@ -474,6 +481,114 @@ def recent_minutes(ids, current_gw):
     with ThreadPoolExecutor(max_workers=8) as pool:
         found = dict(pool.map(one, set(ids)))
     return {"gws": gws, "minutes": {pid: mins for pid, mins in found.items() if mins is not None}}
+
+
+def past_seasons(players):
+    """
+    Each player's earlier seasons, from the classic site (the Draft site keeps none):
+    {player id: [{"season": "2025/26", "points": 168, "minutes": 2674}, ...]}, oldest first.
+    The two sites number players differently, so they're matched by `code`, which is the same
+    on both. A new player has an empty list. A player the classic site doesn't know, or whose
+    history can't be fetched, is left out (so nothing is said about him). One request each.
+    """
+    try:
+        classic_id = {e["code"]: e["id"] for e in get_json(f"{CLASSIC}/bootstrap-static/")["elements"]}
+    except (requests.RequestException, KeyError, TypeError, ValueError):
+        return {}
+
+    def one(p):
+        classic = classic_id.get(p.get("code"))
+        if classic is None:
+            return p["id"], None
+        try:
+            rows = get_json(f"{CLASSIC}/element-summary/{classic}/")["history_past"]
+            return p["id"], [{"season": r["season_name"], "points": int(num(r.get("total_points"))),
+                              "minutes": int(num(r.get("minutes")))} for r in rows]
+        except (requests.RequestException, KeyError, TypeError, ValueError):
+            return p["id"], None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        found = dict(pool.map(one, players))
+    return {pid: rows for pid, rows in found.items() if rows is not None}
+
+
+def recent_season_names(today=None):
+    """The classic site's names for the last HOLD_SEASONS finished seasons, newest first: ["2025/26", ...]."""
+    start = int(season_label(today)[:4])
+    return [f"{y}/{(y + 1) % 100:02d}" for y in range(start - 1, start - 1 - HOLD_SEASONS, -1)]
+
+
+def hold_case(player, seasons, today=None):
+    """
+    A reason to think twice before dropping a player, or None. He has to be proven (in one of the
+    last HOLD_SEASONS seasons he played HOLD_MIN_MINUTES or more and scored at least the bar for his
+    position, HOLD_POINTS) and the drop has to look temporary: he's out or doubtful now, or his points
+    per 90 this season (once he has MIN_MINUTES) are under HOLD_SLUMP_SHARE of his proven rate.
+    Returns {"kind": "hold", "text", "season", "points", "minutes"} for his best qualifying season.
+    The FPL feeds only keep season totals for past seasons, so this says he's a proven scorer,
+    not that he scores more late in a season.
+    """
+    names = recent_season_names(today)
+    bar = HOLD_POINTS.get(player["pos"])
+    proven = [s for s in seasons if s["season"] in names and s["minutes"] >= HOLD_MIN_MINUTES
+              and bar is not None and s["points"] >= bar]
+    if not proven:
+        return None
+    best = max(proven, key=lambda s: s["points"])
+    then = best["points"] / best["minutes"] * 90
+
+    minutes_now = player.get("minutes", 0)
+    now = player.get("total", 0) / minutes_now * 90 if minutes_now >= MIN_MINUTES else None
+    out = player.get("chance", 100) < 100
+    slump = now is not None and now < HOLD_SLUMP_SHARE * then
+    if not (out or slump):
+        return None
+
+    when = "last season" if best["season"] == names[0] else f"in {best['season']}"
+    text = (f"{player['name']} scored {best['points']} points {when} "
+            f"({best['minutes']:,} minutes, {then:.1f} per 90).")
+    if slump:
+        text += f" This season he's on {now:.1f} per 90."
+    if out:
+        back = return_date(player)
+        text += f" Expected back {back.day} {back:%b}." if back else " There's no return date yet."
+    text += " He could be worth waiting for, but holding him uses a roster spot. Press Keep to hold him."
+    return {"kind": "hold", "text": text, "season": best["season"],
+            "points": best["points"], "minutes": best["minutes"]}
+
+
+def new_signing(player, seasons, recent):
+    """
+    A note for a player new to the Premier League (no minutes in any past season on record)
+    whose minutes are going up: the last half of `recent` (his minutes in the latest
+    gameweeks) adds up to more than the first half, and he played in the latest one.
+    Says it's too early to judge him. Facts only: it doesn't predict he'll score more.
+    """
+    if any(s["minutes"] > 0 for s in seasons) or not recent or recent[-1] <= 0:
+        return None
+    half = len(recent) // 2
+    if sum(recent[half:]) <= sum(recent[:half]):
+        return None
+    mins = ", ".join(str(m) for m in recent)
+    return {"kind": "new", "text": f"New to the Premier League, and {player['name']}'s minutes are going up "
+                                   f"({mins}). It's too early to judge him."}
+
+
+def keep_notes(drops, seasons, recent, today=None):
+    """
+    {player id: note} for the players we'd drop that have a reason to hold (hold_case) or are new and
+    settling in (new_signing). `seasons` is past_seasons(drops); `recent` is {id: minutes in the latest
+    gameweeks}. A player with no history fetched gets no note.
+    """
+    notes = {}
+    for p in drops:
+        past = seasons.get(p["id"])
+        if past is None:
+            continue
+        note = hold_case(p, past, today) or new_signing(p, past, recent.get(p["id"], []))
+        if note:
+            notes[p["id"]] = note
+    return notes
 
 
 def kept_ids(text):
@@ -1886,6 +2001,7 @@ def load_league(league_id, view="week"):
         s = ratings[view][el["id"]]
         players.append({
             "id": el["id"],
+            "code": el.get("code"),   # the same on the classic site, where the ids differ
             "name": el.get("web_name"),
             "team": team_short.get(el["team"], "?"),
             "pos": positions.get(el["element_type"], "?"),
@@ -2160,7 +2276,7 @@ def team(entry_id):
     marked as "me". If the team is in more than one league, ?league=<id> picks one.
     ?view=season rates everyone until the next break instead of over the next 5 gameweeks.
     ?keep=12,34 protects those players from being suggested as a drop.
-    ?swaps=0 skips the waiver suggestions (and the extra requests they need).
+    ?swaps=0 skips the waiver suggestions (and the extra requests they need, including past seasons).
     """
     try:
         data, leagues = league_for_team(entry_id, request.args.get("league", type=int),
@@ -2178,6 +2294,10 @@ def team(entry_id):
     # the last few gameweeks of minutes for the players in the swaps (one request each)
     in_swaps = [p for t in data["waiver_targets"] for p in (t["drop"], t["claim"])]
     data["recent"] = recent_minutes(in_swaps, data["current_gw"])
+    # a reason to hold, or a new signing settling in, for the players we'd drop (one request each)
+    dropped = {t["drop"] for t in data["waiver_targets"]}
+    drops = [p for p in data["players"] if p["id"] in dropped]
+    data["keep_notes"] = keep_notes(drops, past_seasons(drops), data["recent"]["minutes"])
     return jsonify(data)
 
 
