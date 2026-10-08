@@ -741,7 +741,7 @@ def test_reasons_name_the_biggest_differences_first():
                               {"text": "better form", "points": 12},
                               {"text": "more minutes", "points": 10}]
     # the one thing the dropped player still does better
-    assert why["against"] == {"text": "P1 has more attacking threat", "points": -6}
+    assert why["against"] == {"text": "**P1** has more attacking threat", "points": -6}
 
 
 def test_small_differences_are_left_out():
@@ -765,7 +765,7 @@ def test_reasons_use_the_season_pieces():
     assert [r["text"] for r in reasons] == ["more creativity", "better clean-sheet chances"]
 
 
-@pytest.mark.parametrize("chance,text", [(50, "P1 is 50% to play"), (0, "P1 is out")])
+@pytest.mark.parametrize("chance,text", [(50, "**P1** is 50% to play"), (0, "**P1** is out")])
 def test_drop_injury_doubt_gets_its_own_line(chance, text):
     drop = rated(1, "DEF", 20, owner=100, chance=chance, breakdown=piece(form=40, avail=-20))
     claim = rated(2, "DEF", 40, breakdown=piece(form=40))
@@ -1965,29 +1965,30 @@ def live_row(a_points, b_points, a_left=3, b_left=3, a_top=(), b_top=(), a_comin
 
 def test_coming_text_gives_the_rating_the_fixture_and_whether_it_is_easy_or_live():
     assert app.coming_text(coming("Foden", 82.4, difficulty=2)) == (
-        "Foden (rated 82, home v BHA, an easy fixture)")
+        "**Foden** (rated 82, home v BHA, an easy fixture)")
     assert app.coming_text(coming("Salah", 71.0, opp="ARS", home=False, difficulty=4, playing=True)) == (
-        "Salah (rated 71, away at ARS, playing now)")
+        "**Salah** (rated 71, away at ARS, playing now)")
     assert app.coming_text({"name": "X", "rating": 50.0, "opp": None, "home": None, "difficulty": None,
-                            "playing": False}) == "X (rated 50)"
+                            "playing": False}) == "**X** (rated 50)"
 
 
 def test_the_story_names_who_is_carrying_and_the_big_names_still_to_come():
     m = live_row(45, 31, a_top=[{"name": "Saka", "points": 14}],
                  b_coming=[coming("Foden", 82.0, difficulty=2), coming("Palmer", 40.0, standout=False)])
-    assert app.live_story(m) == ("Saka's 14 is carrying A. "
-                                 "B still have Foden (rated 82, home v BHA, an easy fixture) to play.")
+    assert app.live_story(m) == ("**Saka** (14) is carrying A. "
+                                 "B still have **Foden** (rated 82, home v BHA, an easy fixture) to play.")
 
 
 def test_the_story_says_luck_when_the_side_behind_has_no_big_names_left():
     m = live_row(45, 31, a_top=[{"name": "Saka", "points": 14}],
                  b_coming=[coming("Palmer", 40.0, standout=False)])
-    assert app.live_story(m) == "Saka's 14 is carrying A. No big names left for B, so they'll need luck."
+    assert app.live_story(m) == "**Saka** (14) is carrying A. No big names left for B, so they'll need luck."
 
 
 def test_the_story_says_the_odds_are_with_the_leader_when_the_other_side_has_nobody_left():
     m = live_row(60, 22, b_left=0, a_top=[{"name": "Saka", "points": 14}])
-    assert app.live_story(m) == "Saka's 14 is carrying A. B have nobody left to play: the odds are with A."
+    assert app.live_story(m) == (
+        "**Saka** (14) is carrying A. B have nobody left to play: the odds are with A.")
 
 
 def test_a_small_score_is_not_called_carrying():
@@ -1997,8 +1998,8 @@ def test_a_small_score_is_not_called_carrying():
 
 def test_a_level_match_mentions_each_sides_big_names_or_says_it_is_down_to_luck():
     both = live_row(20, 20, a_coming=[coming("Saka", 80.0)], b_coming=[coming("Foden", 82.0)])
-    assert app.live_story(both) == ("A still have Saka (rated 80, home v BHA). "
-                                    "B still have Foden (rated 82, home v BHA).")
+    assert app.live_story(both) == ("A still have **Saka** (rated 80, home v BHA). "
+                                    "B still have **Foden** (rated 82, home v BHA).")
     quiet = live_row(20, 20, a_coming=[coming("X", 40.0, standout=False)],
                      b_coming=[coming("Y", 41.0, standout=False)])
     assert app.live_story(quiet) == "Nothing between them and no big names to come, so it's down to luck."
@@ -2009,7 +2010,7 @@ def test_the_story_claims_nothing_about_luck_when_ratings_are_unknown():
     assert app.live_story(live_row(45, 31, b_coming=unknown)) is None
     assert app.live_story(live_row(20, 20, a_coming=unknown, b_coming=unknown)) is None
     assert app.live_story(live_row(45, 31, a_top=[{"name": "Saka", "points": 14}], b_coming=unknown)) == (
-        "Saka's 14 is carrying A.")
+        "**Saka** (14) is carrying A.")
 
 
 def test_live_matches_carry_each_sides_top_scorers_and_best_to_come():
@@ -2017,7 +2018,7 @@ def test_live_matches_carry_each_sides_top_scorers_and_best_to_come():
     scores[101]["coming"] = [coming("Foden", 82.0)]
     first, second = app.recap_matches(recap_league(RECAP_WEEKS), 3, scores)
     assert first["b"]["coming"][0]["name"] == "Foden" and first["a"]["top"] == []
-    assert first["story"] == "Team 1 still have Foden (rated 82, home v BHA) to play."
+    assert first["story"] == "Team 1 still have **Foden** (rated 82, home v BHA) to play."
     assert second["story"] is None
 
 
@@ -2159,21 +2160,22 @@ def scorers_for(top_a=(), top_b=(), flop_b=None):
 def test_players_line_names_the_winners_top_scorers_and_the_losers_best_and_flop():
     scorers = scorers_for([("Saka", 14), ("Palmer", 11)], [("Haaland", 6)], ("Foden", -2))
     assert story(70, 50, scorers=scorers)["players"] == (
-        "Saka 14 and Palmer 11 led A. B's best was Haaland on 6; Foden got -2.")
+        "**Saka** (14) and **Palmer** (11) led A. B's best was **Haaland** (6); **Foden** (-2) flopped.")
 
 
 def test_players_line_with_less_to_say():
-    assert story(70, 50, scorers=scorers_for([("Saka", 14)]))["players"] == "Saka 14 led A."
-    assert story(70, 50, scorers=scorers_for(flop_b=("Foden", 0)))["players"] == "Foden got 0."
+    assert story(70, 50, scorers=scorers_for([("Saka", 14)]))["players"] == "**Saka** (14) led A."
+    assert story(70, 50, scorers=scorers_for(flop_b=("Foden", 0)))["players"] == "**Foden** (0) flopped."
     same = scorers_for(top_b=[("Palmer", 1)], flop_b=("Palmer", 1))      # best and flop: say it once
-    assert story(70, 50, scorers=same)["players"] == "B's best was Palmer on 1."
+    assert story(70, 50, scorers=same)["players"] == "B's best was **Palmer** (1)."
     assert story(70, 50, scorers=scorers_for())["players"] is None
     assert story(70, 50, scorers=None)["players"] is None
 
 
 def test_players_line_for_a_draw_gives_each_sides_best():
     scorers = scorers_for([("Saka", 12)], [("Haaland", 11)])
-    assert story(50, 50, scorers=scorers)["players"] == "A's best was Saka on 12. B's best was Haaland on 11."
+    assert story(50, 50, scorers=scorers)["players"] == (
+        "A's best was **Saka** (12). B's best was **Haaland** (11).")
 
 
 def test_final_facts_use_the_table_going_into_the_gameweek_for_upsets(monkeypatch):
@@ -2252,8 +2254,8 @@ def test_plain_recap_while_it_is_on_picks_the_biggest_lead_and_the_closest_match
     assert text.split("\n") == [
         "6 of 10 games played in gameweek 3.",
         "Biggest lead: Team 0 lead Team 1 45-31. Team 1 have 5 to play against 2: wide open. "
-        "Saka's 14 is carrying Team 0. "
-        "Team 1 still have Foden (rated 82, home v BHA, an easy fixture) to play.",
+        "**Saka** (14) is carrying Team 0. "
+        "Team 1 still have **Foden** (rated 82, home v BHA, an easy fixture) to play.",
         "Closest: Team 2 and Team 3 are level on 20."]
 
 
@@ -2484,7 +2486,7 @@ def test_recap_route_shows_the_live_scoreboard_with_a_plain_recap(recap_world):
     assert recap["stars"] == [{"player": "Saka", "points": 8, "team": "Team 0"}]
     assert recap["text"].startswith(
         "1 of 2 games played in gameweek 3.\nBiggest lead: Team 0 lead Team 1 8-3.")
-    assert "Saka's 8 is carrying Team 0. Team 1 still have Foden (" in first["story"]
+    assert "**Saka** (8) is carrying Team 0. Team 1 still have **Foden** (" in first["story"]
 
 
 def test_recap_route_uses_the_ai_for_a_listed_league(recap_world, monkeypatch):
@@ -2527,7 +2529,7 @@ def test_recap_route_tags_the_matches_and_names_the_players(recap_world):
     first, second = get_recap_page()["recap"]["matches"]
     assert first["tags"] == ["Stomping"] and second["tags"] == ["Nail-biter"]
     # the bench player's 20 points aren't counted
-    assert first["players"] == "Saka 8 led Team 0. Team 1's best was Palmer on 3."
+    assert first["players"] == "**Saka** (8) led Team 0. Team 1's best was **Palmer** (3)."
     assert second["players"] is None                                                  # nobody scored a point
     assert first["a"]["place"] == 2 and first["b"]["place"] == 1       # the table going into GW3
     assert isinstance(first["a"]["strength"], float)
@@ -2546,13 +2548,13 @@ def test_recap_route_final_still_works_when_the_squads_feed_is_down(recap_world)
     recap_world["owners"] = False
     first = get_recap_page()["recap"]["matches"][0]
     assert first["tags"] == ["Stomping"] and first["a"]["strength"] is None
-    assert first["players"] == "Saka 8 led Team 0. Team 1's best was Palmer on 3."
+    assert first["players"] == "**Saka** (8) led Team 0. Team 1's best was **Palmer** (3)."
 
 
 def test_recap_route_live_story_keeps_what_it_knows_when_ratings_are_unavailable(recap_world):
     recap_world["owners"] = False                       # load_league needs this feed, so no ratings
     first = get_recap_page()["recap"]["matches"][0]
-    assert first["story"] == "Saka's 8 is carrying Team 0."    # nothing claimed about who's to come, or luck
+    assert first["story"] == "**Saka** (8) is carrying Team 0."   # nothing about who's to come, or luck
     assert first["b"]["coming"][0]["rating"] is None
 
 
@@ -2596,3 +2598,91 @@ def test_league_hub_offers_the_recap_to_everyone():
     res.close()
     assert '<button class="choice" type="button" data-tab="recap"' in page         # not fullonly
     assert 'id="panel-recap"' in page and "function renderRecap" in page
+
+
+# ---------------------------------------------------------------- squads on the league page
+
+def squad_data():
+    """What load_league gives, cut down to what league_squads reads: two managers and a few players."""
+    def player(pid, name, pos, score, owner):
+        return {"id": pid, "name": name, "pos": pos, "team": "ARS", "score": score, "owner": owner}
+
+    return {
+        "view": "week", "windows": {"week": {"from": 7, "to": 11}, "season": {"from": 7, "to": 13}},
+        "players": [player(1, "Raya", "GKP", 70.0, 100), player(2, "Saka", "MID", 80.0, 100),
+                    player(3, "Gabriel", "DEF", 60.0, 100), player(4, "Haaland", "FWD", 90.0, 100),
+                    player(5, "Odegaard", "MID", 55.0, 100), player(6, "Bench", "DEF", 30.0, 100),
+                    player(7, "Palmer", "MID", 75.0, 200), player(8, "Free", "FWD", 99.0, None)],
+        "managers": [
+            {"entry_id": 100, "team_name": "Weaker FC", "manager": "A B", "strength": 51.0,
+             "formation": "1-2-1", "best_xi": [1, 2, 3, 4, 5]},
+            {"entry_id": 200, "team_name": "Stronger FC", "manager": "C D", "strength": 60.0,
+             "formation": "0-1-0", "best_xi": [7]},
+            {"entry_id": 300, "team_name": "Empty FC", "manager": "E F", "strength": 0,
+             "formation": "", "best_xi": []}]}
+
+
+def test_squads_rank_managers_by_strength_with_their_eleven_by_position_and_their_bench():
+    out = app.league_squads(squad_data())
+    assert [m["team"] for m in out["managers"]] == ["Stronger FC", "Weaker FC", "Empty FC"]
+    weaker = out["managers"][1]
+    assert weaker["strength"] == 51.0 and weaker["formation"] == "1-2-1"
+    assert [(p["name"], p["pos"]) for p in weaker["best_xi"]] == [
+        ("Raya", "GKP"), ("Gabriel", "DEF"), ("Saka", "MID"), ("Odegaard", "MID"), ("Haaland", "FWD")]
+    assert weaker["best_xi"][0] == {"name": "Raya", "pos": "GKP", "club": "ARS", "rating": 70.0}
+    assert [p["name"] for p in weaker["bench"]] == ["Bench"]
+    assert (out["view"], out["windows"]["week"]) == ("week", {"from": 7, "to": 11})
+
+
+def test_squads_leave_out_players_nobody_owns_and_cope_with_an_empty_squad():
+    out = app.league_squads(squad_data())
+    everyone = [p["name"] for m in out["managers"] for p in m["best_xi"] + m["bench"]]
+    assert "Free" not in everyone
+    empty = out["managers"][2]
+    assert empty["best_xi"] == [] and empty["bench"] == []
+
+
+def test_squads_route_returns_the_ranking_for_either_view(two_managers):
+    data = app.app.test_client().get("/api/league/123/squads").get_json()
+    assert data["league_name"] == "Test League" and data["view"] == "week"
+    assert {m["entry_id"] for m in data["managers"]} == {100, 200}
+    assert data["managers"] == sorted(data["managers"], key=lambda m: -m["strength"])
+    assert app.app.test_client().get("/api/league/123/squads?view=season").get_json()["view"] == "season"
+
+
+def test_squads_route_gives_a_friendly_error(monkeypatch):
+    def not_found(url):
+        raise requests.HTTPError(response=type("R", (), {"status_code": 404})())
+
+    monkeypatch.setattr(app, "get_json", not_found)
+    res = app.app.test_client().get("/api/league/999/squads")
+    assert res.status_code == 400 and "No Draft league found" in res.get_json()["error"]
+
+
+def test_league_hub_charts_page_has_the_squad_strength_chart_for_everyone():
+    res = app.app.test_client().get("/league?league=123")
+    page = res.data.decode()
+    res.close()
+    assert 'id="squadsSection"' in page and "function renderSquads" in page
+    where = [page.index(f'id="{name}"') for name in ("panel-charts", "squadsSection", "panel-rivalries")]
+    assert where == sorted(where)                              # inside the Charts page, before Rivalries
+    assert 'data-view="season"' in page                       # the Next 5 / Until the break toggle
+
+
+# ---------------------------------------------------------------- player names stand out
+
+def test_the_shared_script_turns_marked_names_into_bold_and_is_used_by_both_pages():
+    res = app.app.test_client().get("/static/common.js")
+    script = res.data.decode()
+    res.close()
+    assert "function rich" in script and "<strong class=" in script
+    for path in ("/", "/league?league=123"):
+        res = app.app.test_client().get(path)
+        page = res.data.decode()
+        res.close()
+        assert '<script src="/static/common.js"></script>' in page and "rich(" in page
+
+
+def test_the_ai_is_told_to_mark_player_names_and_give_points_in_brackets():
+    assert "**Saka** (14)" in app.RECAP_SYSTEM and "never for team names" in app.RECAP_SYSTEM
+

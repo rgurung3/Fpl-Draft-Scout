@@ -117,6 +117,22 @@
   .moves .up { color: var(--pitch); font-weight: 600; }
   .moves .down { color: var(--rival); font-weight: 600; }
 
+  /* squad strength */
+  .pos { color: var(--muted); font-size: .85rem; }
+  .squads { display: grid; gap: 6px; }
+  .sqrow { display: grid; grid-template-columns: minmax(110px, 200px) 1fr auto; gap: 12px; align-items: center; width: 100%;
+    text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 9px 12px; cursor: pointer; }
+  .sqrow .tn { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sqrow .you { font-weight: 400; color: var(--muted); }
+  .sqrow .bar { height: 12px; background: var(--pitch-soft); border-radius: 2px; overflow: hidden; }
+  .sqrow .bar i { display: block; height: 100%; background: var(--pitch); }
+  .sqrow.me .bar i { background: var(--amber); }
+  .sqrow .val { font-family: var(--display); font-weight: 700; font-size: 1.3rem; line-height: 1; font-variant-numeric: tabular-nums; }
+  .sqroster { padding: 4px 0 14px 12px; border-left: 2px solid var(--line); margin: 0 0 4px 4px; display: grid; gap: 2px; }
+  .sqroster div { display: flex; justify-content: space-between; gap: 12px; max-width: 420px; }
+  .sqroster .label { color: var(--muted); font-size: .85rem; margin-top: 6px; display: block; }
+  .sqroster .bench { color: var(--muted); }
+
   /* scatter and spread */
   .plot { display: block; width: 100%; height: auto; }
   .plot text { font-family: var(--body); font-size: 12px; fill: var(--muted); }
@@ -242,6 +258,18 @@
           <div class="chartwrap"><svg class="plot" id="spread" role="img"></svg></div>
         </section>
       </div>
+      <section id="squadsSection">
+        <h2>Squad strength</h2>
+        <p class="sub">The average rating of each manager's best eleven, using Draft Scout's 0-100 player ratings. Select a row to see their eleven and bench.</p>
+        <div class="controls">
+          <div class="tabs viewtabs" id="squadView" role="group" aria-label="Rate players for">
+            <button type="button" data-view="week" aria-pressed="true">Next 5</button>
+            <button type="button" data-view="season" aria-pressed="false">Until the break</button>
+          </div>
+          <span class="sub" id="squadWindow" style="margin:0"></span>
+        </div>
+        <div class="squads" id="squads"><p class="sub">Loading…</p></div>
+      </section>
     </div>
 
     <div id="panel-rivalries" class="hidden">
@@ -281,6 +309,7 @@
   </div>
 </main>
 
+<script src="/static/common.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 const FACTS_SHOWN = 2;   // facts shown at first; "Show more" reveals the rest
@@ -294,6 +323,8 @@ let CH = null;           // the charts the server sent (see league_charts in app
 let myId = null;         // your team ID, if we know it, so your line and row stand out
 let me = null;           // myId, if that team is in this league
 let picked = null;       // the manager whose head-to-head record is open
+let SQ = null;           // the squads the server sent (see league_squads in app.py); this page only draws them
+let squadView = "week";  // which rating the squad chart uses: "week" (next 5) or "season" (until the break)
 let RIV = null;          // the Rivalries data: the managers and seasons (see league_rivalries in app.py)
 
 function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
@@ -350,6 +381,9 @@ function openLeague(id, firstTab) {
   leagueId = id;
   loaded.banter = loaded.recap = loaded.charts = loaded.rivalries = null;
   RIV = null;
+  SQ = null; squadView = "week";
+  document.querySelectorAll("#squadView button").forEach(x => x.setAttribute("aria-pressed", x.dataset.view === "week"));
+  $("squads").innerHTML = `<p class="sub">Loading…</p>`;
   tab = null;
   $("app").classList.remove("hidden");
   $("error").classList.add("hidden");
@@ -405,6 +439,41 @@ function renderFacts() {
 }
 
 
+// ---------------------------------------------------------------- squad strength
+
+async function loadSquads() {
+  const forLeague = leagueId, view = squadView;
+  try {
+    const data = await getJson(`/api/league/${forLeague}/squads?view=${view}`);
+    if (forLeague !== leagueId || view !== squadView) return;   // another league or view was picked meanwhile
+    SQ = data;
+    renderSquads();
+  } catch (e) {
+    if (forLeague === leagueId) $("squads").innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  }
+}
+
+function renderSquads() {
+  const ms = SQ.managers, max = Math.max(...ms.map(m => m.strength), 1), w = SQ.windows[SQ.view];
+  $("squadWindow").textContent = `Looks at gameweeks ${w.from}-${w.to}.`;
+  const line = (p, cls = "") => `<div class="${cls}"><span><strong class="pl">${esc(p.name)}</strong> <span class="pos">${p.pos}, ${esc(p.club)}</span></span><span>${Math.round(p.rating)}</span></div>`;
+  $("squads").innerHTML = ms.map(m => {
+    const mine = m.entry_id === myId;
+    const roster = m.best_xi.length
+      ? `<span class="label">Best eleven, ${esc(m.formation)}</span>${m.best_xi.map(p => line(p)).join("")}`
+        + (m.bench.length ? `<span class="label">Bench</span>${m.bench.map(p => line(p, "bench")).join("")}` : "")
+      : "<div>No players yet</div>";
+    return `<div>
+      <button class="sqrow ${mine ? "me" : ""}" type="button" aria-expanded="${mine}" data-id="${m.entry_id}">
+        <span class="tn">${esc(m.team)}${mine ? ' <span class="you">(you)</span>' : ""}</span>
+        <span class="bar"><i style="width:${(m.strength / max * 100).toFixed(1)}%"></i></span>
+        <span class="val">${m.strength.toFixed(0)}</span>
+      </button>
+      <div class="sqroster ${mine ? "" : "hidden"}" id="sq-${m.entry_id}">${roster}</div>
+    </div>`;
+  }).join("");
+}
+
 // ---------------------------------------------------------------- recap
 
 function boardRow(m) {
@@ -423,8 +492,8 @@ function boardRow(m) {
   // a finished match can also carry tags (Upset, Stomping...), the reason it's an upset, and who made the difference
   const chips = (m.tags || []).map(t => `<span class="chip ${t.toLowerCase().replace("-", "")}">${esc(t)}</span>`).join("");
   const why = (m.basis || []).length ? `<div class="extra">Upset: ${m.basis.map(esc).join("; ")}.</div>` : "";
-  const who = m.players ? `<div class="extra">${esc(m.players)}</div>` : "";
-  const story = m.story ? `<div class="extra">${esc(m.story)}</div>` : "";   // while it's on: who's carrying, who's still to come
+  const who = m.players ? `<div class="extra">${rich(m.players)}</div>` : "";
+  const story = m.story ? `<div class="extra">${rich(m.story)}</div>` : "";   // while it's on: who's carrying, who's still to come
   return `<li><div class="pairing">${name(a)} ${a.points} – ${b.points} ${name(b)}</div>`
     + `<div class="state">${note}${chips}</div>${why}${who}${story}</li>`;
 }
@@ -440,7 +509,7 @@ function renderRecap(data) {
   // the server works out every score and fact (see load_recap in app.py); this just draws them
   const final = r.stage === "final";
   $("recapTitle").textContent = `Gameweek ${r.gameweek}: ${r.label}`;
-  $("recapText").innerHTML = r.text.split(/\n\s*\n/).map(p => `<p>${esc(p.trim())}</p>`).join("");
+  $("recapText").innerHTML = r.text.split(/\n\s*\n/).map(p => `<p>${rich(p.trim())}</p>`).join("");
   const at = r.written_at ? new Date(r.written_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
   const source = final ? "results" : "scores";
   $("recapBy").textContent = r.written_by === "ai"
@@ -457,7 +526,7 @@ function renderRecap(data) {
   $("boardSub").classList.toggle("hidden", final);
   $("board").innerHTML = r.matches.map(boardRow).join("") || `<li>No scores to show yet.</li>`;
   $("starLine").innerHTML = "<strong>Stars:</strong> "
-    + r.stars.map(s => `${esc(s.player)} ${s.points} (${esc(s.team)})`).join(" · ");
+    + r.stars.map(s => `<strong class="pl">${esc(s.player)}</strong> (${s.points} pts, ${esc(s.team)})`).join(" · ");
   $("starLine").classList.toggle("hidden", !r.stars.length);   // stars so far: only while the games are on
 }
 
@@ -465,6 +534,7 @@ function renderRecap(data) {
 
 function renderCharts(data) {
   CH = data.charts;
+  loadSquads();   // the squad chart doesn't need a finished gameweek, and loads on its own
   $("chartsEmpty").classList.toggle("hidden", !!CH);
   $("charts").classList.toggle("hidden", !CH);
   if (!CH) {
@@ -784,6 +854,17 @@ function drawRivalry(r, a, b) {
 
 // ---------------------------------------------------------------- events
 
+$("squads").addEventListener("click", e => {
+  const row = e.target.closest(".sqrow"); if (!row) return;
+  const open = $("sq-" + row.dataset.id).classList.toggle("hidden") === false;
+  row.setAttribute("aria-expanded", open);
+});
+$("squadView").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b || b.dataset.view === squadView) return;
+  squadView = b.dataset.view;
+  document.querySelectorAll("#squadView button").forEach(x => x.setAttribute("aria-pressed", x.dataset.view === squadView));
+  loadSquads();
+});
 $("rivalA").addEventListener("change", loadRivalry);
 $("rivalB").addEventListener("change", loadRivalry);
 
