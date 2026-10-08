@@ -50,6 +50,11 @@ RECAP_RETRY_SECONDS = 300   # after an AI call fails, use the plain recap for th
 RECAP_KEPT = 60             # how many written recaps stay in memory
 STAR_MIN_POINTS = 6         # a starter needs this many points in a gameweek to be named as a star
 MOVE_MIN_PLACES = 1         # a manager has to move this many table places in a gameweek to be mentioned
+UPSET_MIN_PLACES = 3        # a win is an upset if the winner sat this many table places below the loser...
+UPSET_MIN_STRENGTH = 2.0    # ... or had a squad this much weaker (best-eleven strength, see squad_strength)
+STOMPING_MARGIN = 20        # a win by at least this many points is a stomping
+NAILBITER_MARGIN = 5        # a win by at most this many points is a nail-biter
+FLOP_MAX_POINTS = 1         # a starter who played and scored this few points or fewer counts as a flop
 PLAYER_POINTS_SD = 3.5      # how far a player's points in one game typically stray from his average
 # the chance (0-1) the side behind comes back, and what we call it; anything lower is "needs a miracle"
 COMEBACK_LEVELS = ((0.35, "wide open"), (0.12, "still alive"), (0.03, "a long shot"))
@@ -1299,6 +1304,11 @@ def table_order(history, i):
         key=lambda m: (m["league_points"][i], sum(p or 0 for p in m["points"][:i + 1])), reverse=True)]
 
 
+def places_at(history, i):
+    """{team ID: table place} after the history's i-th gameweek."""
+    return {t: place for place, t in enumerate(table_order(history, i), 1)}
+
+
 def table_moves(history, team):
     """
     Who moved furthest up or down the table in the latest gameweek (at least MOVE_MIN_PLACES places):
@@ -1307,11 +1317,97 @@ def table_moves(history, team):
     last = len(history["gws"]) - 1
     if last < 1:
         return []
-    before = {t: place for place, t in enumerate(table_order(history, last - 1), 1)}
-    after = {t: place for place, t in enumerate(table_order(history, last), 1)}
+    before, after = places_at(history, last - 1), places_at(history, last)
     moved = [{"team": team.get(t, f"Team {t}"), "from": before[t], "to": after[t]}
              for t in after if abs(before[t] - after[t]) >= MOVE_MIN_PLACES]
     return sorted(moved, key=lambda r: abs(r["from"] - r["to"]), reverse=True)[:3]
+
+
+def team_players(starters, stats, players):
+    """
+    How each manager's starters did in a gameweek, {team ID: {"top", "flop"}}: top is up to two of
+    {"name", "points"}, the highest scorers (only those on at least 1 point); flop is the lowest-scoring
+    starter who played and got FLOP_MAX_POINTS or fewer, or None. Arguments are as for live_scores.
+    Auto-subs aren't counted, so a bench player who came on isn't named.
+    """
+    found = {}
+    for team, ids in starters.items():
+        rows = [{"name": players[pid]["name"], "points": stats.get(pid, {}).get("points", 0),
+                 "minutes": stats.get(pid, {}).get("minutes", 0)} for pid in ids if pid in players]
+        top = [{"name": r["name"], "points": r["points"]}
+               for r in sorted(rows, key=lambda r: -r["points"])[:2] if r["points"] > 0]
+        poor = min((r for r in rows if r["minutes"] > 0 and r["points"] <= FLOP_MAX_POINTS),
+                   key=lambda r: r["points"], default=None)
+        found[team] = {"top": top, "flop": {"name": poor["name"], "points": poor["points"]} if poor else None}
+    return found
+
+
+def players_line(m, scorers):
+    """
+    Who made the difference in a finished match, in a sentence or two: the winner's top scorers, then the
+    loser's best (and a flop, if they had one). For a draw, each side's best. None without player data.
+    scorers is team_players' result.
+    """
+    if not scorers:
+        return None
+    a, b = m["a"], m["b"]
+    empty = {"top": [], "flop": None}
+    if m["leader"] is None:
+        bits = [f"{s['team']}'s best was {got['top'][0]['name']} on {got['top'][0]['points']}"
+                for s in (a, b) for got in [scorers.get(s["entry_id"]) or empty] if got["top"]]
+        return ". ".join(bits) + "." if bits else None
+    win, lose = (a, b) if m["leader"] == "a" else (b, a)
+    won, lost = scorers.get(win["entry_id"]) or empty, scorers.get(lose["entry_id"]) or empty
+    parts = []
+    if won["top"]:
+        parts.append(" and ".join(f"{p['name']} {p['points']}" for p in won["top"]) + f" led {win['team']}.")
+    bits = []
+    if lost["top"]:
+        bits.append(f"{lose['team']}'s best was {lost['top'][0]['name']} on {lost['top'][0]['points']}")
+    flop = lost["flop"]
+    if flop and not (lost["top"] and flop["name"] == lost["top"][0]["name"]):
+        bits.append(f"{flop['name']} got {flop['points']}")
+    if bits:
+        parts.append("; ".join(bits) + ".")
+    return " ".join(parts) or None
+
+
+def add_stories(matches, places=None, strength=None, scorers=None):
+    """
+    Adds to each finished match (from recap_matches) what makes it worth talking about:
+      tags     any of "Upset", "Stomping" (won by STOMPING_MARGIN or more), "Nail-biter" (won by
+               NAILBITER_MARGIN or less) and "Draw"
+      basis    why it's an upset, from both the table and the squads: the winner sat UPSET_MIN_PLACES or
+               more places below the loser before the gameweek, and/or had a squad at least
+               UPSET_MIN_STRENGTH weaker. Either one is enough, and each that applies is listed
+      players  who made the difference (see players_line)
+    and each side gets its table "place" before the gameweek and its squad "strength". places is
+    {team ID: place}, strength is {team ID: best-eleven strength} (squads as they are now, not when the
+    match was played) and scorers is team_players' result; each can be None if it couldn't be worked out.
+    """
+    for m in matches:
+        for key in "ab":
+            side = m[key]
+            side["place"] = (places or {}).get(side["entry_id"])
+            side["strength"] = (strength or {}).get(side["entry_id"])
+        tags, basis = [], []
+        if m["leader"] is None:
+            tags.append("Draw")
+        else:
+            win, lose = (m["a"], m["b"]) if m["leader"] == "a" else (m["b"], m["a"])
+            if win["place"] and lose["place"] and win["place"] - lose["place"] >= UPSET_MIN_PLACES:
+                basis.append(f"{ordinal(win['place'])} in the table beat {ordinal(lose['place'])}")
+            if (win["strength"] is not None and lose["strength"] is not None
+                    and lose["strength"] - win["strength"] >= UPSET_MIN_STRENGTH):
+                basis.append(f"weaker squad on paper ({win['strength']:.1f} v {lose['strength']:.1f})")
+            if basis:
+                tags.append("Upset")
+            if m["margin"] >= STOMPING_MARGIN:
+                tags.append("Stomping")
+            elif m["margin"] <= NAILBITER_MARGIN:
+                tags.append("Nail-biter")
+        m["tags"], m["basis"], m["players"] = tags, basis, players_line(m, scorers)
+    return matches
 
 
 def recap_highlights(matches):
@@ -1345,19 +1441,21 @@ def recap_highlights(matches):
             "lowest_score": {"team": low["team"], "points": low["points"]} if low else None}
 
 
-def recap_facts(details, gw, stage, progress=None, scores=None):
+def recap_facts(details, gw, stage, progress=None, scores=None, strength=None, scorers=None):
     """
     Everything a recap is written from, all of it worked out here: the AI only chooses the words.
     stage is "final" (the official results are in) or the match-day count from recap_stage, progress
     is gameweek_progress and scores is live_scores (either is None if that data couldn't be read).
-    A final recap is written from the league details alone, so it ignores scores.
+    For a final recap, strength ({team ID: squad strength}) and scorers (team_players' result) feed
+    add_stories, and each can be None.
 
     state: "final" or "in progress". length: "short" (an early look: under RECAP_SHORT_SHARE of the
     games are played) or "full". games: {"played", "total"} or None. matches: see recap_matches (the
-    live picture while it's on, the official results when it's final). table: the top three and last
-    place (after this gameweek when final, before it otherwise). While it's on only: stars, up to three
-    starters with at least STAR_MIN_POINTS. For a final recap only: highlights (see recap_highlights),
-    moves (who moved most places in the table) and season_notes (up to three banter facts).
+    live picture while it's on; the official results when it's final, with add_stories' tags, basis and
+    players). table: the top three and last place (after this gameweek when final, before it otherwise).
+    While it's on only: stars, up to three starters with at least STAR_MIN_POINTS. For a final recap
+    only: highlights (see recap_highlights), moves (who moved most places in the table) and
+    season_notes (up to three banter facts).
     """
     final = stage == "final"
     entries = {e["entry_id"]: e for e in details.get("league_entries", []) if e.get("entry_id")}
@@ -1371,17 +1469,21 @@ def recap_facts(details, gw, stage, progress=None, scores=None):
         key=lambda s: -s["points"])[:3]
 
     history = league_history(details)
-    table, moves = None, []
+    table, moves, before = None, [], None
     if history:
         order = table_order(history, len(history["gws"]) - 1)
         points = {m["entry_id"]: m["league_points"][-1] for m in history["managers"]}
-        places = list(range(1, min(3, len(order)) + 1)) + ([len(order)] if len(order) > 3 else [])
+        shown = list(range(1, min(3, len(order)) + 1)) + ([len(order)] if len(order) > 3 else [])
         table = [{"place": p, "team": team.get(order[p - 1], f"Team {order[p - 1]}"),
-                  "league_points": points[order[p - 1]]} for p in places]
+                  "league_points": points[order[p - 1]]} for p in shown]
         moves = table_moves(history, team) if final else []
+        if final and len(history["gws"]) > 1 and history["gws"][-1] == gw:
+            before = places_at(history, len(history["gws"]) - 2)   # the table going into this gameweek
 
     banter = (league_banter(details) or {}) if final else {}
     matches = recap_matches(details, gw, None if final else scores or {})
+    if final:
+        add_stories(matches, before, strength, scorers)
     return {
         "league": clean_name(details.get("league", {}).get("name")),
         "gameweek": gw,
@@ -1460,8 +1562,10 @@ def recap_request(facts):
     if facts["state"] == "final":
         ask = ("The gameweek is over. The page already lists every result and the table moves next to your "
                "text, so don't go through them one by one. Tell the story of the week instead, using the "
-               "highlights (biggest win, closest match, highest and lowest score) and anything else that "
-               "stands out.")
+               "highlights (biggest win, closest match, highest and lowest score) and the tagged matches: "
+               "'Upset' (see basis for why), 'Stomping', 'Nail-biter', 'Draw'. For those, say what made the "
+               "difference using the players (a match's players line has the points they scored). Only use "
+               "reasons the numbers show: if a match has no players line, don't guess who scored.")
     else:
         ask = ("The gameweek is still being played, so nothing is settled. Say who is ahead in the matches. "
                "For the lopsided or close ones, mention how many players each side still has to play and use "
@@ -1720,9 +1824,10 @@ def load_recap(league_id):
 
     The recap is for the gameweek in progress once one of its games has finished; before that, the
     final recap of the gameweek just played. Everything in it is worked out in recap_facts from the
-    league details, the classic fixtures (which games are done) and, while the gameweek is on, the
-    Draft site's live points and each manager's picks. If the live points or picks can't be read, the
-    recap is written with less. A final recap is written from the league details alone.
+    league details, the classic fixtures (which games are done), the Draft site's live points and each
+    manager's picks (the scoreboard while it's on; who scored what in a final recap) and, for a final
+    recap, each squad's strength (load_league). Anything that can't be read is left out, so the recap
+    is written with less.
     """
     boot = fetch(f"{DRAFT}/bootstrap-static", LEAGUE_NOT_FOUND)
     details = fetch(f"{DRAFT}/league/{league_id}/details", LEAGUE_NOT_FOUND)
@@ -1745,16 +1850,22 @@ def load_recap(league_id):
     if stage is None:
         return nothing
 
-    scores = None
-    if stage != "final":   # a final recap is written from the official results, so it needs no live data
-        team_ids = [e["entry_id"] for e in details.get("league_entries", []) if e.get("entry_id")]
-        stats, starters = recap_inputs(gw, team_ids)
-        players = {el["id"]: {"name": el.get("web_name") or f'Player {el["id"]}', "club": el["team"],
-                              "ppg": num(el.get("points_per_game"))} for el in boot["elements"]}
+    team_ids = [e["entry_id"] for e in details.get("league_entries", []) if e.get("entry_id")]
+    stats, starters = recap_inputs(gw, team_ids)
+    players = {el["id"]: {"name": el.get("web_name") or f'Player {el["id"]}', "club": el["team"],
+                          "ppg": num(el.get("points_per_game"))} for el in boot["elements"]}
+    scores = scorers = strength = None
+    if stage != "final":   # the scoreboard
         scores = (live_scores(starters, stats, players, games[1] if games else {})
                   if stats and starters else None)
+    else:                  # who scored what, and which squads were the stronger on paper
+        scorers = team_players(starters, stats, players) if stats and starters else None
+        try:
+            strength = {m["entry_id"]: m["strength"] for m in load_league(league_id)["managers"]}
+        except FplError:
+            strength = None
 
-    facts = recap_facts(details, gw, stage, progress, scores)
+    facts = recap_facts(details, gw, stage, progress, scores, strength, scorers)
     text, written_by, at = get_recap(league_id, facts, stage)
     return {"league_id": league_id, "league_name": name, "recap": {
         "gameweek": gw, "stage": stage, "label": recap_label(stage, progress), "text": text,

@@ -106,6 +106,12 @@
     border-radius: 4px; padding: 10px 16px; }
   .board .pairing { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
   .board .state { color: var(--muted); font-size: .92rem; }
+  .board .extra { font-size: .92rem; margin-top: 2px; }
+  .chip { display: inline-block; margin-left: 6px; padding: 0 8px; border: 1px solid var(--muted); border-radius: 999px;
+    font-size: .75rem; font-weight: 600; line-height: 1.6; white-space: nowrap; color: var(--muted); }
+  .chip.upset { border-color: var(--amber); background: var(--amber-soft); color: var(--ink); }
+  .chip.stomping { border-color: var(--rival); color: var(--rival); }
+  .chip.nailbiter { border-color: var(--pitch); color: var(--pitch); }
   .moves { margin: 4px 0 14px; padding-left: 1.3rem; }
   .moves li { margin: 3px 0; }
   .moves .up { color: var(--pitch); font-weight: 600; }
@@ -414,7 +420,12 @@ function boardRow(m) {
     note = `${esc(lead.team)} lead by ${m.margin}. ${esc(behind.team)} `
       + (behind.left === 0 ? "have nobody left to play" : `have ${behind.left} still to play`) + `: ${esc(m.outlook)}.`;
   }
-  return `<li><div class="pairing">${name(a)} ${a.points} – ${b.points} ${name(b)}</div><div class="state">${note}</div></li>`;
+  // a finished match can also carry tags (Upset, Stomping...), the reason it's an upset, and who made the difference
+  const chips = (m.tags || []).map(t => `<span class="chip ${t.toLowerCase().replace("-", "")}">${esc(t)}</span>`).join("");
+  const why = (m.basis || []).length ? `<div class="extra">Upset: ${m.basis.map(esc).join("; ")}.</div>` : "";
+  const who = m.players ? `<div class="extra">${esc(m.players)}</div>` : "";
+  return `<li><div class="pairing">${name(a)} ${a.points} – ${b.points} ${name(b)}</div>`
+    + `<div class="state">${note}${chips}</div>${why}${who}</li>`;
 }
 
 function renderRecap(data) {

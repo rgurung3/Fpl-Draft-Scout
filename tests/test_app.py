@@ -1957,6 +1957,128 @@ def test_highlights_with_no_matches_are_empty():
     assert set(app.recap_highlights([]).values()) == {None}
 
 
+# what made a match worth talking about
+
+def story_match(a_points, b_points):
+    """A finished match between teams 100 ("A") and 101 ("B"), in the shape recap_matches gives."""
+    margin = abs(a_points - b_points)
+    return {"a": {"entry_id": 100, "team": "A", "points": a_points},
+            "b": {"entry_id": 101, "team": "B", "points": b_points}, "margin": margin,
+            "leader": None if margin == 0 else "a" if a_points > b_points else "b"}
+
+
+def story(a_points, b_points, **extra):
+    return app.add_stories([story_match(a_points, b_points)], **extra)[0]
+
+
+@pytest.mark.parametrize("a_points,b_points,tags", [
+    (60, 40, ["Stomping"]),          # won by exactly 20
+    (59, 40, []),
+    (45, 40, ["Nail-biter"]),        # won by exactly 5
+    (46, 40, []),
+    (40, 70, ["Stomping"]),          # the second team can win it too
+    (50, 50, ["Draw"]),
+])
+def test_tags_for_stompings_nail_biters_and_draws(a_points, b_points, tags):
+    assert story(a_points, b_points)["tags"] == tags
+
+
+def test_a_winner_far_below_in_the_table_is_an_upset():
+    m = story(50, 40, places={100: 9, 101: 6})
+    assert (m["tags"], m["basis"]) == (["Upset"], ["9th in the table beat 6th"])
+    assert (m["a"]["place"], m["b"]["place"]) == (9, 6)
+    assert story(50, 40, places={100: 8, 101: 6})["tags"] == []              # only two places apart
+
+
+def test_a_winner_with_a_weaker_squad_is_an_upset():
+    m = story(50, 40, strength={100: 50.0, 101: 52.0})
+    assert (m["tags"], m["basis"]) == (["Upset"], ["weaker squad on paper (50.0 v 52.0)"])
+    assert story(50, 40, strength={100: 50.1, 101: 52.0})["tags"] == []      # not weaker enough
+
+
+def test_an_upset_can_have_both_reasons_and_still_be_a_stomping():
+    m = story(80, 40, places={100: 9, 101: 2}, strength={100: 48.0, 101: 55.5})
+    assert m["tags"] == ["Upset", "Stomping"]
+    assert m["basis"] == ["9th in the table beat 2nd", "weaker squad on paper (48.0 v 55.5)"]
+
+
+def test_the_favourite_winning_is_not_an_upset_and_neither_is_a_draw():
+    assert story(50, 40, places={100: 2, 101: 9}, strength={100: 60.0, 101: 40.0})["tags"] == []
+    assert story(50, 50, places={100: 9, 101: 2}, strength={100: 40.0, 101: 60.0})["tags"] == ["Draw"]
+
+
+def test_without_a_table_or_squads_only_the_margin_counts():
+    m = story(50, 40)                                      # e.g. the first gameweek: no table yet
+    assert (m["tags"], m["basis"], m["players"]) == ([], [], None)
+    assert (m["a"]["place"], m["a"]["strength"]) == (None, None)
+
+
+PLAYERS_SEEN = {1: {"name": "Saka"}, 2: {"name": "Palmer"}, 3: {"name": "Salah"}, 4: {"name": "Foden"},
+                5: {"name": "Bench"}}
+
+
+def test_team_players_name_the_top_two_and_a_flop():
+    stats = {1: {"points": 14, "minutes": 90}, 2: {"points": 11, "minutes": 90},
+             3: {"points": 6, "minutes": 90}, 4: {"points": -2, "minutes": 60},
+             5: {"points": 0, "minutes": 0}}
+    found = app.team_players({100: [1, 2, 3, 4, 5]}, stats, PLAYERS_SEEN)
+    assert found[100] == {"top": [{"name": "Saka", "points": 14}, {"name": "Palmer", "points": 11}],
+                          "flop": {"name": "Foden", "points": -2}}      # the bench player never played
+
+
+def test_team_players_without_a_flop_or_with_nobody_scoring():
+    stats = {1: {"points": 5, "minutes": 90}, 2: {"points": 0, "minutes": 0}}
+    found = app.team_players({100: [1, 2, 99]}, stats, PLAYERS_SEEN)    # 99 isn't a known player
+    assert found[100] == {"top": [{"name": "Saka", "points": 5}], "flop": None}
+    assert app.team_players({100: [2]}, {}, PLAYERS_SEEN)[100] == {"top": [], "flop": None}
+
+
+def scorers_for(top_a=(), top_b=(), flop_b=None):
+    def top(rows):
+        return [{"name": n, "points": p} for n, p in rows]
+
+    return {100: {"top": top(top_a), "flop": None},
+            101: {"top": top(top_b), "flop": {"name": flop_b[0], "points": flop_b[1]} if flop_b else None}}
+
+
+def test_players_line_names_the_winners_top_scorers_and_the_losers_best_and_flop():
+    scorers = scorers_for([("Saka", 14), ("Palmer", 11)], [("Haaland", 6)], ("Foden", -2))
+    assert story(70, 50, scorers=scorers)["players"] == (
+        "Saka 14 and Palmer 11 led A. B's best was Haaland on 6; Foden got -2.")
+
+
+def test_players_line_with_less_to_say():
+    assert story(70, 50, scorers=scorers_for([("Saka", 14)]))["players"] == "Saka 14 led A."
+    assert story(70, 50, scorers=scorers_for(flop_b=("Foden", 0)))["players"] == "Foden got 0."
+    same = scorers_for(top_b=[("Palmer", 1)], flop_b=("Palmer", 1))      # best and flop: say it once
+    assert story(70, 50, scorers=same)["players"] == "B's best was Palmer on 1."
+    assert story(70, 50, scorers=scorers_for())["players"] is None
+    assert story(70, 50, scorers=None)["players"] is None
+
+
+def test_players_line_for_a_draw_gives_each_sides_best():
+    scorers = scorers_for([("Saka", 12)], [("Haaland", 11)])
+    assert story(50, 50, scorers=scorers)["players"] == "A's best was Saka on 12. B's best was Haaland on 11."
+
+
+def test_final_facts_use_the_table_going_into_the_gameweek_for_upsets(monkeypatch):
+    monkeypatch.setattr(app, "UPSET_MIN_PLACES", 2)
+    strength = {100: 50.0, 101: 50.0, 102: 50.0, 103: 50.0}
+    facts = app.recap_facts(recap_league(RECAP_WEEKS), 2, "final", None, None, strength, None)
+    # going into GW2 the table was Team 0, 2, 3, 1: so Team 1 (4th) beat Team 2 (2nd)
+    # and Team 3 (3rd) beat Team 0 (1st)
+    first, second = facts["matches"]
+    assert (first["tags"], first["basis"]) == (["Upset", "Stomping"], ["4th in the table beat 2nd"])
+    assert (second["tags"], second["basis"]) == (["Upset"], ["3rd in the table beat 1st"])
+    assert first["a"]["strength"] == 50.0 and first["players"] is None
+
+
+def test_a_live_recap_has_no_stories():
+    progress = {"games": 10, "played": 6, "days": 4, "days_done": 2}
+    facts = app.recap_facts(recap_league(RECAP_WEEKS), 3, 2, progress, live_picture())
+    assert all("tags" not in m for m in facts["matches"])
+
+
 # the plain recap
 
 def test_plain_recap_for_a_finished_gameweek_tells_the_story_without_listing_every_result():
@@ -2160,12 +2282,14 @@ def recap_world(monkeypatch):
         "live": {"elements": {"1": {"stats": {"total_points": 8, "minutes": 90}},
                               "2": {"stats": {"total_points": 3, "minutes": 90}},
                               "9": {"stats": {"total_points": 20, "minutes": 90}}}},
-        "calls": [],     # every address asked for, so a test can check what a recap didn't need
+        "calls": [],     # every address asked for, so a test can check what a recap did and didn't need
+        "owners": True,  # False takes the squads feed down
     }
     names = {1: "Saka", 2: "Palmer", 3: "Salah", 4: "Foden"}
     elements = [{**make_player(i, team=(i - 1) % 4 + 1), "web_name": names.get(i, f"Player{i}"),
                  "points_per_game": "5.0"} for i in range(1, 10)]
     starters = {100: [1, 3], 101: [2, 4], 102: [5, 7], 103: [6, 8]}
+    owner_of = {pid: team_id for team_id, ids in starters.items() for pid in ids}
 
     def fake(url):
         world["calls"].append(url)
@@ -2176,7 +2300,12 @@ def recap_world(monkeypatch):
                 raise requests.ConnectionError("down")
             return world["fixtures"]
         if url.endswith("/bootstrap-static"):
-            return {"events": {"current": 3, "next": 4}, "teams": RECAP_CLUBS, "elements": elements}
+            return {"events": {"current": 3, "next": 4}, "teams": RECAP_CLUBS, "elements": elements,
+                    "element_types": [{"id": 3, "singular_name_short": "MID"}]}
+        if url.endswith("/element-status"):
+            if not world["owners"]:
+                raise requests.HTTPError(response=type("R", (), {"status_code": 503})())
+            return {"element_status": [{"element": pid, "owner": owner_of.get(pid)} for pid in range(1, 10)]}
         if url.endswith("/details"):
             return recap_league(world["matches"])
         if "/live" in url:
@@ -2238,7 +2367,7 @@ def test_recap_route_gives_the_final_recap_once_the_official_results_are_in(reca
     assert recap["stars"] == []                                    # a final recap has no stars
     # Teams 1 and 2 moved two places each; of the two one-place movers only three moves are listed in all
     assert {m["team"] for m in recap["moves"][:2]} == {"Team 1", "Team 2"} and len(recap["moves"]) == 3
-    assert not asked_for_live_data(recap_world)                    # written from the official results alone
+    assert asked_for_live_data(recap_world)                        # who scored what: the live points
 
 
 def test_recap_route_keeps_last_weeks_final_recap_until_a_game_finishes(recap_world):
@@ -2247,14 +2376,39 @@ def test_recap_route_keeps_last_weeks_final_recap_until_a_game_finishes(recap_wo
     recap = get_recap_page()["recap"]
     assert (recap["gameweek"], recap["label"]) == (2, "Final recap")
     assert recap["matches"][0]["a"]["points"] == 90
-    assert not asked_for_live_data(recap_world)
 
 
 def test_recap_route_still_works_when_the_fixtures_feed_is_down(recap_world):
     recap_world["fixtures"] = None
     recap = get_recap_page()["recap"]
     assert (recap["gameweek"], recap["label"]) == (2, "Final recap")
-    assert not asked_for_live_data(recap_world)
+
+
+def test_recap_route_tags_the_matches_and_names_the_players(recap_world):
+    recap_world["matches"] = RECAP_WEEKS[:4] + [match(3, 10, 90, 11, 60), match(3, 12, 50, 13, 48)]
+    first, second = get_recap_page()["recap"]["matches"]
+    assert first["tags"] == ["Stomping"] and second["tags"] == ["Nail-biter"]
+    # the bench player's 20 points aren't counted
+    assert first["players"] == "Saka 8 led Team 0. Team 1's best was Palmer on 3."
+    assert second["players"] is None                                                  # nobody scored a point
+    assert first["a"]["place"] == 2 and first["b"]["place"] == 1       # the table going into GW3
+    assert isinstance(first["a"]["strength"], float)
+
+
+def test_recap_route_final_still_tags_the_matches_when_the_live_feed_is_down(recap_world):
+    recap_world["matches"] = RECAP_WEEKS[:4] + [match(3, 10, 90, 11, 60), match(3, 12, 50, 13, 48)]
+    recap_world["live"] = None
+    first, second = get_recap_page()["recap"]["matches"]
+    assert first["tags"] == ["Stomping"] and second["tags"] == ["Nail-biter"]
+    assert first["players"] is None and second["players"] is None
+
+
+def test_recap_route_final_still_works_when_the_squads_feed_is_down(recap_world):
+    recap_world["matches"] = RECAP_WEEKS[:4] + [match(3, 10, 90, 11, 60), match(3, 12, 50, 13, 48)]
+    recap_world["owners"] = False
+    first = get_recap_page()["recap"]["matches"][0]
+    assert first["tags"] == ["Stomping"] and first["a"]["strength"] is None
+    assert first["players"] == "Saka 8 led Team 0. Team 1's best was Palmer on 3."
 
 
 def test_recap_route_asks_for_live_data_while_the_gameweek_is_on(recap_world):

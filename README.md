@@ -9,7 +9,7 @@ league, rates every player, and shows you:
 - **Free agents**: a sortable, filterable table of everyone unowned in your league, with both ratings (next 5 and until the break) and upcoming fixtures. It shows the top 15 at first, with a button for more
 - **Charts** (in the league hub; head-to-head leagues only): the **league race** (each manager's league points climbing from 0 after every gameweek, plus a grid of weekly scores shaded against the league average with each week's W, D or L), a **head-to-head grid** (every manager's won-drawn-lost record against every other manager this season, with the points when you select a row), **points scored and conceded** (one dot per manager, so you can see who's strong and who's been lucky), and **weekly scores** (each manager's lowest, average and best week, so you can see who's steady and who's boom or bust)
 - **Rivalries** (in the league hub): pick two managers and see every match between them, who won, the overall record and a bar chart of the margin in each meeting. Seasons are saved automatically from now on (see Saved seasons and Rivalries below), so next year this shows this season too
-- **Weekly recap** (in the league hub; head-to-head leagues only): the gameweek in words, updated as the games finish. While a gameweek is on, it says who's ahead in each match, how many players each side still has to play, and how the side that's behind is placed ("wide open", "still alive", "a long shot", "needs a miracle" or "all but over"). Once the official results are in, the final recap picks out the talking points of the week (the biggest win, the closest match, the highest and lowest score), lists who moved up or down the table as bullet points, and then lists every result. A new recap is written when a match day finishes (about 3 to 5 a gameweek, with a short one after the first games), and the scores behind it are shown underneath. Draft Scout works out every number itself; an AI only chooses the words, and without the AI the page shows a plain version of the same recap (see The weekly recap below)
+- **Weekly recap** (in the league hub; head-to-head leagues only): the gameweek in words, updated as the games finish. While a gameweek is on, it says who's ahead in each match, how many players each side still has to play, and how the side that's behind is placed ("wide open", "still alive", "a long shot", "needs a miracle" or "all but over"). Once the official results are in, the final recap picks out the talking points of the week (the biggest win, the closest match, the highest and lowest score), lists who moved up or down the table as bullet points, and then lists every result. Each result gets a tag where it earns one (**Upset**, **Stomping**, **Nail-biter**, **Draw**), the reason an upset counts, and a line on who made the difference (for example "Saka 14 and Salah 11 led Team A. Team B's best was Palmer on 6"). A new recap is written when a match day finishes (about 3 to 5 a gameweek, with a short one after the first games), and the scores behind it are shown underneath. Draft Scout works out every number itself; an AI only chooses the words, and without the AI the page shows a plain version of the same recap (see The weekly recap below)
 - **Next 5 / Until the break**: a toggle that switches every rating on the page between the next 5 gameweeks and everything up to the next international break
 - **League squads**: how every manager's best legal eleven (one keeper, 3-5 DEF, 2-5 MID, 1-3 FWD) stacks up, with your squad highlighted
 
@@ -188,6 +188,15 @@ can't get a score wrong:
   highest and lowest score) in a few lines, the table moves as bullet points,
   then every result with the winner in bold. The written part doesn't repeat
   the results or the table moves, because the page lists them right below it.
+  Tags: a win by 20 points or more is a **Stomping**, by 5 or fewer a
+  **Nail-biter**. It's an **Upset** if the winner sat 3 or more table places
+  below the loser going into the gameweek, or had a squad rated at least 2
+  points weaker (the average rating of a manager's best eleven, as in League
+  squads, using the squads as they are now). Either reason is enough, and the
+  page lists which applied. The player line names the winner's top two scorers
+  and the loser's best, plus a flop (a starter who played and scored 1 point or
+  less). Players' own points are shown, never added up, because the official
+  totals include auto-subs and bonus points.
   Until the first game of a gameweek has finished, the page keeps showing last
   week's final recap. The scoreboard shown while the games are on also names
   the best scorers so far.
@@ -207,7 +216,8 @@ the plain version.
 
 Settings at the top of `app.py`: `RECAP_LEAGUES`, `RECAP_MAX_LIVE_STAGES`,
 `RECAP_SHORT_SHARE`, `RECAP_EFFORT`, `RECAP_TIMEOUT_SECONDS`,
-`RECAP_RETRY_SECONDS`, `STAR_MIN_POINTS`, `MOVE_MIN_PLACES`,
+`RECAP_RETRY_SECONDS`, `STAR_MIN_POINTS`, `MOVE_MIN_PLACES`, `UPSET_MIN_PLACES`,
+`UPSET_MIN_STRENGTH`, `STOMPING_MARGIN`, `NAILBITER_MARGIN`, `FLOP_MAX_POINTS`,
 `PLAYER_POINTS_SD` and `COMEBACK_LEVELS`.
 
 ## Saved seasons and Rivalries
