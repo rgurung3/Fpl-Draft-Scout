@@ -105,6 +105,19 @@ def print_movers(players):
             print("   none")
 
 
+def print_keep_notes(data):
+    """The 'worth holding' and 'new signing' notes on the suggested drops (only when loaded by team ID)."""
+    if "waiver_targets" not in data:
+        return
+    names = {p["id"]: p["name"] for p in data["players"]}
+    print("\nNotes on the players the swaps would drop (reasons to hold, from past seasons):")
+    for t in data["waiver_targets"]:
+        note = data.get("keep_notes", {}).get(str(t["drop"]))
+        print(f"   {names[t['drop']]}: " + (f"[{note['kind']}] {note['text']}" if note else "no note"))
+    if not data["waiver_targets"]:
+        print("   no swaps suggested")
+
+
 def main():
     args = sys.argv[1:]
     if len(args) == 2 and args[0] == "--team" and args[1].isdigit():
@@ -143,6 +156,7 @@ def main():
     else:
         print("\nAll checks passed.")
     print_movers(data["players"])
+    print_keep_notes(data)
     return 1 if problems else 0
 
 

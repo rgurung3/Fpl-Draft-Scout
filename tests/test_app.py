@@ -5,7 +5,7 @@ FPL servers and always give the same result.
 Run with:  pytest -v
 """
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import anthropic
 import pytest
@@ -19,7 +19,7 @@ import check_league
 def make_player(pid, team=1, pos=3, form="5.0", ppg="5.0", minutes=540,
                 xgi="2.0", status="a", chance=None, creativity="20.0", xgc="6.0", dc=30):
     return {
-        "id": pid, "web_name": f"Player{pid}", "team": team, "element_type": pos,
+        "id": pid, "code": 1000 + pid, "web_name": f"Player{pid}", "team": team, "element_type": pos,
         "form": form, "points_per_game": ppg, "total_points": 30,
         "minutes": minutes, "expected_goal_involvements": xgi,
         "status": status, "news": "", "chance_of_playing_next_round": chance,
@@ -64,10 +64,13 @@ def fake_api(monkeypatch):
         if url.endswith("/element-status"):
             return status
         if "element-summary" in url:
+            if "fantasy" in url:      # the classic site: earlier seasons (these players are all new)
+                return {"history_past": []}
             return {"history": [{"event": 4, "minutes": 26}, {"event": 5, "minutes": 71},
                                 {"event": 5, "minutes": 10}]}
-        if "bootstrap" in url:
-            return {"teams": TEAMS}
+        if "bootstrap" in url:        # the classic site's list: its ids are the draft ids + 500
+            return {"teams": TEAMS, "elements": [{"id": 500 + e["id"], "code": e["code"]}
+                                                 for e in boot["elements"]]}
         if "fixtures" in url:
             return fixtures
         raise AssertionError(f"Unexpected URL {url}")
@@ -872,6 +875,186 @@ def test_team_endpoint_includes_recent_minutes(fake_api):
         assert data["recent"]["minutes"][str(t["claim"])] == [0, 26, 81, 0]
 
 
+# ---------------------------------------------------------------- reasons to hold a player
+
+TODAY = datetime(2026, 10, 8, tzinfo=timezone.utc)                   # so "last season" is 2025/26
+WILSON = {"season": "2025/26", "points": 168, "minutes": 2674}     # his real figures on the classic site
+
+
+def holder(chance=0, minutes=145, total=3, pos="MID", news="Thigh injury - Unknown return date", pid=260):
+    """A player as hold_case sees him, plus this season's figures. Default: injured Wilson."""
+    return {**rated(pid, pos, 0, owner=100, chance=chance), "name": "Wilson",
+            "minutes": minutes, "total": total, "news": news}
+
+
+def test_season_names_follow_the_season_not_the_calendar_year():
+    assert app.recent_season_names(TODAY) == ["2025/26", "2024/25"]
+    assert app.recent_season_names(datetime(2027, 3, 1, tzinfo=timezone.utc)) == ["2025/26", "2024/25"]
+    assert app.recent_season_names(datetime(2027, 8, 1, tzinfo=timezone.utc)) == ["2026/27", "2025/26"]
+
+
+def test_an_injured_proven_scorer_gets_a_worth_holding_note():
+    note = app.hold_case(holder(), [WILSON], TODAY)
+    assert note["kind"] == "hold"
+    assert (note["season"], note["points"], note["minutes"]) == ("2025/26", 168, 2674)
+    assert "Wilson scored 168 points last season (2,674 minutes, 5.7 per 90)." in note["text"]
+    assert "There's no return date yet." in note["text"]
+    assert "Press Keep" in note["text"]
+
+
+def test_the_note_gives_the_return_date_when_there_is_one():
+    note = app.hold_case(holder(news="Hamstring injury - Expected back 10 Oct"), [WILSON], TODAY)
+    assert "Expected back 10 Oct." in note["text"]
+
+
+@pytest.mark.parametrize("pos,bar", [("GKP", 135), ("DEF", 140), ("MID", 150), ("FWD", 130)])
+def test_each_position_has_its_own_points_bar(pos, bar):
+    def season(points):
+        return [{"season": "2025/26", "points": points, "minutes": 2500}]
+
+    assert app.hold_case(holder(pos=pos), season(bar), TODAY) is not None
+    assert app.hold_case(holder(pos=pos), season(bar - 1), TODAY) is None
+
+
+def test_a_season_needs_1500_minutes_to_count():
+    short = [{"season": "2025/26", "points": 200, "minutes": 1499}]
+    enough = [{"season": "2025/26", "points": 200, "minutes": 1500}]
+    assert app.hold_case(holder(), short, TODAY) is None
+    assert app.hold_case(holder(), enough, TODAY) is not None
+
+
+def test_only_the_last_two_seasons_count():
+    old = {"season": "2023/24", "points": 230, "minutes": 3000}
+    assert app.hold_case(holder(), [old], TODAY) is None
+    two_back = {"season": "2024/25", "points": 180, "minutes": 2600}
+    note = app.hold_case(holder(), [old, two_back], TODAY)
+    assert note["season"] == "2024/25" and "points in 2024/25 (" in note["text"]   # not "last season"
+
+
+def test_the_best_qualifying_season_is_the_one_quoted():
+    seasons = [{"season": "2024/25", "points": 190, "minutes": 2900}, WILSON]
+    assert app.hold_case(holder(), seasons, TODAY)["points"] == 190
+
+
+def test_a_fit_proven_player_who_is_playing_well_gets_no_note():
+    assert app.hold_case(holder(chance=100, minutes=540, total=30), [WILSON], TODAY) is None   # 5.0 per 90
+
+
+def test_a_slump_gets_a_note_even_when_fit():
+    note = app.hold_case(holder(chance=100, minutes=540, total=10), [WILSON], TODAY)   # 1.7 per 90 vs 5.7
+    assert "This season he's on 1.7 per 90." in note["text"]
+    assert "return date" not in note["text"]           # he isn't out, so no return date to give
+
+
+def test_a_doubt_counts_as_out():
+    assert app.hold_case(holder(chance=75, minutes=540, total=30), [WILSON], TODAY) is not None
+
+
+def test_too_few_minutes_this_season_is_not_called_a_slump():
+    assert app.hold_case(holder(chance=100, minutes=100, total=0), [WILSON], TODAY) is None
+
+
+def test_a_player_with_no_history_gets_no_worth_holding_note():
+    assert app.hold_case(holder(), [], TODAY) is None
+    assert app.hold_case(holder(), [{"season": "2016/17", "points": 0, "minutes": 0}], TODAY) is None
+
+
+def test_new_signing_with_rising_minutes_is_flagged():
+    barcola = {**rated(628, "MID", 30), "name": "Barcola"}
+    note = app.new_signing(barcola, [], [0, 26, 71, 71])
+    assert note["kind"] == "new"
+    assert "New to the Premier League, and Barcola's minutes are going up (0, 26, 71, 71)." in note["text"]
+
+
+def test_a_player_with_minutes_in_an_earlier_season_is_not_new():
+    assert app.new_signing(rated(1, "MID", 30), [WILSON], [0, 26, 71, 71]) is None
+    # a season on record with no minutes at all doesn't make him a regular
+    assert app.new_signing(rated(1, "MID", 30), [{"season": "2016/17", "points": 0, "minutes": 0}],
+                           [0, 26, 71, 71]) is not None
+
+
+@pytest.mark.parametrize("recent", [[71, 71, 26, 0], [0, 71, 71, 0], [71, 71, 71, 71], [], [0, 0, 0, 0]])
+def test_new_signing_needs_minutes_that_are_going_up(recent):
+    assert app.new_signing(rated(1, "MID", 30), [], recent) is None
+
+
+def test_keep_notes_are_keyed_by_player_and_skip_players_without_history():
+    wilson, nothing = holder(pid=1), rated(3, "DEF", 20)
+    newcomer = {**rated(2, "MID", 30), "name": "Newcomer"}
+    seasons = {1: [WILSON], 2: []}                         # 3's history couldn't be fetched
+    notes = app.keep_notes([wilson, newcomer, nothing], seasons, {2: [0, 26, 71, 71], 3: [0, 90]}, TODAY)
+    assert {k: v["kind"] for k, v in notes.items()} == {1: "hold", 2: "new"}
+
+
+def classic_site(rows_by_classic_id):
+    """A fake get_json for the classic site: players 'code' 700 -> id 7, 800 -> id 8, 900 -> id 9."""
+    def fake(url):
+        if "bootstrap" in url:
+            return {"elements": [{"id": 7, "code": 700}, {"id": 8, "code": 800}, {"id": 9, "code": 900}]}
+        classic = int(url.rstrip("/").rsplit("/", 1)[1])
+        if classic not in rows_by_classic_id:
+            raise requests.ConnectionError("down")
+        return {"history_past": rows_by_classic_id[classic]}
+    return fake
+
+
+def test_past_seasons_are_matched_by_code_not_by_id(monkeypatch):
+    rows = [{"season_name": "2025/26", "total_points": 168, "minutes": 2674, "goals_scored": 10}]
+    monkeypatch.setattr(app, "get_json", classic_site({7: rows}))
+    wilson = {"id": 260, "code": 700}                    # draft id 260 means nothing on the classic site
+    assert app.past_seasons([wilson]) == {260: [{"season": "2025/26", "points": 168, "minutes": 2674}]}
+
+
+def test_past_seasons_leave_out_unknown_and_failed_players_but_keep_new_ones(monkeypatch):
+    short_season = [{"season_name": "2025/26", "total_points": 5, "minutes": 90}]
+    monkeypatch.setattr(app, "get_json", classic_site({7: [], 8: short_season}))
+    players = [{"id": 1, "code": 700},       # new player: empty history is kept
+               {"id": 2, "code": 12345},     # the classic site doesn't know him
+               {"id": 3, "code": 900},       # his request fails
+               {"id": 4},                    # no code at all
+               {"id": 5, "code": 800}]
+    assert app.past_seasons(players) == {1: [], 5: [{"season": "2025/26", "points": 5, "minutes": 90}]}
+
+
+def test_past_seasons_survive_the_classic_list_failing(monkeypatch):
+    def down(url):
+        raise requests.ConnectionError("down")
+    monkeypatch.setattr(app, "get_json", down)
+    assert app.past_seasons([{"id": 1, "code": 700}]) == {}
+
+
+def test_players_carry_their_code(fake_api):
+    players = app.app.test_client().get("/api/team/100").get_json()["players"]
+    assert [p["code"] for p in players] == [1001, 1002, 1003]
+
+
+def test_team_endpoint_adds_a_note_for_a_proven_injured_drop(fake_api, monkeypatch):
+    fake_api["elements"][0].update(status="i", chance_of_playing_next_round=0,
+                                   news="Thigh injury - Unknown return date")
+    last_season = app.recent_season_names()[0]
+    real = app.get_json
+
+    def with_history(url):
+        if "fantasy" in url and url.rstrip("/").endswith("/501"):      # player 1 is classic id 501
+            return {"history_past": [{"season_name": last_season, "total_points": 168, "minutes": 2674}]}
+        return real(url)
+
+    monkeypatch.setattr(app, "get_json", with_history)
+    data = app.app.test_client().get("/api/team/100").get_json()
+    assert [t["drop"] for t in data["waiver_targets"]] == [1]
+    assert data["keep_notes"]["1"]["kind"] == "hold"
+
+
+def test_team_endpoint_has_no_notes_when_there_is_nothing_to_say(fake_api):
+    data = app.app.test_client().get("/api/team/100").get_json()
+    assert data["keep_notes"] == {}
+
+
+def test_swaps_off_skips_the_notes(fake_api):      # the trade page loads with ?swaps=0
+    data = app.app.test_client().get("/api/team/100?swaps=0").get_json()
+    assert "keep_notes" not in data
+
+
 def test_waiver_targets_come_with_reasons():
     players = [rated(1, "DEF", 40, owner=100, breakdown=piece(form=20, fix=20)),
                rated(2, "DEF", 60, breakdown=piece(form=20, fix=40))]
@@ -933,6 +1116,22 @@ def test_checker_lists_the_biggest_movers():
     risers, fallers = check_league.movers(players)
     assert [p["name"] for p in risers] == ["Porro", "Riser2"]
     assert [p["name"] for p in fallers] == ["Faller"]
+
+
+def test_checker_prints_the_notes_on_dropped_players(capsys):
+    names = {1: "Wilson", 2: "Barcola", 3: "Plain"}
+    data = {"players": [{"id": i, "name": n} for i, n in names.items()],
+            "waiver_targets": [{"drop": 1}, {"drop": 2}, {"drop": 3}],
+            "keep_notes": {"1": {"kind": "hold", "text": "Wilson scored 168 points last season."}}}
+    check_league.print_keep_notes(data)
+    out = capsys.readouterr().out
+    assert "Wilson: [hold] Wilson scored 168 points last season." in out
+    assert "Barcola: no note" in out and "Plain: no note" in out
+
+
+def test_checker_prints_nothing_for_a_league_only_load(capsys):
+    check_league.print_keep_notes({"players": []})          # loaded by league ID: no swaps were worked out
+    assert capsys.readouterr().out == ""
 
 
 def history_data(table_total):
