@@ -432,7 +432,7 @@ function renderBanter(data) {
 
 function renderFacts() {
   const facts = BANTER.banter.facts;
-  $("facts").innerHTML = (showAll ? facts : facts.slice(0, FACTS_SHOWN)).map(f => `<li>${esc(f.text)}</li>`).join("")
+  $("facts").innerHTML = (showAll ? facts : facts.slice(0, FACTS_SHOWN)).map(f => `<li>${rich(f.text)}</li>`).join("")
     || `<li>No facts yet. Give it a few more gameweeks.</li>`;
   $("moreFacts").classList.toggle("hidden", facts.length <= FACTS_SHOWN);
   $("moreFacts").textContent = showAll ? `Show ${FACTS_SHOWN} only` : `Show more (${facts.length - FACTS_SHOWN} more)`;
@@ -456,7 +456,7 @@ async function loadSquads() {
 function renderSquads() {
   const ms = SQ.managers, max = Math.max(...ms.map(m => m.strength), 1), w = SQ.windows[SQ.view];
   $("squadWindow").textContent = `Looks at gameweeks ${w.from}-${w.to}.`;
-  const line = (p, cls = "") => `<div class="${cls}"><span><strong class="pl">${esc(p.name)}</strong> <span class="pos">${p.pos}, ${esc(p.club)}</span></span><span>${Math.round(p.rating)}</span></div>`;
+  const line = (p, cls = "") => `<div class="${cls}"><span>${esc(p.name)} <span class="pos">${p.pos}, ${esc(p.club)}</span></span><span>${Math.round(p.rating)}</span></div>`;
   $("squads").innerHTML = ms.map(m => {
     const mine = m.entry_id === myId;
     const roster = m.best_xi.length
@@ -486,7 +486,7 @@ function boardRow(m) {
     note = `Level, with ${a.left} v ${b.left} players still to play.`;
   } else {
     const behind = lead === a ? b : a;
-    note = `${esc(lead.team)} lead by ${m.margin}. ${esc(behind.team)} `
+    note = `${mgr(lead.team)} lead by ${m.margin}. ${mgr(behind.team)} `
       + (behind.left === 0 ? "have nobody left to play" : `have ${behind.left} still to play`) + `: ${esc(m.outlook)}.`;
   }
   // a finished match can also carry tags (Upset, Stomping...), the reason it's an upset, and who made the difference
@@ -518,7 +518,7 @@ function renderRecap(data) {
   // the table moves as bullet points (a final recap only: the server sends none while the games are on)
   $("movesList").innerHTML = r.moves.map(m => {
     const up = m.to < m.from;
-    return `<li>${esc(m.team)} <span class="${up ? "up" : "down"}">${up ? "up" : "down"}</span> from ${place(m.from)} to ${place(m.to)}</li>`;
+    return `<li>${mgr(m.team)} <span class="${up ? "up" : "down"}">${up ? "up" : "down"}</span> from ${place(m.from)} to ${place(m.to)}</li>`;
   }).join("");
   $("movesSection").classList.toggle("hidden", !r.moves.length);
   $("boardHead").textContent = final ? "Results" : "Scoreboard so far";
@@ -526,7 +526,7 @@ function renderRecap(data) {
   $("boardSub").classList.toggle("hidden", final);
   $("board").innerHTML = r.matches.map(boardRow).join("") || `<li>No scores to show yet.</li>`;
   $("starLine").innerHTML = "<strong>Stars:</strong> "
-    + r.stars.map(s => `<strong class="pl">${esc(s.player)}</strong> (${s.points} pts, ${esc(s.team)})`).join(" · ");
+    + r.stars.map(s => `${esc(s.player)} (${s.points} pts, ${mgr(s.team)})`).join(" · ");
   $("starLine").classList.toggle("hidden", !r.stars.length);   // stars so far: only while the games are on
 }
 
@@ -817,12 +817,12 @@ function drawRivalry(r, a, b) {
     $("rivalChart").innerHTML = ""; $("rivalList").innerHTML = ""; $("rivalChartSub").textContent = "";
     return;
   }
-  const lead = rec.a_won === rec.b_won ? "All square." : `${rec.a_won > rec.b_won ? A : B} leads the rivalry.`;
+  const lead = rec.a_won === rec.b_won ? "All square." : `${mgr(rec.a_won > rec.b_won ? A : B)} leads the rivalry.`;
   $("rivalSummary").innerHTML = `<div class="score">${rec.a_won} – ${rec.drawn} – ${rec.b_won}</div>`
     + `<div><strong>${esc(A)}</strong> won ${rec.a_won}, drew ${rec.drawn}, lost ${rec.b_won} against <strong>${esc(B)}</strong>. ${lead}</div>`
     + `<div class="line">Points: ${rec.a_points}–${rec.b_points} across ${ms.length} meeting${ms.length === 1 ? "" : "s"}.</div>`;
   $("rivalList").innerHTML = ms.map(m => {
-    const res = m.winner === "a" ? `${esc(A)} won` : m.winner === "b" ? `${esc(B)} won` : "Draw";
+    const res = m.winner === "a" ? `${mgr(A)} won` : m.winner === "b" ? `${mgr(B)} won` : "Draw";
     return `<li><span class="when">${esc(m.season)} GW${m.gw}</span><span>${m.a_points}–${m.b_points} · ${res}</span></li>`;
   }).join("");
 

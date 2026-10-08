@@ -52,5 +52,5 @@ section { margin-bottom: 44px; }
 .tabs button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
 .controls select { padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
 .hidden { display: none !important; }
-.pl { font-weight: 600; color: var(--ink); }   /* a player's name inside a sentence */
+.mgr { font-weight: 600; color: var(--ink); }   /* a team (manager) name inside a sentence */
 .note { color: var(--muted); font-size: .9rem; max-width: 70ch; }

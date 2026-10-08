@@ -175,7 +175,6 @@
   </div>
 </main>
 
-<script src="/static/common.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 let DATA = null;
@@ -312,10 +311,10 @@ function whyNote(s) {
   const pts = v => `${v > 0 ? "+" : "−"}${Math.abs(v).toFixed(0)}`;
   const reasons = s.why.reasons.map(r => `${esc(r.text)} <b class="up">${pts(r.points)}</b>`).join(", ");
   const against = s.why.against
-    ? `But ${rich(s.why.against.text)} <b class="down">${pts(s.why.against.points)}</b>.` : "";
+    ? `But ${esc(s.why.against.text)} <b class="down">${pts(s.why.against.points)}</b>.` : "";
   // fitness (the dropped player is injured, suspended or doubtful) gets its own line above the rest
   const fit = s.why.availability
-    ? `<div class="why avail"><strong>Fitness:</strong> ${rich(s.why.availability.text)} <b class="up">${pts(s.why.availability.points)}</b></div>` : "";
+    ? `<div class="why avail"><strong>Fitness:</strong> ${esc(s.why.availability.text)} <b class="up">${pts(s.why.availability.points)}</b></div>` : "";
   const why = reasons ? `<div class="why"><strong>Why:</strong> ${reasons}. ${against}</div>`
     : against ? `<div class="why">${against}</div>` : "";
   // players on few minutes: their numbers could change quickly (either side of the swap)

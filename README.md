@@ -223,12 +223,14 @@ it never breaks. Only leagues listed in `RECAP_LEAGUES` (top of `app.py`) get
 AI recaps, because each one costs a little (a cent or so); other leagues get
 the plain version.
 
-Player names stand out in the written text: the server marks them (and the AI
-is told to) with `**Saka**` and puts their points in brackets after, for example
-`**Saka** (14) is carrying Team A`, and the pages show the name in bold. That way
-a two-word or hyphenated name like Alexander-Arnold or Mac Allister can't be
-mistaken for the team name or the words around it. The same marking is used for
-the player names in the waiver "Why" and "Fitness" lines on the main page.
+Team (manager) names stand out in the written text: team names are often several
+words, or even contain a footballer's name, so they blur into the sentence around
+them. The server wraps each one in `**` (for example `**Wattu Wanderers** lead
+**Fat Ben** 45-31`), the AI is told to do the same, and the pages show the name in
+bold. Footballers are plain, with their points in brackets after, for example
+`Saka (14) is carrying **Team A**`. The same bold is used for team names in the
+hub's banter facts, the table moves, the live scoreboard notes and the rivalry
+sentences.
 
 Settings at the top of `app.py`: `RECAP_LEAGUES`, `RECAP_MAX_LIVE_STAGES`,
 `RECAP_SHORT_SHARE`, `RECAP_EFFORT`, `RECAP_TIMEOUT_SECONDS`,

@@ -1,8 +1,14 @@
-// Shared by the pages. Text from the server marks player names with ** **, with their points in
-// brackets after, like "**Saka** (14) is carrying Team A". rich() escapes the text and then turns each
-// marked name into bold, so a player's name stands out from team names and the words around it
-// (a lot of names are two words or have a hyphen). Anything else in the text stays plain.
+// Shared by the pages. Team (manager) names are often several words, or even have a footballer's name in
+// them, so inside a sentence they blur into the words around them. The server wraps them in ** ** and
+// rich() escapes the text and then turns each marked name into bold. mgr() does the same for one name the
+// page already has in its hands. Anything else in the text stays plain.
+const ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" };
+const escapeText = text => String(text ?? "").replace(/[&<>"]/g, c => ESCAPES[c]);
+
 function rich(text) {
-  const safe = String(text ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-  return safe.replace(/\*\*([^*]+)\*\*/g, '<strong class="pl">$1</strong>');
+  return escapeText(text).replace(/\*\*([^*]+)\*\*/g, '<strong class="mgr">$1</strong>');
+}
+
+function mgr(name) {
+  return `<strong class="mgr">${escapeText(name)}</strong>`;
 }
