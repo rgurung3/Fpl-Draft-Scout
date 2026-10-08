@@ -1918,13 +1918,18 @@ def test_a_final_recap_has_no_stars_and_no_next_up_even_with_live_scores():
     assert facts["stars"] == [] and "next_up" not in facts
 
 
-def test_live_facts_have_the_scoreboard_and_stars_but_no_moves_or_highlights():
+def test_live_facts_have_the_scoreboard_stars_and_highlights_but_no_moves():
     progress = {"games": 10, "played": 6, "days": 4, "days_done": 2}
     facts = app.recap_facts(recap_league(RECAP_WEEKS), 3, 2, progress, live_picture())
     assert facts["state"] == "in progress" and facts["games"] == {"played": 6, "total": 10}
     assert [m["margin"] for m in facts["matches"]] == [14, 0]
     assert facts["stars"] == [{"player": "Saka", "points": 14, "team": "Team 0"}]    # Palmer's 5 isn't a star
-    assert facts["moves"] == [] and facts["highlights"] is None and facts["season_notes"] == []
+    assert facts["moves"] == [] and facts["season_notes"] == []
+    assert facts["highlights"] == {
+        "biggest_lead": {"leader": "Team 0", "trailer": "Team 1", "leader_points": 45, "trailer_points": 31,
+                         "margin": 14},
+        "closest_match": {"level": ["Team 2", "Team 3"], "points": 20, "margin": 0},
+        "highest_score": {"team": "Team 0", "points": 45}}
     assert facts["table"][0]["team"] == "Team 1"          # the official table, before this gameweek's results
 
 
@@ -2073,6 +2078,31 @@ def test_highlights_leave_out_highest_and_lowest_when_every_score_is_the_same():
 
 def test_highlights_with_no_matches_are_empty():
     assert set(app.recap_highlights([]).values()) == {None}
+
+
+def test_live_highlights_pick_the_biggest_lead_the_closest_match_and_the_highest_score_so_far():
+    found = app.recap_highlights(
+        [played("A", 45, "B", 31), played("D", 20, "C", 19), played("E", 10, "F", 40)], live=True)
+    assert found["biggest_lead"] == {"leader": "F", "trailer": "E", "leader_points": 40, "trailer_points": 10,
+                                     "margin": 30}
+    assert found["closest_match"] == {"leader": "D", "trailer": "C", "leader_points": 20,
+                                      "trailer_points": 19, "margin": 1}
+    assert found["highest_score"] == {"team": "A", "points": 45}
+    assert "lowest_score" not in found and "biggest_win" not in found   # a low score may just be unplayed
+
+
+def test_live_highlights_call_a_level_match_level_and_need_a_lead_for_the_biggest_lead():
+    found = app.recap_highlights([played("A", 20, "B", 20), played("C", 15, "D", 15)], live=True)
+    assert found["biggest_lead"] is None
+    assert found["closest_match"] == {"level": ["A", "B"], "points": 20, "margin": 0}
+    assert found["highest_score"] == {"team": "A", "points": 20}
+
+
+def test_live_highlights_for_one_match_or_none():
+    found = app.recap_highlights([played("A", 20, "B", 5)], live=True)
+    assert found["biggest_lead"]["margin"] == 15
+    assert found["closest_match"] is None and found["highest_score"] is None
+    assert set(app.recap_highlights([], live=True).values()) == {None}
 
 
 # what made a match worth talking about
@@ -2236,30 +2266,39 @@ def test_plain_recap_for_an_early_look_is_short():
     facts = app.recap_facts(recap_league(RECAP_WEEKS), 3, 0, progress, live_picture())
     text = app.plain_recap(facts)
     assert facts["length"] == "short"
-    assert text == ("1 of 10 games played in gameweek 3. **Team 0** lead **Team 1** 45-31. "
-                    "**Team 1** have 5 to play against 2: wide open.")
+    assert text == ("1 of 10 games played in gameweek 3.\n"
+                    "Biggest lead: **Team 0** lead **Team 1** 45-31, by 14 points.")   # just the one thing
 
 
-def test_plain_recap_while_the_gameweek_is_on_covers_every_match():
+def test_plain_recap_while_the_gameweek_is_on_gives_the_talking_points_so_far():
     progress = {"games": 10, "played": 6, "days": 4, "days_done": 2}
     text = app.plain_recap(app.recap_facts(recap_league(RECAP_WEEKS), 3, 2, progress, live_picture()))
-    assert text.startswith("6 of 10 games played in gameweek 3.")
-    assert "**Team 0** lead **Team 1** 45-31." in text
-    assert "**Team 2** and **Team 3** are level on 20." in text
+    assert text.split("\n") == [
+        "6 of 10 games played in gameweek 3.",
+        "Biggest lead: **Team 0** lead **Team 1** 45-31, by 14 points.",
+        "Closest: **Team 2** and **Team 3** are level on 20.",
+        "Highest score so far: **Team 0** with 45."]
 
 
-def test_plain_recap_while_it_is_on_picks_the_biggest_lead_and_the_closest_match_with_their_stories():
+def test_the_live_text_leaves_each_matchs_outlook_and_story_to_the_scoreboard():
     scores = live_picture()
     scores[100]["top"] = [{"name": "Saka", "points": 14}]
     scores[101]["coming"] = [coming("Foden", 82.0, difficulty=2)]
     progress = {"games": 10, "played": 6, "days": 4, "days_done": 2}
-    text = app.plain_recap(app.recap_facts(recap_league(RECAP_WEEKS), 3, 2, progress, scores))
-    assert text.split("\n") == [
-        "6 of 10 games played in gameweek 3.",
-        "Biggest lead: **Team 0** lead **Team 1** 45-31. **Team 1** have 5 to play against 2: wide open. "
-        "Saka (14) is carrying **Team 0**. "
-        "**Team 1** still have Foden (rated 82, home v BHA, an easy fixture) to play.",
-        "Closest: **Team 2** and **Team 3** are level on 20."]
+    facts = app.recap_facts(recap_league(RECAP_WEEKS), 3, 2, progress, scores)
+    text = app.plain_recap(facts)
+    assert "wide open" not in text and "Saka" not in text and "Foden" not in text
+    assert "Saka (14) is carrying **Team 0**" in facts["matches"][0]["story"]   # the scoreboard has them
+    assert facts["matches"][0]["outlook"] == "wide open"
+
+
+def test_plain_recap_for_a_live_gameweek_with_a_single_match_ahead():
+    scores = live_picture()
+    progress = {"games": 10, "played": 6, "days": 4, "days_done": 2}
+    facts = app.recap_facts(recap_league(RECAP_WEEKS[:4] + [match(3, 10, 0, 11, 0, finished=False)]), 3, 2,
+                            progress, {100: scores[100], 101: scores[101]})
+    assert app.plain_recap(facts) == ("6 of 10 games played in gameweek 3.\n"
+                                      "Biggest lead: **Team 0** lead **Team 1** 45-31, by 14 points.")
 
 
 def test_plain_recap_says_so_when_the_live_scores_are_missing():
@@ -2292,8 +2331,10 @@ def test_the_request_for_a_live_recap_explains_the_outlook_words():
 def test_the_live_request_asks_for_who_is_carrying_and_who_is_still_to_come():
     progress = {"games": 10, "played": 6, "days": 4, "days_done": 2}
     text = app.recap_request(app.recap_facts(recap_league(RECAP_WEEKS), 3, 2, progress, live_picture()))
-    assert "story line" in text and "carrying" in text and "luck" in text and "pick the two or three" in text
-    assert "Only mention players that are in the facts" in text
+    assert "story line" in text and "carrying" in text and "luck" in text
+    assert "repeat those lines" in text and "two or three most interesting matches" in text
+    assert '"highlights"' in text and '"biggest_lead"' in text and '"highest_score"' in text
+    assert "lowest_score" not in text and "Only mention players that are in the facts" in text
 
 
 def test_the_request_carries_the_facts_but_leaves_out_empty_ones():
@@ -2488,7 +2529,8 @@ def test_recap_route_shows_the_live_scoreboard_with_a_plain_recap(recap_world):
     assert (second["leader"], second["outlook"]) == (None, "level")
     assert recap["stars"] == [{"player": "Saka", "points": 8, "team": "Team 0"}]
     assert recap["text"].startswith(
-        "1 of 2 games played in gameweek 3.\nBiggest lead: **Team 0** lead **Team 1** 8-3.")
+        "1 of 2 games played in gameweek 3.\nBiggest lead: **Team 0** lead **Team 1** 8-3, by 5 points.")
+    assert "still have" not in recap["text"]                        # the stories are on the scoreboard
     assert "Saka (8) is carrying **Team 0**. **Team 1** still have Foden (" in first["story"]
 
 

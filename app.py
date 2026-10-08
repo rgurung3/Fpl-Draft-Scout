@@ -1547,21 +1547,34 @@ def add_stories(matches, places=None, strength=None, scorers=None):
     return matches
 
 
-def recap_highlights(matches):
+def recap_highlights(matches, live=False):
     """
-    The talking points of a finished gameweek, from recap_matches: the biggest win, the closest of the
-    other matches (a draw counts) and the highest and lowest score. The written recap uses these
-    instead of going through every result, because the page lists the results as well.
+    The talking points of a gameweek, from recap_matches. The written recap uses these instead of going
+    through every match, because the page lists the matches (and, while they're on, what's driving each
+    one) right beside it.
 
-    biggest_win and closest_match are {"winner", "loser", "winner_points", "loser_points", "margin"},
-    or for a draw {"draw": [team, team], "points", "margin": 0}. highest_score and lowest_score are
-    {"team", "points"}. Each is None when there's nothing to say: the closest match needs a second
-    match, and the highest and lowest scores need two matches and to be different.
+    A finished gameweek: biggest_win, closest_match (the closest of the other matches, a draw counts),
+    highest_score and lowest_score. biggest_win and closest_match are {"winner", "loser",
+    "winner_points", "loser_points", "margin"}, or for a draw {"draw": [team, team], "points",
+    "margin": 0}.
+
+    live=True, while the games are on: biggest_lead, closest_match and highest_score (so far). There's no
+    lowest score, because a low score so far may just be a side that hasn't played yet. A lead is
+    {"leader", "trailer", "leader_points", "trailer_points", "margin"}, and a level match is
+    {"level": [team, team], "points", "margin": 0}.
+
+    highest_score and lowest_score are {"team", "points"}. Each is None when there's nothing to say: the
+    closest match needs a second match, and the highest and lowest scores need two matches and to be
+    different.
     """
     def told(m):
         if m["leader"] is None:
-            return {"draw": [m["a"]["team"], m["b"]["team"]], "points": m["a"]["points"], "margin": 0}
+            return {"level" if live else "draw": [m["a"]["team"], m["b"]["team"]],
+                    "points": m["a"]["points"], "margin": 0}
         win, lose = (m["a"], m["b"]) if m["leader"] == "a" else (m["b"], m["a"])
+        if live:
+            return {"leader": win["team"], "trailer": lose["team"], "leader_points": win["points"],
+                    "trailer_points": lose["points"], "margin": m["margin"]}
         return {"winner": win["team"], "loser": lose["team"], "winner_points": win["points"],
                 "loser_points": lose["points"], "margin": m["margin"]}
 
@@ -1572,10 +1585,12 @@ def recap_highlights(matches):
     low = min(sides, key=lambda s: s["points"]) if len(matches) > 1 else None
     if top and top["points"] == low["points"]:
         top = low = None
-    return {"biggest_win": told(biggest) if biggest else None,
-            "closest_match": told(closest) if closest else None,
-            "highest_score": {"team": top["team"], "points": top["points"]} if top else None,
-            "lowest_score": {"team": low["team"], "points": low["points"]} if low else None}
+    found = {"biggest_lead" if live else "biggest_win": told(biggest) if biggest else None,
+             "closest_match": told(closest) if closest else None,
+             "highest_score": {"team": top["team"], "points": top["points"]} if top else None}
+    if not live:
+        found["lowest_score"] = {"team": low["team"], "points": low["points"]} if low else None
+    return found
 
 
 def recap_facts(details, gw, stage, progress=None, scores=None, strength=None, scorers=None):
@@ -1590,9 +1605,9 @@ def recap_facts(details, gw, stage, progress=None, scores=None, strength=None, s
     games are played) or "full". games: {"played", "total"} or None. matches: see recap_matches (the
     live picture while it's on; the official results when it's final, with add_stories' tags, basis and
     players). table: the top three and last place (after this gameweek when final, before it otherwise).
-    While it's on only: stars, up to three starters with at least STAR_MIN_POINTS. For a final recap
-    only: highlights (see recap_highlights), moves (who moved most places in the table) and
-    season_notes (up to three banter facts).
+    highlights: the talking points (see recap_highlights), for a final recap and for a live one. While
+    it's on only: stars, up to three starters with at least STAR_MIN_POINTS. For a final recap only:
+    moves (who moved most places in the table) and season_notes (up to three banter facts).
     """
     final = stage == "final"
     entries = {e["entry_id"]: e for e in details.get("league_entries", []) if e.get("entry_id")}
@@ -1628,25 +1643,12 @@ def recap_facts(details, gw, stage, progress=None, scores=None, strength=None, s
         "length": "short" if early else "full",
         "games": {"played": progress["played"], "total": progress["games"]} if progress else None,
         "matches": matches,
-        "highlights": recap_highlights(matches) if final and matches else None,
+        "highlights": recap_highlights(matches, live=not final) if matches else None,
         "stars": stars,
         "table": table,
         "moves": moves,
         "season_notes": [f["text"][:200] for f in banter.get("facts", [])[:3]],
     }
-
-
-def match_sentence(m):
-    """
-    A match that's still being played, in a sentence: "A lead B 45-31. B have 5 to play against 2:
-    still alive." (A final recap doesn't go through the results, see recap_highlights.)
-    """
-    a, b = m["a"], m["b"]
-    if m["leader"] is None:
-        return f"{mark(a['team'])} and {mark(b['team'])} are level on {a['points']}."
-    win, lose = (a, b) if m["leader"] == "a" else (b, a)
-    return (f"{mark(win['team'])} lead {mark(lose['team'])} {win['points']}-{lose['points']}. "
-            f"{mark(lose['team'])} have {lose['left']} to play against {win['left']}: {m['outlook']}.")
 
 
 def plain_recap(facts):
@@ -1655,7 +1657,6 @@ def plain_recap(facts):
     off, isn't allowed for this league, or fails.
     """
     gw, final = facts["gameweek"], facts["state"] == "final"
-    matches = sorted(facts["matches"], key=lambda m: m["margin"], reverse=True)
     if final:
         # the talking points only: the page lists every result and the table moves itself
         said = [f"Gameweek {gw} is done."]
@@ -1678,17 +1679,27 @@ def plain_recap(facts):
     games = facts["games"]
     opener = f"{games['played']} of {games['total']} games played in gameweek {gw}." if games \
         else f"Gameweek {gw} is under way."
-    if not matches:
+    if not facts["matches"]:
         return f"{opener} The live scores aren't available right now."
 
-    def told(m):   # the match in a sentence, then what's driving it
-        return match_sentence(m) + (f" {m['story']}" if m.get("story") else "")
-
-    # the biggest lead and the closest match, with their stories: the scoreboard lists the rest
-    biggest, closest = matches[0], matches[-1]
-    if facts["length"] == "short" or biggest is closest:
-        return f"{opener} {told(biggest)}"
-    return "\n".join([opener, f"Biggest lead: {told(biggest)}", f"Closest: {told(closest)}"])
+    # the talking points so far, one to a line: the scoreboard below gives each match's outlook and story
+    said = []
+    found = facts["highlights"] or {}
+    lead, close, top = found.get("biggest_lead"), found.get("closest_match"), found.get("highest_score")
+    if lead:
+        said.append(f"Biggest lead: {mark(lead['leader'])} lead {mark(lead['trailer'])} "
+                    f"{lead['leader_points']}-{lead['trailer_points']}, by {lead['margin']} "
+                    f"point{'s' if lead['margin'] != 1 else ''}.")
+    if close:
+        said.append(f"Closest: {mark(close['level'][0])} and {mark(close['level'][1])} are level on "
+                    f"{close['points']}." if "level" in close else
+                    f"Closest: {mark(close['leader'])} lead {mark(close['trailer'])} "
+                    f"{close['leader_points']}-{close['trailer_points']}.")
+    if top:
+        said.append(f"Highest score so far: {mark(top['team'])} with {top['points']}.")
+    if facts["length"] == "short":
+        said = said[:1]   # an early look: just the first thing worth saying
+    return "\n".join([opener] + said)
 
 
 RECAP_SYSTEM = (
@@ -1715,14 +1726,16 @@ def recap_request(facts):
                "reasons the numbers show: if a match has no players line, don't guess who scored.")
     else:
         ask = ("The gameweek is still being played, so nothing is settled. The page lists every match "
-               "next to your text, so pick the two or three most interesting ones instead of going through "
-               "them all. For each, say who is ahead and what's driving it: a match's story line says who is "
-               "carrying the side that's ahead and the big names still to come for the side behind (a rating "
-               "out of 100 and their fixture), or that the side behind needs luck or the odds are with the "
-               "leader. Use the 'outlook' words exactly as given ('wide open', 'still alive', 'a long shot', "
-               "'needs a miracle', 'all but over'): they were worked out from the numbers, so don't "
-               "second-guess them. Only mention players that are in the facts. Bonus points and auto-subs "
-               "can still change the scores.")
+               "with its outlook and story line right under your text, so don't go through them one by one "
+               "or repeat those lines. Tell the story of the day so far instead, using the highlights "
+               "(biggest lead, closest match, highest score so far) and picking the two or three most "
+               "interesting matches. For those, say who is ahead and what's driving it: a match's story "
+               "line says who is carrying the side that's ahead and the big names still to come for the "
+               "side behind (a rating out of 100 and their fixture), or that the side behind needs luck or "
+               "the odds are with the leader. Use the 'outlook' words exactly as given ('wide open', "
+               "'still alive', 'a long shot', 'needs a miracle', 'all but over'): they were worked out from "
+               "the numbers, so don't second-guess them. Only mention players that are in the facts. Bonus "
+               "points and auto-subs can still change the scores.")
     size = ("Write 2 or 3 sentences: an early look, with few games played, so don't read too much into it, "
             "but still find the one thing worth a smile." if facts["length"] == "short"
             else "Write 2 or 3 short paragraphs, around 150 words in all.")

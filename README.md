@@ -189,7 +189,10 @@ can't get a score wrong:
   "Foden (rated 82, home v BHA, an easy fixture)". If the side behind has no big
   name left it says they'll need luck, and if they have nobody left to play it
   says the odds are with the leader. Nothing is said about luck when the
-  ratings couldn't be loaded.
+  ratings couldn't be loaded. These story lines sit in the scoreboard under the
+  written text; the written text itself gives the talking points so far (the
+  biggest lead, the closest match and the highest score so far) and doesn't
+  repeat the scoreboard.
 - A new recap is written each time a match day finishes, so a gameweek gets
   about 3 to 5. After only a few games (a lone Friday game, say) it's a short
   early look of 2 or 3 sentences. When the official results are in there's a
