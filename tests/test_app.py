@@ -849,6 +849,66 @@ def test_strength_after_swap_leaves_the_real_list_alone():
     assert squad[7]["owner"] == 100 and claim["owner"] is None
 
 
+# ---------------------------------------------------------------- "worth doing" and "no move needed"
+
+def test_a_swap_that_lifts_the_best_eleven_is_worth_doing():
+    squad = full_squad()
+    squad[7]["score"] = 20
+    targets = app.waiver_targets(squad + [rated(99, "MID", 60)], me=100)
+    assert [(t["claim"], t["worth"]) for t in targets] == [(99, True)]
+    assert app.waiver_verdict(targets) == "move"
+
+
+def test_a_bench_swap_is_never_worth_doing():
+    squad = full_squad()
+    squad[11]["score"] = 10                                    # the fifth midfielder, on the bench
+    targets = app.waiver_targets(squad + [rated(99, "MID", 40)], me=100)
+    assert [(t["claim"], t["worth"]) for t in targets] == [(99, False)]    # still listed, as a small upgrade
+    assert app.waiver_verdict(targets) == "none"
+
+
+def test_a_small_lift_is_not_worth_doing():
+    squad = full_squad()
+    squad[7]["score"] = 20
+    # 54 replaces a 50 in the eleven: strength goes 50.0 -> 50.4, under WORTH_XI_GAIN (0.5)
+    target = app.waiver_targets(squad + [rated(99, "MID", 54)], me=100)[0]
+    assert app.xi_lift(target) == 0.4 and target["worth"] is False
+    # 56 gets it over the line
+    assert app.waiver_targets(squad + [rated(99, "MID", 56)], me=100)[0]["worth"] is True
+
+
+def test_only_the_biggest_lifts_are_marked_worth_doing():
+    squad = full_squad()
+    for weak in (7, 12, 15):                                   # the weakest DEF, MID and FWD (all benched)
+        squad[weak - 1]["score"] = 20
+    claims = [rated(90, "MID", 99), rated(91, "DEF", 80), rated(92, "FWD", 70)]   # lifts 4.5, 2.7 and 1.8
+    targets = app.waiver_targets(squad + claims, me=100)
+    assert {t["claim"]: t["worth"] for t in targets} == {90: True, 91: True, 92: False}
+    assert app.MAX_WORTH_DOING == 2
+
+
+def test_swaps_worth_doing_come_first_then_by_gain():
+    squad = full_squad()
+    squad[11]["score"] = 5                                # a benched MID, claim 45: gain 40, never starts
+    squad[6]["score"] = 42                                # a benched DEF, claim 75: gain 33, does start
+    claims = [rated(90, "MID", 45), rated(91, "DEF", 75)]
+    targets = app.waiver_targets(squad + claims, me=100)
+    assert [(t["claim"], t["gain"], t["worth"]) for t in targets] == [(91, 33, True), (90, 40, False)]
+
+
+def test_waiver_verdict_is_none_unless_a_swap_is_worth_doing():
+    assert app.waiver_verdict([]) == "none"                    # no swaps at all
+    assert app.waiver_verdict([{"worth": False}, {"worth": False}]) == "none"
+    assert app.waiver_verdict([{"worth": False}, {"worth": True}]) == "move"
+
+
+def test_team_endpoint_carries_the_verdict(fake_api):
+    data = app.app.test_client().get("/api/team/100").get_json()
+    assert all(isinstance(t["worth"], bool) for t in data["waiver_targets"])
+    assert data["waiver_verdict"] == app.waiver_verdict(data["waiver_targets"])
+    assert "waiver_verdict" not in app.app.test_client().get("/api/team/100?swaps=0").get_json()
+
+
 def test_recent_minutes_cover_the_last_gameweeks(monkeypatch):
     history = {"history": [{"event": 4, "minutes": 26}, {"event": 5, "minutes": 71},
                            {"event": 5, "minutes": 10}]}     # GW5 was a double gameweek
@@ -1272,7 +1332,22 @@ def test_checker_prints_the_notes_on_dropped_players(capsys):
 
 def test_checker_prints_nothing_for_a_league_only_load(capsys):
     check_league.print_keep_notes({"players": []})          # loaded by league ID: no swaps were worked out
+    check_league.print_waiver_verdict({"players": []})
     assert capsys.readouterr().out == ""
+
+
+def test_checker_prints_the_waiver_verdict(capsys):
+    players = [{"id": 1, "name": "Weak"}, {"id": 2, "name": "Strong"}]
+    swap = {"drop": 1, "claim": 2, "worth": True, "xi_before": 50.0, "xi_after": 51.0}
+
+    def printed(verdict, targets):
+        check_league.print_waiver_verdict({"players": players, "waiver_verdict": verdict,
+                                           "waiver_targets": targets})
+        return capsys.readouterr().out
+
+    assert "worth doing: drop Weak, claim Strong (best eleven 50.0 -> 51.0, +1.0)" in printed("move", [swap])
+    assert "no move needed (1 small upgrades, all optional)" in printed("none", [{**swap, "worth": False}])
+    assert "no move needed (no upgrades on the wire)" in printed("none", [])
 
 
 def history_data(table_total):

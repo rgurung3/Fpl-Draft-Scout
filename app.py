@@ -358,6 +358,8 @@ MIN_CHANCE_FOR_WAIVERS = 75  # suggest doubtful players only if at least this li
 MIN_GAIN = 3                 # a swap has to be worth at least this many rating points
 PAIRS_PER_POSITION = 2
 MAX_TARGETS = 5
+WORTH_XI_GAIN = 0.5          # a swap is "worth doing" if it lifts my best-eleven strength by at least this
+MAX_WORTH_DOING = 2          # and at most this many swaps are marked worth doing (the biggest lift first)
 SMALL_SAMPLE_MINUTES = 300   # a player with fewer minutes than this gets a "too early to trust" note
 RECENT_GAMEWEEKS = 4         # how many gameweeks of minutes to show for the players in a swap
 # A note on a player we suggest dropping: he scored this many points in one of the last HOLD_SEASONS
@@ -673,7 +675,7 @@ def kept_ids(text):
 
 def waiver_targets(players, me, keep=()):
     """
-    Suggested drop/claim swaps for one manager, best gain first.
+    Suggested drop/claim swaps for one manager: the ones worth doing first, then the rest, best gain first.
     Players in `keep` are never suggested as a drop (the next weakest is used).
     Each swap also says whether the drop is in my best eleven and what the swap does to its strength.
 
@@ -681,6 +683,7 @@ def waiver_targets(players, me, keep=()):
     agents who are at least MIN_CHANCE_FOR_WAIVERS% likely to play. A doubtful
     claim is still suggested (its rating is already scaled down for the risk),
     but gets a backup: the best fully fit free agent in the same position.
+    Each swap also says whether it is "worth" doing this week (see mark_worth_doing).
     """
     mine = [p for p in players if p["owner"] == me]
     free = [p for p in players if p["owner"] is None and p["chance"] >= MIN_CHANCE_FOR_WAIVERS]
@@ -713,7 +716,32 @@ def waiver_targets(players, me, keep=()):
                         "drop_in_xi": s["drop"]["id"] in before["best_xi"],
                         "xi_before": before["strength"],
                         "xi_after": strength_after_swap(players, me, s["drop"], claim)})
+    mark_worth_doing(targets)
+    targets.sort(key=lambda t: not t["worth"])   # worth doing first; each group stays in order of gain
     return targets
+
+
+def xi_lift(target):
+    """How much a swap lifts my best-eleven strength (the same two numbers the page shows)."""
+    return round(target["xi_after"] - target["xi_before"], 1)
+
+
+def mark_worth_doing(targets):
+    """
+    Add "worth" to each swap: True for the swaps that matter this week, False for small upgrades.
+    A swap is worth doing if it lifts my best eleven by at least WORTH_XI_GAIN, and at most
+    MAX_WORTH_DOING are marked, the biggest lift first. A swap that only changes the bench lifts
+    nothing, so it is never worth doing. Which swaps are suggested doesn't change.
+    """
+    biggest_first = sorted(targets, key=lambda t: (xi_lift(t), t["gain"]), reverse=True)
+    worth = [t for t in biggest_first if xi_lift(t) >= WORTH_XI_GAIN][:MAX_WORTH_DOING]
+    for t in targets:
+        t["worth"] = any(t is w for w in worth)
+
+
+def waiver_verdict(targets):
+    """"move" if any swap is worth doing this week, otherwise "none" (no move needed)."""
+    return "move" if any(t["worth"] for t in targets) else "none"
 
 
 # ---------------------------------------------------------------- trades
@@ -2366,6 +2394,7 @@ def team(entry_id):
     keep = kept_ids(request.args.get("keep"))
     data["keep"] = sorted(p["id"] for p in data["players"] if p["owner"] == entry_id and p["id"] in keep)
     data["waiver_targets"] = waiver_targets(data["players"], entry_id, keep)
+    data["waiver_verdict"] = waiver_verdict(data["waiver_targets"])
     # the last few gameweeks of minutes for the players in the swaps (one request each)
     in_swaps = [p for t in data["waiver_targets"] for p in (t["drop"], t["claim"])]
     data["recent"] = recent_minutes(in_swaps, data["current_gw"])

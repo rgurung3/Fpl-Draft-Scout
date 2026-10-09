@@ -105,6 +105,22 @@ def print_movers(players):
             print("   none")
 
 
+def print_waiver_verdict(data):
+    """Whether any waiver swap is worth doing this week (only when loaded by team ID)."""
+    if "waiver_verdict" not in data:
+        return
+    worth = [t for t in data["waiver_targets"] if t.get("worth")]
+    names = {p["id"]: p["name"] for p in data["players"]}
+    print("\nWaivers this week:")
+    if not worth:
+        print("   no move needed" + (f" ({len(data['waiver_targets'])} small upgrades, all optional)"
+                                      if data["waiver_targets"] else " (no upgrades on the wire)"))
+    for t in worth:
+        lift = t["xi_after"] - t["xi_before"]
+        print(f"   worth doing: drop {names[t['drop']]}, claim {names[t['claim']]} "
+              f"(best eleven {t['xi_before']:.1f} -> {t['xi_after']:.1f}, {lift:+.1f})")
+
+
 def print_keep_notes(data):
     """The 'worth holding' and 'new signing' notes on the suggested drops (only when loaded by team ID)."""
     if "waiver_targets" not in data:
@@ -156,6 +172,7 @@ def main():
     else:
         print("\nAll checks passed.")
     print_movers(data["players"])
+    print_waiver_verdict(data)
     print_keep_notes(data)
     return 1 if problems else 0
 
