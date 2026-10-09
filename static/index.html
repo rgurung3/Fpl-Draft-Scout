@@ -26,6 +26,12 @@
   .swap { display: grid; grid-template-columns: 1fr auto 1fr auto; gap: 12px 18px; align-items: center;
     background: var(--surface); border: 1px solid var(--line); border-left: 5px solid var(--amber);
     border-radius: 4px; padding: 14px 16px; }
+  .swap.small { border-left-color: var(--line); }
+  .swap.small .gain { color: var(--muted); }
+  .swap .tag { grid-column: 1 / -1; grid-row: 1; font-size: .8rem; font-weight: 600; letter-spacing: .04em;
+    text-transform: uppercase; color: var(--muted); margin-bottom: -4px; }
+  .swap.worth .tag { color: var(--amber); }
+  .verdict { background: var(--pitch-soft); border-left: 5px solid var(--pitch); border-radius: 4px; padding: 12px 16px; }
   .swap .side { display: flex; gap: 12px; align-items: center; min-width: 0; }
   .swap .who { min-width: 0; }
   .swap .verb { font-size: .85rem; color: var(--muted); }
@@ -52,7 +58,7 @@
     .swap { grid-template-columns: 1fr auto; }
     .swap .arrow { display: none; }
     .swap .drop, .swap .claim { grid-column: 1; }
-    .swap .gain { grid-column: 2; grid-row: 1 / span 2; }
+    .swap .gain { grid-column: 2; grid-row: 2 / span 2; }
   }
 
   /* fixture strip */
@@ -348,6 +354,14 @@ function xiNote(s, drop) {
     + `Strength ${s.xi_before.toFixed(1)} → ${s.xi_after.toFixed(1)} (${sign}${Math.abs(change).toFixed(1)}).</div>`;
 }
 
+// "No move needed" box above the swaps when none of them is worth doing (waiver_verdict in app.py)
+function verdictBanner() {
+  if (DATA.waiver_verdict !== "none") return "";
+  return DATA.waiver_targets.length
+    ? `<div class="verdict"><strong>No move needed this week.</strong> None of these swaps would lift your best eleven by much, so they're optional.</div>`
+    : `<div class="verdict"><strong>No move needed this week.</strong> No clear upgrades on the wire right now: your squad already rates higher than the best free agents at every position.</div>`;
+}
+
 function renderSwaps() {
   if (!DATA.managers.some(m => m.entry_id === state.me)) {
     $("swaps").innerHTML = `<div class="empty">Team ${esc(state.me)} isn't listed in this league, so there's nothing to compare. Check the team ID and try again.</div>`;
@@ -363,10 +377,11 @@ function renderSwaps() {
   $("keepBar").innerHTML = kept.length ? "Keeping (never suggested as a drop): "
     + kept.map(p => `<button type="button" data-unkeep="${p.id}" title="Stop keeping ${esc(p.name)}">${esc(p.name)} ✕</button>`).join("") : "";
   // the server works out the swaps (see waiver_targets in app.py); this just draws them
-  $("swaps").innerHTML = DATA.waiver_targets.length ? DATA.waiver_targets.map(s => {
+  $("swaps").innerHTML = verdictBanner() + DATA.waiver_targets.map(s => {
     const drop = player(s.drop), claim = player(s.claim);
     return `
-    <div class="swap">
+    <div class="swap ${s.worth ? "worth" : "small"}">
+      <div class="tag">${s.worth ? "Worth doing" : "Small upgrade"}</div>
       <div class="side drop"><span class="score">${drop.score.toFixed(0)}</span>
         <div class="who"><div class="verb">Drop</div><div class="pname">${esc(drop.name)} <span class="pos">${drop.pos}, ${esc(drop.team)}</span></div>${fixStrip(drop)}
           <button class="keep" type="button" data-keep="${drop.id}" title="Keep ${esc(drop.name)} and suggest dropping someone else instead">Keep ${esc(drop.name)}</button></div></div>
@@ -379,8 +394,7 @@ function renderSwaps() {
       ${xiNote(s, drop)}
       ${riskNote(s)}
     </div>`;
-  }).join("")
-    : `<div class="empty">No clear upgrades on the wire right now. Your squad already rates higher than the best free agents at every position.</div>`;
+  }).join("");
 }
 
 function renderTable() {
