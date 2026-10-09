@@ -360,13 +360,20 @@ PAIRS_PER_POSITION = 2
 MAX_TARGETS = 5
 SMALL_SAMPLE_MINUTES = 300   # a player with fewer minutes than this gets a "too early to trust" note
 RECENT_GAMEWEEKS = 4         # how many gameweeks of minutes to show for the players in a swap
-# A "worth holding" note for a player we suggest dropping: he scored this many points in one of the
-# last HOLD_SEASONS finished seasons (in at least HOLD_MIN_MINUTES minutes), and now he's out or in a slump.
-# The bars are roughly the top quarter of players at each position in my league.
+# A note on a player we suggest dropping: he scored this many points in one of the last HOLD_SEASONS
+# finished seasons (in at least HOLD_MIN_MINUTES minutes), and now he's out or in a slump. The bars are
+# roughly the top quarter of players at each position in my league.
 HOLD_POINTS = {"GKP": 135, "DEF": 140, "MID": 150, "FWD": 130}
 HOLD_MIN_MINUTES = 1500
 HOLD_SEASONS = 2
 HOLD_SLUMP_SHARE = 0.7       # a slump = points per 90 this season under this share of his proven rate
+# a doubt of this % or less counts as out; a milder doubt only if he missed the latest gameweek
+HOLD_DOUBT_MAX = 50
+# How long he's out decides the advice: this many gameweeks or fewer = worth holding, this many or more =
+# fine to let go, in between = your call. Only possible when the news gives a return date.
+HOLD_SHORT_GWS = 4
+HOLD_LONG_GWS = 10
+NEW_SETTLED_MINUTES = 80     # a new signing who played this many minutes last gameweek has settled in
 
 
 def by_score(players):
@@ -518,16 +525,75 @@ def recent_season_names(today=None):
     return [f"{y}/{(y + 1) % 100:02d}" for y in range(start - 1, start - 1 - HOLD_SEASONS, -1)]
 
 
-def hold_case(player, seasons, today=None):
+def gameweeks_out(back, deadlines, next_gw):
     """
-    A reason to think twice before dropping a player, or None. He has to be proven (in one of the
-    last HOLD_SEASONS seasons he played HOLD_MIN_MINUTES or more and scored at least the bar for his
-    position, HOLD_POINTS) and the drop has to look temporary: he's out or doubtful now, or his points
-    per 90 this season (once he has MIN_MINUTES) are under HOLD_SLUMP_SHARE of his proven rate.
-    Returns {"kind": "hold", "text", "season", "points", "minutes"} for his best qualifying season.
-    The FPL feeds only keep season totals for past seasons, so this says he's a proven scorer,
-    not that he scores more late in a season.
+    How long a player expected back on `back` is away, as (gameweeks he misses, gameweeks left once he's
+    back): the gameweeks from next_gw whose deadline falls before his return date. None if we can't tell
+    (no return date, or no deadlines).
     """
+    if not back or not deadlines or not next_gw:
+        return None
+    remaining = range(next_gw, LAST_GW + 1)
+    missed = sum(1 for gw in remaining if gw in deadlines and deadlines[gw] < back)
+    return missed, len(remaining) - missed
+
+
+def season_deadlines():
+    """{gameweek: deadline} for the season, from the Draft site's events (cached). Empty if that fails."""
+    try:
+        return gameweek_deadlines(get_json(f"{DRAFT}/bootstrap-static").get("events") or {})
+    except (requests.RequestException, AttributeError, ValueError):
+        return {}
+
+
+def absence_note(player, deadlines, next_gw):
+    """
+    What a player's absence means for holding him: (kind, a sentence). kind is "hold" (a doubt, or out
+    for HOLD_SHORT_GWS gameweeks or fewer), "let_go" (out for HOLD_LONG_GWS or more) or "call" (in
+    between, or we can't tell how long: no return date). The length comes from gameweeks_out.
+    """
+    chance = player.get("chance", 100)
+    back = return_date(player)
+    if back is None:
+        if chance > 0:
+            return "hold", f"He's only a doubt ({chance}% to play), so this may not last."
+        return "call", ("There's no return date yet, so we can't tell how long he's out. "
+                        "Check the news before dropping him.")
+    day = f"{back.day} {back:%b}"
+    away = gameweeks_out(back, deadlines, next_gw)
+    if away is None:
+        return "call", f"Expected back {day}, but we can't work out how many gameweeks that is."
+    missed, left = away
+    if missed == 0:
+        return "hold", f"Expected back {day}, in time for the next gameweek."
+    if left == 0:
+        span = f"He's out for the rest of the season (back around {day})."
+    else:
+        weeks = f"{missed} gameweek{'s' if missed != 1 else ''}"
+        span = f"He's out for about {weeks} (back around {day}, {left} left after that)."
+    if missed <= HOLD_SHORT_GWS:
+        return "hold", f"{span} Holding him costs a roster spot for only a short while."
+    if missed >= HOLD_LONG_GWS:
+        return "let_go", f"{span} That's a long wait for a roster spot, so it's fine to let him go."
+    return "call", f"{span} That's a long enough wait that it's your call."
+
+
+def hold_case(player, seasons, today=None, recent=None, deadlines=None, next_gw=None):
+    """
+    A note on whether to hold a player we'd drop, or None. He has to be proven (in one of the last
+    HOLD_SEASONS seasons he played HOLD_MIN_MINUTES or more and scored at least the bar for his
+    position, HOLD_POINTS) and the drop has to look temporary: he's out, or his points per 90 this
+    season (once he has MIN_MINUTES) are under HOLD_SLUMP_SHARE of his proven rate. "Out" means his
+    chance of playing is HOLD_DOUBT_MAX% or less, or he's doubtful and played 0 minutes in the latest
+    gameweek (`recent` is his minutes in the latest gameweeks, oldest first).
+    Returns {"kind", "text", "season", "points", "minutes", "gws_out"} for his best qualifying season.
+    kind is "hold", "call" or "let_go" (see absence_note); gws_out is how many gameweeks he misses, or
+    None when we can't tell. The FPL feeds only keep season totals for past seasons, so this says he's
+    a proven scorer, not that he scores more late in a season. A player who has left his club (status "u",
+    "Has joined ... on loan") gets no note: there's nothing to wait for.
+    """
+    if player.get("status") == "u":
+        return None
     names = recent_season_names(today)
     bar = HOLD_POINTS.get(player["pos"])
     proven = [s for s in seasons if s["season"] in names and s["minutes"] >= HOLD_MIN_MINUTES
@@ -539,7 +605,8 @@ def hold_case(player, seasons, today=None):
 
     minutes_now = player.get("minutes", 0)
     now = player.get("total", 0) / minutes_now * 90 if minutes_now >= MIN_MINUTES else None
-    out = player.get("chance", 100) < 100
+    chance = player.get("chance", 100)
+    out = chance <= HOLD_DOUBT_MAX or (chance < 100 and bool(recent) and recent[-1] == 0)
     slump = now is not None and now < HOLD_SLUMP_SHARE * then
     if not (out or slump):
         return None
@@ -549,22 +616,28 @@ def hold_case(player, seasons, today=None):
             f"({best['minutes']:,} minutes, {then:.1f} per 90).")
     if slump:
         text += f" This season he's on {now:.1f} per 90."
+    kind, gws_out = "hold", None
     if out:
-        back = return_date(player)
-        text += f" Expected back {back.day} {back:%b}." if back else " There's no return date yet."
-    text += " He could be worth waiting for, but holding him uses a roster spot. Press Keep to hold him."
-    return {"kind": "hold", "text": text, "season": best["season"],
-            "points": best["points"], "minutes": best["minutes"]}
+        kind, sentence = absence_note(player, deadlines, next_gw)
+        text += " " + sentence
+        away = gameweeks_out(return_date(player), deadlines, next_gw)
+        gws_out = away[0] if away else None
+    else:
+        text += " He could pick up again, but holding him uses a roster spot."
+    text += " Press Keep if you'd rather hold him." if kind == "let_go" else " Press Keep to hold him."
+    return {"kind": kind, "text": text, "season": best["season"], "points": best["points"],
+            "minutes": best["minutes"], "gws_out": gws_out}
 
 
 def new_signing(player, seasons, recent):
     """
     A note for a player new to the Premier League (no minutes in any past season on record)
     whose minutes are going up: the last half of `recent` (his minutes in the latest
-    gameweeks) adds up to more than the first half, and he played in the latest one.
+    gameweeks) adds up to more than the first half, and he played in the latest one but
+    under NEW_SETTLED_MINUTES (past that he has settled in, so there's nothing to wait for).
     Says it's too early to judge him. Facts only: it doesn't predict he'll score more.
     """
-    if any(s["minutes"] > 0 for s in seasons) or not recent or recent[-1] <= 0:
+    if any(s["minutes"] > 0 for s in seasons) or not recent or not 0 < recent[-1] < NEW_SETTLED_MINUTES:
         return None
     half = len(recent) // 2
     if sum(recent[half:]) <= sum(recent[:half]):
@@ -574,18 +647,20 @@ def new_signing(player, seasons, recent):
                                    f"({mins}). It's too early to judge him."}
 
 
-def keep_notes(drops, seasons, recent, today=None):
+def keep_notes(drops, seasons, recent, today=None, deadlines=None, next_gw=None):
     """
-    {player id: note} for the players we'd drop that have a reason to hold (hold_case) or are new and
-    settling in (new_signing). `seasons` is past_seasons(drops); `recent` is {id: minutes in the latest
-    gameweeks}. A player with no history fetched gets no note.
+    {player id: note} for the players we'd drop that have a note on holding them (hold_case) or are
+    new and settling in (new_signing). `seasons` is past_seasons(drops); `recent` is {id: minutes in the
+    latest gameweeks}; `deadlines` and `next_gw` let hold_case work out how long a player is out. A
+    player with no history fetched gets no note.
     """
     notes = {}
     for p in drops:
         past = seasons.get(p["id"])
         if past is None:
             continue
-        note = hold_case(p, past, today) or new_signing(p, past, recent.get(p["id"], []))
+        minutes = recent.get(p["id"], [])
+        note = hold_case(p, past, today, minutes, deadlines, next_gw) or new_signing(p, past, minutes)
         if note:
             notes[p["id"]] = note
     return notes
@@ -2297,7 +2372,8 @@ def team(entry_id):
     # a reason to hold, or a new signing settling in, for the players we'd drop (one request each)
     dropped = {t["drop"] for t in data["waiver_targets"]}
     drops = [p for p in data["players"] if p["id"] in dropped]
-    data["keep_notes"] = keep_notes(drops, past_seasons(drops), data["recent"]["minutes"])
+    data["keep_notes"] = keep_notes(drops, past_seasons(drops), data["recent"]["minutes"],
+                                    deadlines=season_deadlines(), next_gw=data["next_gw"])
     return jsonify(data)
 
 

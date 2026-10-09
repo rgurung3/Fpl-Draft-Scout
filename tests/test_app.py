@@ -884,7 +884,20 @@ WILSON = {"season": "2025/26", "points": 168, "minutes": 2674}     # his real fi
 def holder(chance=0, minutes=145, total=3, pos="MID", news="Thigh injury - Unknown return date", pid=260):
     """A player as hold_case sees him, plus this season's figures. Default: injured Wilson."""
     return {**rated(pid, pos, 0, owner=100, chance=chance), "name": "Wilson",
-            "minutes": minutes, "total": total, "news": news}
+            "minutes": minutes, "total": total, "news": news,
+            "news_added": "2026-10-08T12:00:00Z"}     # so "back 4 Apr" means 2027, whatever today is
+
+
+def weekly_deadlines(first_gw=7):
+    """Deadlines for gameweeks first_gw to 38, a week apart, starting Saturday 10 Oct 2026 at 10:00."""
+    start = datetime(2026, 10, 10, 10, tzinfo=timezone.utc)
+    return {gw: start + timedelta(weeks=gw - first_gw) for gw in range(first_gw, 39)}
+
+
+def injured_until(missed, deadlines):
+    """News for a player whose return date makes him miss exactly `missed` gameweeks from GW7."""
+    back = deadlines[6 + missed] + timedelta(days=1) if missed else deadlines[7] - timedelta(days=1)
+    return f"Hamstring injury - Expected back {back.day} {back:%b}"
 
 
 def test_season_names_follow_the_season_not_the_calendar_year():
@@ -893,18 +906,91 @@ def test_season_names_follow_the_season_not_the_calendar_year():
     assert app.recent_season_names(datetime(2027, 8, 1, tzinfo=timezone.utc)) == ["2026/27", "2025/26"]
 
 
-def test_an_injured_proven_scorer_gets_a_worth_holding_note():
+def test_an_injured_proven_scorer_with_no_return_date_is_your_call():
     note = app.hold_case(holder(), [WILSON], TODAY)
-    assert note["kind"] == "hold"
-    assert (note["season"], note["points"], note["minutes"]) == ("2025/26", 168, 2674)
+    assert note["kind"] == "call"                       # we can't tell how long he's out
+    assert (note["season"], note["points"], note["minutes"], note["gws_out"]) == ("2025/26", 168, 2674, None)
     assert "Wilson scored 168 points last season (2,674 minutes, 5.7 per 90)." in note["text"]
-    assert "There's no return date yet." in note["text"]
-    assert "Press Keep" in note["text"]
+    assert "There's no return date yet, so we can't tell how long he's out." in note["text"]
+    assert "Press Keep to hold him." in note["text"]
 
 
-def test_the_note_gives_the_return_date_when_there_is_one():
+def test_gameweeks_out_counts_the_deadlines_before_the_return_date():
+    dl = weekly_deadlines()                              # GW7 is 10 Oct, then a week apart; 32 gameweeks left
+    day = timedelta(days=1)
+    assert app.gameweeks_out(dl[7] - day, dl, 7) == (0, 32)          # back before the next deadline
+    assert app.gameweeks_out(dl[10] + day, dl, 7) == (4, 28)         # misses GW7-10
+    assert app.gameweeks_out(dl[38] + day, dl, 7) == (32, 0)         # not back before the season ends
+    assert app.gameweeks_out(dl[10] + day, dl, 9) == (2, 28)         # counted from the next gameweek on
+    assert app.gameweeks_out(None, dl, 7) is None                    # no return date
+    assert app.gameweeks_out(dl[10], {}, 7) is None                  # no deadlines
+    assert app.gameweeks_out(dl[10], dl, None) is None
+
+
+@pytest.mark.parametrize("missed,kind", [(0, "hold"), (1, "hold"), (4, "hold"), (5, "call"),
+                                         (9, "call"), (10, "let_go"), (25, "let_go")])
+def test_how_long_he_is_out_decides_the_advice(missed, kind):
+    dl = weekly_deadlines()
+    player = holder(news=injured_until(missed, dl))
+    note = app.hold_case(player, [WILSON], TODAY, deadlines=dl, next_gw=7)
+    assert (note["kind"], note["gws_out"]) == (kind, missed)
+
+
+def test_a_short_absence_says_so_and_how_much_season_is_left():
+    dl = weekly_deadlines()
+    note = app.hold_case(holder(news=injured_until(4, dl)), [WILSON], TODAY, deadlines=dl, next_gw=7)
+    assert "He's out for about 4 gameweeks (back around 1 Nov, 28 left after that)." in note["text"]
+    assert "only a short while" in note["text"]
+    assert note["text"].endswith("Press Keep to hold him.")
+
+
+def test_one_gameweek_is_singular_and_a_return_before_the_deadline_says_so():
+    dl = weekly_deadlines()
+    one = app.hold_case(holder(news=injured_until(1, dl)), [WILSON], TODAY, deadlines=dl, next_gw=7)
+    assert "He's out for about 1 gameweek (" in one["text"]
+    none = app.hold_case(holder(news=injured_until(0, dl)), [WILSON], TODAY, deadlines=dl, next_gw=7)
+    assert "in time for the next gameweek." in none["text"]
+
+
+def test_a_long_absence_is_fine_to_let_go_but_keep_is_still_offered():
+    dl = weekly_deadlines()
+    note = app.hold_case(holder(news=injured_until(10, dl)), [WILSON], TODAY, deadlines=dl, next_gw=7)
+    assert note["kind"] == "let_go"
+    assert "so it's fine to let him go." in note["text"]
+    assert note["text"].endswith("Press Keep if you'd rather hold him.")
+
+
+def test_out_for_the_rest_of_the_season():
+    dl = weekly_deadlines()
+    note = app.hold_case(holder(news=injured_until(32, dl)), [WILSON], TODAY, deadlines=dl, next_gw=7)
+    assert note["kind"] == "let_go" and "He's out for the rest of the season (back around " in note["text"]
+
+
+def test_a_middle_length_absence_is_left_to_you():
+    dl = weekly_deadlines()
+    note = app.hold_case(holder(news=injured_until(7, dl)), [WILSON], TODAY, deadlines=dl, next_gw=7)
+    assert note["kind"] == "call" and "it's your call." in note["text"]
+
+
+def test_a_return_date_with_no_deadlines_is_given_but_not_judged():
     note = app.hold_case(holder(news="Hamstring injury - Expected back 10 Oct"), [WILSON], TODAY)
-    assert "Expected back 10 Oct." in note["text"]
+    assert note["kind"] == "call"
+    assert "Expected back 10 Oct, but we can't work out how many gameweeks that is." in note["text"]
+
+
+def test_season_deadlines_come_from_the_draft_events(monkeypatch):
+    events = {"current": 6, "next": 7, "data": [{"id": 7, "deadline_time": "2026-10-10T10:00:00Z"},
+                                                {"id": 8, "deadline_time": "2026-10-17T10:00:00Z"}]}
+    monkeypatch.setattr(app, "get_json", lambda url: {"events": events})
+    assert app.season_deadlines() == {7: datetime(2026, 10, 10, 10, tzinfo=timezone.utc),
+                                      8: datetime(2026, 10, 17, 10, tzinfo=timezone.utc)}
+
+
+def test_season_deadlines_are_empty_when_the_request_fails(monkeypatch):
+    def down(url):
+        raise requests.ConnectionError("down")
+    monkeypatch.setattr(app, "get_json", down)
+    assert app.season_deadlines() == {}
 
 
 @pytest.mark.parametrize("pos,bar", [("GKP", 135), ("DEF", 140), ("MID", 150), ("FWD", 130)])
@@ -946,8 +1032,31 @@ def test_a_slump_gets_a_note_even_when_fit():
     assert "return date" not in note["text"]           # he isn't out, so no return date to give
 
 
-def test_a_doubt_counts_as_out():
-    assert app.hold_case(holder(chance=75, minutes=540, total=30), [WILSON], TODAY) is not None
+@pytest.mark.parametrize("chance,recent,flagged", [
+    (0, None, True),               # out
+    (50, [90, 90, 90, 90], True),  # 50% or less counts as out whatever he played
+    (75, [90, 90, 90, 90], False), # a 75% flag on a man playing every week is not "out"
+    (75, [90, 90, 90, 0], True),   # ... unless he missed the latest gameweek
+    (75, None, False),             # no minutes to look at: only the bigger doubts count
+    (100, [90, 90, 90, 0], False), # fit
+])
+def test_who_counts_as_out(chance, recent, flagged):
+    player = holder(chance=chance, minutes=540, total=30)      # playing well, so no slump
+    note = app.hold_case(player, [WILSON], TODAY, recent=recent)
+    assert (note is not None) == flagged
+
+
+def test_a_player_who_has_left_his_club_gets_no_note():
+    gone = {**holder(news="Has joined Juventus on loan for the rest of the season"), "status": "u"}
+    assert app.hold_case(gone, [WILSON], TODAY) is None
+    assert app.hold_case({**gone, "status": "i"}, [WILSON], TODAY) is not None   # the same news, but injured
+
+
+def test_a_doubt_with_no_return_date_is_a_short_absence():
+    note = app.hold_case(holder(chance=75, news="Knock - 75% chance of playing"), [WILSON], TODAY,
+                         recent=[90, 90, 90, 0])
+    assert note["kind"] == "hold"
+    assert "He's only a doubt (75% to play), so this may not last." in note["text"]
 
 
 def test_too_few_minutes_this_season_is_not_called_a_slump():
@@ -978,12 +1087,29 @@ def test_new_signing_needs_minutes_that_are_going_up(recent):
     assert app.new_signing(rated(1, "MID", 30), [], recent) is None
 
 
+@pytest.mark.parametrize("recent,flagged", [([0, 26, 71, 71], True), ([0, 1, 90, 79], True),
+                                            ([74, 90, 90, 90], False), ([76, 90, 90, 90], False),
+                                            ([13, 90, 71, 80], False)])
+def test_a_new_signing_who_has_settled_in_gets_no_note(recent, flagged):
+    note = app.new_signing(rated(1, "MID", 30), [], recent)   # 80 minutes or more last gameweek = settled
+    assert (note is not None) == flagged
+
+
 def test_keep_notes_are_keyed_by_player_and_skip_players_without_history():
     wilson, nothing = holder(pid=1), rated(3, "DEF", 20)
     newcomer = {**rated(2, "MID", 30), "name": "Newcomer"}
     seasons = {1: [WILSON], 2: []}                         # 3's history couldn't be fetched
     notes = app.keep_notes([wilson, newcomer, nothing], seasons, {2: [0, 26, 71, 71], 3: [0, 90]}, TODAY)
-    assert {k: v["kind"] for k, v in notes.items()} == {1: "hold", 2: "new"}
+    assert {k: v["kind"] for k, v in notes.items()} == {1: "call", 2: "new"}   # no return date for Wilson
+
+
+def test_keep_notes_pass_the_schedule_and_minutes_on_to_hold_case():
+    dl = weekly_deadlines()
+    wilson = holder(pid=1, chance=75, news=injured_until(2, dl), minutes=540, total=30)
+    played = app.keep_notes([wilson], {1: [WILSON]}, {1: [90, 90, 90, 90]}, TODAY, dl, 7)
+    missed = app.keep_notes([wilson], {1: [WILSON]}, {1: [90, 90, 90, 0]}, TODAY, dl, 7)
+    assert played == {}                                  # a 75% doubt who played last week isn't out
+    assert (missed[1]["kind"], missed[1]["gws_out"]) == ("hold", 2)
 
 
 def classic_site(rows_by_classic_id):
@@ -1028,9 +1154,10 @@ def test_players_carry_their_code(fake_api):
     assert [p["code"] for p in players] == [1001, 1002, 1003]
 
 
-def test_team_endpoint_adds_a_note_for_a_proven_injured_drop(fake_api, monkeypatch):
-    fake_api["elements"][0].update(status="i", chance_of_playing_next_round=0,
-                                   news="Thigh injury - Unknown return date")
+def proven_injured_drop(fake_api, monkeypatch, news):
+    """Make fake player 1 (my only player) injured with this news, and a proven scorer on the classic site."""
+    fake_api["elements"][0].update(status="i", chance_of_playing_next_round=0, news=news,
+                                   news_added="2026-10-08T12:00:00Z")
     last_season = app.recent_season_names()[0]
     real = app.get_json
 
@@ -1040,9 +1167,23 @@ def test_team_endpoint_adds_a_note_for_a_proven_injured_drop(fake_api, monkeypat
         return real(url)
 
     monkeypatch.setattr(app, "get_json", with_history)
+
+
+def test_team_endpoint_adds_a_note_for_a_proven_injured_drop(fake_api, monkeypatch):
+    proven_injured_drop(fake_api, monkeypatch, "Thigh injury - Unknown return date")
     data = app.app.test_client().get("/api/team/100").get_json()
     assert [t["drop"] for t in data["waiver_targets"]] == [1]
-    assert data["keep_notes"]["1"]["kind"] == "hold"
+    assert data["keep_notes"]["1"]["kind"] == "call"             # no return date, so no way to tell how long
+
+
+def test_team_endpoint_works_out_how_long_he_is_out_from_the_deadlines(fake_api, monkeypatch):
+    dl = weekly_deadlines()
+    fake_api["events"]["data"] = [{"id": gw, "deadline_time": when.strftime("%Y-%m-%dT%H:%M:%SZ")}
+                                  for gw, when in dl.items()]
+    proven_injured_drop(fake_api, monkeypatch, injured_until(3, dl))
+    note = app.app.test_client().get("/api/team/100").get_json()["keep_notes"]["1"]
+    assert (note["kind"], note["gws_out"]) == ("hold", 3)       # next gameweek is 7 in the fake data
+    assert "29 left after that" in note["text"]
 
 
 def test_team_endpoint_has_no_notes_when_there_is_nothing_to_say(fake_api):

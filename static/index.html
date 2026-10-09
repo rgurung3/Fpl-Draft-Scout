@@ -38,7 +38,8 @@
   .swap .why strong { color: var(--ink); }
   .swap .why b { font-weight: 600; font-variant-numeric: tabular-nums; }
   .swap .why .up { color: var(--pitch); } .swap .why .down { color: var(--rival); }
-  .swap .why.hold, .swap .why.new { border-left: 3px solid var(--amber); padding-left: 10px; }
+  .swap .why.hold, .swap .why.call, .swap .why.new { border-left: 3px solid var(--amber); padding-left: 10px; }
+  .swap .why.let_go { border-left: 3px solid var(--muted); padding-left: 10px; }
   .keepbar { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin: 0 0 12px; font-size: .9rem; }
   .keepbar button, .swap .keep { font: inherit; font-size: .8rem; background: transparent; color: var(--pitch);
     border: 1px solid var(--pitch); border-radius: 999px; padding: 1px 10px; cursor: pointer; }
@@ -317,10 +318,12 @@ function whyNote(s) {
   // fitness (the dropped player is injured, suspended or doubtful) gets its own line above the rest
   const fit = s.why.availability
     ? `<div class="why avail"><strong>Fitness:</strong> ${esc(s.why.availability.text)} <b class="up">${pts(s.why.availability.points)}</b></div>` : "";
-  // a reason to hold the dropped player (a proven scorer who is out or in a slump), or a new signing settling in
+  // a note on the dropped player (keep_notes in app.py): a proven scorer who is out or in a slump (worth holding,
+  // your call or fine to let go, depending on how long he's out), or a new signing settling in
+  const noteLabels = {hold: "Worth holding", call: "Your call", let_go: "Fine to let go", new: "New signing"};
   const note = (DATA.keep_notes || {})[s.drop];
   const hold = note
-    ? `<div class="why ${note.kind}"><strong>${note.kind === "hold" ? "Worth holding" : "New signing"}:</strong> ${esc(note.text)}</div>` : "";
+    ? `<div class="why ${note.kind}"><strong>${noteLabels[note.kind]}:</strong> ${esc(note.text)}</div>` : "";
   const why = reasons ? `<div class="why"><strong>Why:</strong> ${reasons}. ${against}</div>`
     : against ? `<div class="why">${against}</div>` : "";
   // players on few minutes: their numbers could change quickly (either side of the swap)
