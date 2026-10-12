@@ -36,6 +36,7 @@ HISTORY_DIR = Path(__file__).parent / "history"  # saved league snapshots, one f
 SEASON_STARTS_IN = 7    # a new season starts in July: a snapshot taken from July on belongs to that year
 MIN_MINUTES = 180       # per-90 stats count in full from this many minutes (in proportion below it)
 SCALE_PERCENTILE = 95   # each stat is measured against this percentile of regular players
+HOT_COLD_GAP = 1.5      # "running hot" (or cold): form this far above (below) a regular's points per game
 
 # The weekly recap: an AI writes the words, but every fact in it is worked out here (see "weekly recap").
 # The AI needs two environment variables: ANTHROPIC_API_KEY, and RECAP_MODEL (the Claude model to use).
@@ -1325,13 +1326,40 @@ def league_rivalries(details, league_id, a=None, b=None, folder=HISTORY_DIR):
 
 # ---------------------------------------------------------------- league squads (the league page)
 
+def xi_pieces(xi):
+    """
+    What a best eleven's strength is made of: the average of each rating piece over the eleven (form,
+    ppg and so on, plus "avail", what injury doubts take off). They add up to the strength, give or
+    take rounding. {} for an empty eleven.
+    """
+    if not xi:
+        return {}
+    return {piece: round(sum(p["breakdown"].get(piece, 0) for p in xi) / len(xi), 1)
+            for piece in PIECES + ("avail",)}
+
+
+def form_heat(p):
+    """
+    "hot" or "cold" when a regular's form is well above or below his points per game this season
+    (HOT_COLD_GAP), otherwise None. Players under MIN_MINUTES never count: a couple of games say nothing.
+    """
+    if p["minutes"] < MIN_MINUTES:
+        return None
+    gap = round(p["form"] - p["ppg"], 1)
+    return "hot" if gap >= HOT_COLD_GAP else "cold" if gap <= -HOT_COLD_GAP else None
+
+
 def league_squads(data):
     """
     What the league page's squad chart draws, from load_league's data: every manager ranked by squad
     strength (the average rating of their best legal eleven, the same number League squads shows on the
     main page), each with their formation, best eleven (by position, then rating) and bench (by rating).
-    Players are {"name", "pos", "club", "rating"} with the rating out of 100 for the chosen view.
-    Also the view and the gameweeks it looks at ("windows"), for the labels.
+    Players are {"name", "pos", "club", "rating", "form", "ppg", "heat"} with the rating out of 100 for
+    the chosen view and heat "hot", "cold" or None (see form_heat).
+
+    Each manager also has "pieces" (what the strength is made of, see xi_pieces) and "vs_league": their
+    strength and each piece minus the average of the managers who have a best eleven, so the page can
+    say where a lead comes from. Also the view and the gameweeks it looks at ("windows"), for the labels.
     """
     order = {pos: i for i, pos in enumerate(FORMATION)}
     owned = {}
@@ -1340,7 +1368,8 @@ def league_squads(data):
             owned.setdefault(p["owner"], []).append(p)
 
     def row(p):
-        return {"name": p["name"], "pos": p["pos"], "club": p["team"], "rating": p["score"]}
+        return {"name": p["name"], "pos": p["pos"], "club": p["team"], "rating": p["score"],
+                "form": p["form"], "ppg": p["ppg"], "heat": form_heat(p)}
 
     managers = []
     for m in data["managers"]:
@@ -1349,11 +1378,93 @@ def league_squads(data):
         bench = [p for p in squad if p["id"] not in m["best_xi"]]
         managers.append({
             "entry_id": m["entry_id"], "team": m["team_name"], "manager": m["manager"],
-            "strength": m["strength"], "formation": m["formation"],
+            "strength": m["strength"], "formation": m["formation"], "pieces": xi_pieces(xi),
             "best_xi": [row(p) for p in sorted(xi, key=lambda p: (order.get(p["pos"], 9), -p["score"]))],
             "bench": [row(p) for p in sorted(bench, key=lambda p: -p["score"])]})
+
+    for m in managers:
+        m["vs_league"] = {"strength": 0, "pieces": {}}
+    have_xi = [m for m in managers if m["best_xi"]]
+    if have_xi:
+        n = len(have_xi)
+        average = sum(m["strength"] for m in have_xi) / n
+        average_pieces = {k: sum(m["pieces"][k] for m in have_xi) / n for k in have_xi[0]["pieces"]}
+        for m in have_xi:
+            m["vs_league"] = {"strength": round(m["strength"] - average, 1),
+                              "pieces": {k: round(v - average_pieces[k], 1) for k, v in m["pieces"].items()}}
     managers.sort(key=lambda m: -m["strength"])
     return {"view": data["view"], "windows": data["windows"], "managers": managers}
+
+
+# ---------------------------------------------------------------- saved squad strength
+
+def strength_snapshot(by_view, today=None):
+    """
+    One day's record of every manager's squad strength, kept so we can see how it moves (see
+    save_snapshot.py). The Draft site only knows how strong squads are today, so history can only be
+    built by writing it down as we go. by_view is load_league's data for each view:
+    {"week": ..., "season": ...}.
+
+    managers: per manager {entry_id, team, manager} and, for each view, {strength, formation, pieces,
+    xi}: pieces is what the strength is made of (see xi_pieces) and xi is the best eleven as
+    [player id, rating]. players maps the ids that appear to names, so the file reads on its own
+    (its keys are text, because they're JSON keys). current_gw, next_gw and windows say what the
+    ratings were looking at.
+    """
+    today = today or datetime.now(timezone.utc)
+    first = next(iter(by_view.values()))
+    names = {}
+    per_view = {}
+    for view, data in by_view.items():
+        by_id = {p["id"]: p for p in data["players"]}
+        per_view[view] = {}
+        for m in data["managers"]:
+            xi = [by_id[i] for i in m["best_xi"]]
+            names.update({str(p["id"]): p["name"] for p in xi})
+            per_view[view][m["entry_id"]] = {
+                "strength": m["strength"], "formation": m["formation"], "pieces": xi_pieces(xi),
+                "xi": [[p["id"], p["score"]] for p in xi]}
+    return {
+        "season": season_label(today),
+        "date": today.date().isoformat(),
+        "current_gw": first["current_gw"], "next_gw": first["next_gw"], "windows": first["windows"],
+        "managers": [{"entry_id": m["entry_id"], "team": m["team_name"], "manager": m["manager"],
+                      **{v: per_view[v][m["entry_id"]] for v in by_view if m["entry_id"] in per_view[v]}}
+                     for m in first["managers"]],
+        "players": names,
+    }
+
+
+def strength_path(league_id, season, folder=HISTORY_DIR):
+    return Path(folder) / season / f"strength_{league_id}.json"
+
+
+def save_strength(league_id, snapshot, folder=HISTORY_DIR):
+    """
+    Add a strength snapshot to history/<season>/strength_<id>.json, which keeps one entry per date,
+    oldest first (each on its own line, so a day's change is one line in git). Returns the path, or
+    None if there was nothing new: the numbers are the same as the latest entry's, apart from the date,
+    so a quiet day makes no commit (and so no redeploy). A second run on the same date with different
+    numbers replaces that date's entry. An unreadable file raises instead of being written over.
+    """
+    path = strength_path(league_id, snapshot["season"], folder)
+    entries = json.loads(path.read_text(encoding="utf-8"))["snapshots"] if path.exists() else []
+    entry = {k: v for k, v in snapshot.items() if k != "season"}
+
+    def body(e):
+        return {k: v for k, v in e.items() if k != "date"}
+
+    if entries and body(entries[-1]) == body(entry):
+        return None
+    if entries and entries[-1]["date"] == entry["date"]:
+        entries[-1] = entry
+    else:
+        entries.append(entry)
+    lines = ",\n".join(json.dumps(e, separators=(",", ":")) for e in entries)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'{{"league_id": {json.dumps(league_id)}, "season": {json.dumps(snapshot["season"])}, '
+                    f'"snapshots": [\n{lines}\n]}}\n', encoding="utf-8")
+    return path
 
 
 # ---------------------------------------------------------------- weekly recap

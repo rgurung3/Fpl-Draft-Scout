@@ -13,6 +13,7 @@ import requests
 
 import app
 import check_league
+import save_snapshot
 
 # ---------------------------------------------------------------- fake data
 
@@ -3064,14 +3065,18 @@ def test_league_hub_offers_the_recap_to_everyone():
 
 def squad_data():
     """What load_league gives, cut down to what league_squads reads: two managers and a few players."""
-    def player(pid, name, pos, score, owner):
-        return {"id": pid, "name": name, "pos": pos, "team": "ARS", "score": score, "owner": owner}
+    def player(pid, name, pos, score, owner, form=5.0, minutes=900):
+        # the rating is half form, half fixtures, so the pieces are easy to add up
+        return {"id": pid, "name": name, "pos": pos, "team": "ARS", "score": score, "owner": owner,
+                "form": form, "ppg": 5.0, "minutes": minutes,
+                "breakdown": {"form": score / 2, "fix": score / 2}}
 
     return {
         "view": "week", "windows": {"week": {"from": 7, "to": 11}, "season": {"from": 7, "to": 13}},
-        "players": [player(1, "Raya", "GKP", 70.0, 100), player(2, "Saka", "MID", 80.0, 100),
-                    player(3, "Gabriel", "DEF", 60.0, 100), player(4, "Haaland", "FWD", 90.0, 100),
-                    player(5, "Odegaard", "MID", 55.0, 100), player(6, "Bench", "DEF", 30.0, 100),
+        "players": [player(1, "Raya", "GKP", 70.0, 100), player(2, "Saka", "MID", 80.0, 100, form=8.0),
+                    player(3, "Gabriel", "DEF", 60.0, 100, form=2.0), player(4, "Haaland", "FWD", 90.0, 100),
+                    player(5, "Odegaard", "MID", 55.0, 100, form=9.0, minutes=90),
+                    player(6, "Bench", "DEF", 30.0, 100),
                     player(7, "Palmer", "MID", 75.0, 200), player(8, "Free", "FWD", 99.0, None)],
         "managers": [
             {"entry_id": 100, "team_name": "Weaker FC", "manager": "A B", "strength": 51.0,
@@ -3089,7 +3094,8 @@ def test_squads_rank_managers_by_strength_with_their_eleven_by_position_and_thei
     assert weaker["strength"] == 51.0 and weaker["formation"] == "1-2-1"
     assert [(p["name"], p["pos"]) for p in weaker["best_xi"]] == [
         ("Raya", "GKP"), ("Gabriel", "DEF"), ("Saka", "MID"), ("Odegaard", "MID"), ("Haaland", "FWD")]
-    assert weaker["best_xi"][0] == {"name": "Raya", "pos": "GKP", "club": "ARS", "rating": 70.0}
+    assert weaker["best_xi"][0] == {"name": "Raya", "pos": "GKP", "club": "ARS", "rating": 70.0,
+                                    "form": 5.0, "ppg": 5.0, "heat": None}
     assert [p["name"] for p in weaker["bench"]] == ["Bench"]
     assert (out["view"], out["windows"]["week"]) == ("week", {"from": 7, "to": 11})
 
@@ -3100,6 +3106,39 @@ def test_squads_leave_out_players_nobody_owns_and_cope_with_an_empty_squad():
     assert "Free" not in everyone
     empty = out["managers"][2]
     assert empty["best_xi"] == [] and empty["bench"] == []
+
+
+def test_squads_show_what_the_strength_is_made_of_and_how_it_compares_with_the_league():
+    out = app.league_squads(squad_data())
+    weaker, stronger, empty = out["managers"][1], out["managers"][0], out["managers"][2]
+    assert weaker["pieces"]["form"] == 35.5 and weaker["pieces"]["fix"] == 35.5  # (70+80+60+90+55) / 5 / 2
+    assert weaker["pieces"]["xgi"] == 0 and weaker["pieces"]["avail"] == 0       # none of it: 0, not missing
+    assert stronger["pieces"]["form"] == 37.5
+    # the league average is 55.5 strength and 36.5 form: the empty squad isn't counted in it
+    assert weaker["vs_league"] == {"strength": -4.5, "pieces": {**{k: 0 for k in weaker["pieces"]},
+                                                                "form": -1.0, "fix": -1.0}}
+    assert (stronger["vs_league"]["strength"], stronger["vs_league"]["pieces"]["form"]) == (4.5, 1.0)
+    assert empty["pieces"] == {} and empty["vs_league"] == {"strength": 0, "pieces": {}}
+
+
+def test_squads_mark_players_running_hot_or_cold_but_not_ones_with_few_minutes():
+    best = {p["name"]: p["heat"] for p in app.league_squads(squad_data())["managers"][1]["best_xi"]}
+    assert best == {"Raya": None, "Gabriel": "cold", "Saka": "hot", "Odegaard": None, "Haaland": None}
+    # Odegaard's form is 9.0 against 5.0 a game, but on 90 minutes that's one game: not a trend
+
+
+@pytest.mark.parametrize("form,ppg,minutes,heat", [
+    (7.3, 4.5, 900, "hot"),
+    (2.0, 5.2, 900, "cold"),
+    (6.0, 4.5, 900, "hot"),     # exactly the gap counts
+    (4.1, 2.6, 900, "hot"),     # 4.1 - 2.6 is 1.4999999999999996 in floating point: still the gap
+    (4.7, 3.3, 900, None),      # 1.4 is inside the gap
+    (5.0, 5.0, 900, None),
+    (9.0, 5.0, app.MIN_MINUTES - 1, None),   # too few minutes to say
+    (9.0, 5.0, app.MIN_MINUTES, "hot"),
+])
+def test_form_heat(form, ppg, minutes, heat):
+    assert app.form_heat({"form": form, "ppg": ppg, "minutes": minutes}) == heat
 
 
 def test_squads_route_returns_the_ranking_for_either_view(two_managers):
@@ -3127,6 +3166,90 @@ def test_league_hub_charts_page_has_the_squad_strength_chart_for_everyone():
     where = [page.index(f'id="{name}"') for name in ("panel-charts", "squadsSection", "panel-rivalries")]
     assert where == sorted(where)                              # inside the Charts page, before Rivalries
     assert 'data-view="season"' in page                       # the Next 5 / Until the break toggle
+    assert "What the rating is made of" in page and "running ${p.heat}" in page
+
+
+# ---------------------------------------------------------------- saved squad strength
+
+def strength_snap(strength, day):
+    """A one-manager, one-view strength snapshot built by hand, with a number to change."""
+    data = {"current_gw": 6, "next_gw": 7, "windows": {"week": {"from": 7, "to": 11}},
+            "players": [{"id": 1, "name": "Raya", "score": strength, "breakdown": {"form": strength}}],
+            "managers": [{"entry_id": 100, "team_name": "My FC", "manager": "Sam Lee",
+                          "strength": strength, "formation": "0-0-0", "best_xi": [1]}]}
+    return app.strength_snapshot({"week": data}, today=day)
+
+
+def test_strength_snapshot_records_both_views_for_every_manager(two_managers):
+    by_view = {view: app.load_league(123, view) for view in app.VIEWS}
+    snap = app.strength_snapshot(by_view, today=datetime(2026, 10, 12))
+    assert (snap["season"], snap["date"]) == ("2026-27", "2026-10-12")
+    assert (snap["current_gw"], snap["next_gw"]) == (6, 7)
+    assert snap["windows"] == by_view["week"]["windows"] and set(snap["windows"]) == {"week", "season"}
+    assert [m["entry_id"] for m in snap["managers"]] == [100, 200]
+    names = {p["id"]: p["name"] for p in by_view["week"]["players"]}
+    for m in snap["managers"]:
+        for view in app.VIEWS:
+            mine = next(x for x in by_view[view]["managers"] if x["entry_id"] == m["entry_id"])
+            score = {p["id"]: p["score"] for p in by_view[view]["players"]}
+            assert m[view]["strength"] == mine["strength"] and m[view]["formation"] == mine["formation"]
+            assert m[view]["xi"] == [[i, score[i]] for i in mine["best_xi"]]
+            assert abs(sum(m[view]["pieces"].values()) - m[view]["strength"]) <= 0.5   # the pieces add up
+            for i in mine["best_xi"]:
+                assert snap["players"][str(i)] == names[i]
+
+
+def test_a_strength_snapshot_is_the_same_after_a_round_trip_through_json(two_managers):
+    # save_strength tells a quiet day apart by comparing with what it read back from the file
+    by_view = {v: app.load_league(123, v) for v in app.VIEWS}
+    snap = app.strength_snapshot(by_view, today=datetime(2026, 10, 12))
+    assert json.loads(json.dumps(snap)) == snap
+
+
+def test_save_strength_adds_one_line_per_date_and_each_season_gets_its_own_file(tmp_path):
+    path = app.save_strength(5, strength_snap(60.0, datetime(2026, 10, 12)), folder=tmp_path)
+    assert path == tmp_path / "2026-27" / "strength_5.json"
+    app.save_strength(5, strength_snap(62.5, datetime(2026, 10, 13)), folder=tmp_path)
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert (saved["league_id"], saved["season"]) == (5, "2026-27")
+    assert [e["date"] for e in saved["snapshots"]] == ["2026-10-12", "2026-10-13"]
+    assert saved["snapshots"][1]["managers"][0]["week"]["strength"] == 62.5
+    assert "season" not in saved["snapshots"][0]                      # the file's header says it once
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 4    # header, two entries, the end
+    later = app.save_strength(5, strength_snap(60.0, datetime(2027, 8, 1)), folder=tmp_path)
+    assert later == tmp_path / "2027-28" / "strength_5.json"
+
+
+def test_save_strength_skips_a_day_where_nothing_changed(tmp_path):
+    path = app.save_strength(5, strength_snap(60.0, datetime(2026, 10, 12)), folder=tmp_path)
+    before = path.read_text(encoding="utf-8")
+    assert app.save_strength(5, strength_snap(60.0, datetime(2026, 10, 13)), folder=tmp_path) is None
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_save_strength_replaces_a_dates_entry_when_the_numbers_changed(tmp_path):
+    app.save_strength(5, strength_snap(60.0, datetime(2026, 10, 12)), folder=tmp_path)
+    path = app.save_strength(5, strength_snap(61.0, datetime(2026, 10, 12)), folder=tmp_path)
+    entries = json.loads(path.read_text(encoding="utf-8"))["snapshots"]
+    assert [(e["date"], e["managers"][0]["week"]["strength"]) for e in entries] == [("2026-10-12", 61.0)]
+
+
+def test_save_strength_never_writes_over_a_file_it_cannot_read(tmp_path):
+    path = app.strength_path(5, "2026-27", tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text("{oops", encoding="utf-8")
+    with pytest.raises(ValueError):
+        app.save_strength(5, strength_snap(60.0, datetime(2026, 10, 12)), folder=tmp_path)
+    assert path.read_text(encoding="utf-8") == "{oops"
+
+
+def test_the_snapshot_script_still_keeps_the_results_when_strengths_cant_be_loaded(monkeypatch, capsys):
+    def blocked(league_id, view):
+        raise app.FplError("The Draft site is blocking us (403).")
+
+    monkeypatch.setattr(app, "load_league", blocked)
+    save_snapshot.save_strength(52607)           # prints a warning and carries on, it doesn't raise
+    assert "Couldn't save the squad strengths" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------- team names stand out
