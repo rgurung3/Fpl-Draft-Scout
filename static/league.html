@@ -453,14 +453,27 @@ async function loadSquads() {
   }
 }
 
+// the pieces a rating is made of, in the order we show them (the server sends the numbers)
+const RATING_PIECES = [["form", "Recent form"], ["ppg", "Points per game"], ["xgi", "Attacking threat"],
+  ["mins", "Minutes played"], ["cs", "Clean-sheet chances"], ["dc", "Defensive work"], ["crea", "Creativity"],
+  ["fix", "Fixtures"], ["avail", "Injury doubts"]];
+const signed = x => (x > 0 ? "+" : "") + x.toFixed(1);
+
 function renderSquads() {
   const ms = SQ.managers, max = Math.max(...ms.map(m => m.strength), 1), w = SQ.windows[SQ.view];
   $("squadWindow").textContent = `Looks at gameweeks ${w.from}-${w.to}.`;
-  const line = (p, cls = "") => `<div class="${cls}"><span>${esc(p.name)} <span class="pos">${p.pos}, ${esc(p.club)}</span></span><span>${Math.round(p.rating)}</span></div>`;
+  // a player whose form is well away from his points per game this season is marked "running hot" or "cold"
+  const heat = p => p.heat ? ` <span class="pos">running ${p.heat}: form ${p.form.toFixed(1)} v ${p.ppg.toFixed(1)} a game</span>` : "";
+  const line = (p, cls = "") => `<div class="${cls}"><span>${esc(p.name)} <span class="pos">${p.pos}, ${esc(p.club)}</span>${heat(p)}</span><span>${Math.round(p.rating)}</span></div>`;
+  // what the strength is made of: each piece's average per starter, and how far it is from the league's average
+  const madeOf = m => `<span class="label">What the rating is made of (average per starter, then against the league)</span>`
+    + RATING_PIECES.filter(([k]) => m.pieces[k] || m.vs_league.pieces[k]).map(([k, label]) =>
+        `<div><span>${label}</span><span>${m.pieces[k].toFixed(1)} <span class="pos">${signed(m.vs_league.pieces[k])}</span></span></div>`).join("")
+    + `<div><span><strong>Strength</strong></span><span><strong>${m.strength.toFixed(1)}</strong> <span class="pos">${signed(m.vs_league.strength)}</span></span></div>`;
   $("squads").innerHTML = ms.map(m => {
     const mine = m.entry_id === myId;
     const roster = m.best_xi.length
-      ? `<span class="label">Best eleven, ${esc(m.formation)}</span>${m.best_xi.map(p => line(p)).join("")}`
+      ? madeOf(m) + `<span class="label">Best eleven, ${esc(m.formation)}</span>${m.best_xi.map(p => line(p)).join("")}`
         + (m.bench.length ? `<span class="label">Bench</span>${m.bench.map(p => line(p, "bench")).join("")}` : "")
       : "<div>No players yet</div>";
     return `<div>
