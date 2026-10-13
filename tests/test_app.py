@@ -1627,17 +1627,21 @@ def test_facts_are_capped_and_not_repeated(monkeypatch):
 def test_harsh_fact_names_the_highest_losing_score(monkeypatch):
     monkeypatch.setattr(app, "FACT_COUNT", 20)
     assert facts_by_kind(BANTER_WEEKS)["harsh"] == (
-        "**Team 2** scored 69 in GW2 and still lost to **Team 0** (70). Harsh.")
+        "**Team 2** scored 69 in GW2 and still lost to **Team 0** (70). "
+        "Brutal. Nobody should lose with that.")
 
 
 def test_each_fact_reads_from_the_numbers(monkeypatch):
     monkeypatch.setattr(app, "FACT_COUNT", 20)
     facts = facts_by_kind(BANTER_WEEKS)
     assert facts["thrashing"].startswith(
-        "Biggest beating so far: **Team 2** 90-50 **Team 3** in GW1, a 40-point gap")
-    assert facts["closest"] == "Closest match so far: **Team 0** edged **Team 2** 70-69 in GW2."
+        "Biggest beating so far: **Team 2** 90-50 **Team 3** in GW1, a 40-point gap. "
+        "**Team 3** may want to mute the group chat.")
+    assert facts["closest"] == ("Closest match so far: **Team 0** edged **Team 2** 70-69 in GW2. "
+                                "**Team 2** will be thinking about that one for a while.")
     assert facts["low"].startswith("Lowest score so far: **Team 4** managed 20 in GW2")
-    assert facts["high"] == "Best week so far: **Team 2** put up 90 in GW1."
+    assert facts["high"] == ("Best week so far: **Team 2** put up 90 in GW1. "
+                             "The rest of you can take notes.")
 
 
 def test_luck_fact_finds_the_manager_whose_table_place_lags_their_points(monkeypatch):
@@ -1647,19 +1651,22 @@ def test_luck_fact_finds_the_manager_whose_table_place_lags_their_points(monkeyp
     weeks = [match(1, 12, 100, 13, 101), match(1, 10, 10, 11, 5),
              match(2, 12, 100, 14, 101), match(2, 10, 10, 13, 5)]
     assert facts_by_kind(weeks)["luck"] == (
-        "**Team 2** are 1st for points scored but only 4th in the table. The fixture list has not been kind.")
+        "**Team 2** are 1st for points scored but only 4th in the table. "
+        "The fixture list has it in for them.")
 
 
 def test_a_winning_run_is_called_out(monkeypatch):
     monkeypatch.setattr(app, "FACT_COUNT", 20)
     weeks = [match(gw, 10, 60, 11 + gw, 40) for gw in (1, 2, 3)]
-    assert facts_by_kind(weeks)["streak"] == "**Team 0** have won 3 in a row. Somebody stop them."
+    assert facts_by_kind(weeks)["streak"] == ("**Team 0** have won 3 in a row. "
+                                              "Somebody stop them before the rest of you get embarrassed.")
 
 
-def test_a_losing_run_is_teased_kindly(monkeypatch):
+def test_a_losing_run_gets_a_poke(monkeypatch):
     monkeypatch.setattr(app, "FACT_COUNT", 20)
     weeks = [match(1, 10, 60, 11, 40), match(2, 12, 60, 11, 40), match(3, 13, 60, 11, 40)]
-    assert facts_by_kind(weeks)["streak"] == "**Team 1** have lost 3 in a row. A hug may be needed."
+    assert facts_by_kind(weeks)["streak"] == ("**Team 1** have lost 3 in a row. "
+                                              "Has anyone checked they're still setting a lineup?")
 
 
 def test_short_runs_are_not_mentioned(monkeypatch):
@@ -2043,9 +2050,9 @@ def test_luck_facts_name_the_luckiest_and_unluckiest(monkeypatch):
              match(2, 10, 58, 11, 70), match(2, 12, 10, 13, 15)]
     facts = {f["kind"]: f["text"] for f in app.league_banter(h2h(weeks))["facts"]}
     assert facts["lucky"] == ("**Team 103** have 6 league points, but their scores only deserved 2. "
-                              "Don't ask questions.")
+                              "Daylight robbery, and they're keeping the points.")
     assert facts["unlucky"] == ("**Team 100** have 0 league points, but their scores deserved 4. "
-                                "Robbed by the fixture list.")
+                                "Robbed by the fixture list, and nobody has even apologised.")
 
 
 def test_the_table_place_luck_fact_steps_aside_for_the_same_team(monkeypatch):
@@ -3250,6 +3257,209 @@ def test_the_snapshot_script_still_keeps_the_results_when_strengths_cant_be_load
     monkeypatch.setattr(app, "load_league", blocked)
     save_snapshot.save_strength(52607)           # prints a warning and carries on, it doesn't raise
     assert "Couldn't save the squad strengths" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- season awards and your matches
+
+def played_weeks(rows):
+    """Finished matches as season_awards reads them: rows are (gw, a, a_points, b, b_points)."""
+    return [{"gw": gw, "a": a, "b": b, "pa": pa, "pb": pb} for gw, a, pa, b, pb in rows]
+
+
+# scored: team 1 [60, 62, 58], 2 [40, 41, 42], 3 [50, 45, 44], 4 [30, 35, 50]
+AWARD_WEEKS = played_weeks([(1, 1, 60, 2, 40), (1, 3, 50, 4, 30),
+                            (2, 1, 62, 3, 45), (2, 2, 41, 4, 35),
+                            (3, 1, 58, 4, 50), (3, 2, 42, 3, 44)])
+AWARD_NAMES = {1: "Team 1", 2: "Team 2", 3: "Team 3", 4: "Team 4", 5: "Team 5", 6: "Team 6"}
+AWARD_PLACES = {1: 1, 2: 4, 3: 2, 4: 3, 5: 5, 6: 6}
+
+
+def luck_rows(*rows):
+    """banter's luck rows, luckiest first: rows are (team ID, league points, deserved points)."""
+    return [{"entry_id": e, "team": AWARD_NAMES[e], "league_points": lp, "expected_points": exp,
+             "luck": round(lp - exp, 1)} for e, lp, exp in rows]
+
+
+def awards_by_kind(played=AWARD_WEEKS, luck=()):
+    return {a["kind"]: a for a in app.season_awards(played, AWARD_NAMES, AWARD_PLACES, list(luck))}
+
+
+def test_awards_go_to_the_best_and_worst_of_each_kind():
+    awards = awards_by_kind(luck=luck_rows((1, 9, 8.0), (2, 0, 3.0)))
+    got = {k: (a["team"], a["detail"]) for k, a in awards.items()}
+    assert got == {"machine": ("Team 1", "60.0 points a week"),
+                   "fortress": ("Team 3", "only 44.7 conceded a week"),    # 30, 62 and 42 conceded
+                   "steady": ("Team 2", "always between 40 and 42"),
+                   "wild": ("Team 4", "anything from 30 to 50"),
+                   "unlucky": ("Team 2", "0 league points, deserved 3")}
+    assert awards["machine"]["entry_id"] == 1 and awards["machine"]["title"] == "Points machine"
+    assert [a["kind"] for a in app.season_awards(AWARD_WEEKS, AWARD_NAMES, AWARD_PLACES, [])] == [
+        "machine", "fortress", "steady", "wild"]
+
+
+def test_awards_wait_for_enough_gameweeks():
+    assert app.season_awards(AWARD_WEEKS[:4], AWARD_NAMES, AWARD_PLACES, []) == []   # two gameweeks
+    assert app.season_awards([], AWARD_NAMES, AWARD_PLACES, []) == []
+
+
+def test_nobody_is_called_unluckiest_without_a_real_gap():
+    assert "unlucky" not in awards_by_kind(luck=luck_rows((1, 9, 8.0), (2, 2, 3.0)))   # 1.0 short of a point
+
+
+def test_a_tied_award_goes_to_the_better_table_place():
+    level = played_weeks([(gw, 1, 50, 2, 50) for gw in (1, 2, 3)])
+    awards = awards_by_kind(level)
+    assert {a["team"] for a in awards.values()} == {"Team 1"}      # level on every count: 1st place wins
+
+
+def test_only_managers_with_enough_matches_can_win_an_award():
+    one_off = AWARD_WEEKS + played_weeks([(3, 5, 99, 6, 0)])       # teams 5 and 6 have played once each
+    assert awards_by_kind(one_off)["machine"]["team"] == "Team 1"
+    assert app.season_awards(played_weeks([(gw, 1, 50, 2, 40) for gw in (1, 2)]),
+                             AWARD_NAMES, AWARD_PLACES, []) == []
+
+
+def test_banter_carries_the_awards_once_three_gameweeks_are_in():
+    assert app.league_banter(banter_league(BANTER_WEEKS))["awards"] == []              # two gameweeks
+    weeks = BANTER_WEEKS[:4] + [match(3, 10, 55, 12, 40), match(3, 11, 45, 13, 35)]    # GW3 played
+    awards = {a["kind"]: a for a in app.league_banter(banter_league(weeks))["awards"]}
+    assert awards["machine"]["team"] == "Team 2"       # 90, 69 and 40: the most points a week of the regulars
+    assert awards["machine"]["detail"] == "66.3 points a week"
+
+
+def test_people_are_listed_by_manager_name_and_need_a_team_id():
+    details = {"league_entries": [
+        {"entry_id": 2, "entry_name": "Zed FC", "player_first_name": "Zed", "player_last_name": "Z"},
+        {"entry_id": 1, "entry_name": "", "player_first_name": "amy", "player_last_name": "A"},
+        {"id": 9}]}                                                  # no team ID: can't be picked
+    assert app.league_people(details) == [
+        {"entry_id": 1, "team": "Team 1", "manager": "amy A"},
+        {"entry_id": 2, "team": "Zed FC", "manager": "Zed Z"}]
+
+
+def upcoming_for(weeks=BANTER_WEEKS, **kwargs):
+    return app.league_upcoming(banter_league(weeks), **kwargs)
+
+
+def test_upcoming_lists_every_remaining_match_soonest_first_for_both_sides():
+    out = upcoming_for()
+    assert out["upcoming"][100] == [{"gw": 3, "opponent": 101, "live": False, "edge": None}]
+    assert out["upcoming"][101] == [{"gw": 3, "opponent": 100, "live": False, "edge": None}]
+    assert [(g["gw"], g["opponent"]) for g in out["upcoming"][103]] == [(3, 102), (4, 104)]
+    assert [(g["gw"], g["opponent"]) for g in out["upcoming"][104]] == [(4, 103)]
+
+
+def test_upcoming_has_everyone_in_table_order_with_their_recent_results():
+    out = upcoming_for()
+    top = out["managers"][0]
+    assert (top["entry_id"], top["position"], top["league_points"], top["form"]) == (100, 1, 6, "WW")
+    assert out["managers"][0]["team"] == "Team 0" and out["managers"][0]["strength"] is None
+    assert [m["position"] for m in out["managers"]] == [1, 2, 3, 4, 5]
+
+
+def test_upcoming_form_only_goes_back_a_few_results(monkeypatch):
+    monkeypatch.setattr(app, "FORM_LENGTH", 1)
+    forms = {m["entry_id"]: m["form"] for m in upcoming_for()["managers"]}
+    assert forms[101] == "W"           # lost GW1, won GW2
+
+
+def test_a_match_that_has_started_is_marked_live():
+    weeks = BANTER_WEEKS[:4] + [{**match(3, 10, 12, 11, 7, finished=False), "started": True}]
+    assert upcoming_for(weeks)["upcoming"][100][0]["live"] is True
+
+
+def test_upcoming_says_who_is_the_favourite_by_squad_strength():
+    strengths = {100: 70.0, 101: 66.0, 102: 69.0, 103: 69.5, 104: 50.0}
+    out = upcoming_for(strengths=strengths)
+    assert out["upcoming"][100][0]["edge"] == "favourite"          # 70 v 66: 4 ahead
+    assert out["upcoming"][101][0]["edge"] == "underdog"
+    assert out["upcoming"][102][0]["edge"] == "even"               # 69 v 69.5: under EDGE_MIN_STRENGTH
+    assert out["upcoming"][103][0]["edge"] == "even"
+    assert out["upcoming"][104][0]["edge"] == "underdog"           # 50 v 69.5
+    assert [m["strength"] for m in out["managers"] if m["entry_id"] == 100] == [70.0]
+    partial = upcoming_for(strengths={100: 70.0})                  # a missing strength: no verdict
+    assert partial["upcoming"][100][0]["edge"] is None
+
+
+def test_upcoming_gives_the_record_against_the_next_opponent():
+    snapshots = [app.snapshot_league(banter_league(BANTER_WEEKS), today=datetime(2026, 10, 1))]
+    out = upcoming_for(snapshots=snapshots)
+    assert out["head_to_head"][100] == {"opponent": 101, "won": 1, "drawn": 0, "lost": 0,
+                                        "last": {"season": "2026-27", "gw": 1, "mine": 60, "theirs": 40}}
+    assert out["head_to_head"][101]["lost"] == 1 and out["head_to_head"][101]["last"]["mine"] == 40
+    unmet = out["head_to_head"][104]                               # 104 has never played 103
+    assert unmet == {"opponent": 103, "won": 0, "drawn": 0, "lost": 0, "last": None}
+
+
+def test_upcoming_copes_with_no_matches_left_and_no_history():
+    done = [m for m in BANTER_WEEKS if m["finished"]]
+    out = upcoming_for(done)
+    assert out["upcoming"][100] == [] and 100 not in out["head_to_head"]
+    assert upcoming_for([match(1, 10, 0, 11, 0, finished=False)]) is None
+
+
+def with_banter_matches(monkeypatch):
+    fake = app.get_json
+
+    def get(url):
+        if url.endswith("/league/123/details"):
+            return banter_league(BANTER_WEEKS)
+        return fake(url)
+
+    monkeypatch.setattr(app, "get_json", get)
+
+
+def test_upcoming_route_returns_everyones_matches_with_strengths(fake_api, monkeypatch):
+    with_banter_matches(monkeypatch)
+    data = app.app.test_client().get("/api/league/123/upcoming").get_json()
+    assert data["league_name"] == "Banter League"
+    up = data["upcoming"]
+    assert up["upcoming"]["100"][0]["opponent"] == 101
+    assert all(m["strength"] is not None for m in up["managers"])
+    assert up["upcoming"]["100"][0]["edge"] in {"favourite", "underdog", "even"}
+
+
+def test_upcoming_route_still_answers_when_the_strengths_cannot_be_loaded(fake_api, monkeypatch):
+    with_banter_matches(monkeypatch)
+
+    def updating(league_id, view):
+        raise app.FplError("The Draft site is updating.")
+
+    monkeypatch.setattr(app, "load_league", updating)
+    up = app.app.test_client().get("/api/league/123/upcoming").get_json()["upcoming"]
+    assert up["upcoming"]["100"][0]["edge"] is None
+    assert up["managers"][0]["strength"] is None
+
+
+def test_upcoming_route_is_empty_for_a_league_without_matches(fake_api):
+    assert app.app.test_client().get("/api/league/123/upcoming").get_json()["upcoming"] is None
+
+
+def test_upcoming_route_gives_a_friendly_error(monkeypatch):
+    def not_found(url):
+        raise requests.HTTPError(response=type("R", (), {"status_code": 404})())
+
+    monkeypatch.setattr(app, "get_json", not_found)
+    res = app.app.test_client().get("/api/league/999/upcoming")
+    assert res.status_code == 400 and "No Draft league found" in res.get_json()["error"]
+
+
+def test_banter_route_lists_the_people_for_the_name_picker(fake_api, monkeypatch):
+    with_banter_matches(monkeypatch)
+    people = app.app.test_client().get("/api/league/123/banter").get_json()["people"]
+    assert [p["entry_id"] for p in people] == [100, 101, 102, 103, 104]
+    assert people[0] == {"entry_id": 100, "team": "Team 0", "manager": "M 0"}
+
+
+def test_league_hub_banter_has_the_name_picker_your_matches_and_the_awards_for_everyone():
+    res = app.app.test_client().get("/league?league=123")
+    page = res.data.decode()
+    res.close()
+    assert 'id="whoAmI"' in page and "function renderMyMatches" in page and 'id="awards"' in page
+    assert 'id="whoSection" class="hidden"' in page            # not fullonly: the view-only link has it too
+    order = ("whoSection", "matchups", "awardsSection", "factsSection")
+    where = [page.index(f'id="{name}"') for name in order]
+    assert where == sorted(where)                              # your matches, match-ups, awards, then facts
 
 
 # ---------------------------------------------------------------- team names stand out

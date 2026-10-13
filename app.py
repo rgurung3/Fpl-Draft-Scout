@@ -37,6 +37,9 @@ SEASON_STARTS_IN = 7    # a new season starts in July: a snapshot taken from Jul
 MIN_MINUTES = 180       # per-90 stats count in full from this many minutes (in proportion below it)
 SCALE_PERCENTILE = 95   # each stat is measured against this percentile of regular players
 HOT_COLD_GAP = 1.5      # "running hot" (or cold): form this far above (below) a regular's points per game
+EDGE_MIN_STRENGTH = 2.0  # a side whose squad (best-eleven strength) is this much stronger is the favourite
+FORM_LENGTH = 5         # how many recent results "Your matches" shows for each side
+AWARD_MIN_WEEKS = 3     # the season awards start once this many gameweeks have finished
 
 # The weekly recap: an AI writes the words, but every fact in it is worked out here (see "weekly recap").
 # The AI needs two environment variables: ANTHROPIC_API_KEY, and RECAP_MODEL (the Claude model to use).
@@ -975,6 +978,56 @@ def expected_league_points(history):
     return expected
 
 
+def season_awards(played, names, place, luck):
+    """
+    A handful of titles for the season so far, worked out from the finished matches: who has scored the
+    most, conceded the least, been the steadiest and the most up and down, and been the unluckiest.
+    [] until AWARD_MIN_WEEKS gameweeks have finished (and for anyone with fewer matches than that).
+
+    played: {gw, a, b, pa, pb} per finished match. names and place map a team ID to its name and its
+    table place (the place breaks ties). luck: league_banter's luck rows, luckiest first.
+    Each award is {kind, title, entry_id, team, detail}: detail is one short line with the number.
+    """
+    if len({m["gw"] for m in played}) < AWARD_MIN_WEEKS:
+        return []
+    scored, conceded = {}, {}
+    for m in played:
+        for entry, mine, theirs in ((m["a"], m["pa"], m["pb"]), (m["b"], m["pb"], m["pa"])):
+            scored.setdefault(entry, []).append(mine)
+            conceded.setdefault(entry, []).append(theirs)
+    regulars = [e for e, pts in scored.items() if len(pts) >= AWARD_MIN_WEEKS]
+    if len(regulars) < 2:
+        return []
+
+    def average(values):
+        return sum(values) / len(values)
+
+    def spread(values):   # how far a manager's weekly scores typically stray from their own average
+        mean = average(values)
+        return math.sqrt(sum((v - mean) ** 2 for v in values) / len(values))
+
+    def award(kind, title, entry, detail):
+        return {"kind": kind, "title": title, "entry_id": entry, "team": names[entry], "detail": detail}
+
+    best = max(regulars, key=lambda e: (average(scored[e]), -place[e]))
+    tight = min(regulars, key=lambda e: (average(conceded[e]), place[e]))
+    steady = min(regulars, key=lambda e: (spread(scored[e]), place[e]))
+    wild = max(regulars, key=lambda e: (spread(scored[e]), -place[e]))
+    low, high = (lambda e: min(scored[e])), (lambda e: max(scored[e]))
+    awards = [
+        award("machine", "Points machine", best, f"{average(scored[best]):.1f} points a week"),
+        award("fortress", "Fortress", tight, f"only {average(conceded[tight]):.1f} conceded a week"),
+        award("steady", "Mr Consistent", steady, f"always between {low(steady)} and {high(steady)}"),
+        award("wild", "Boom or Bust", wild, f"anything from {low(wild)} to {high(wild)}"),
+    ]
+    robbed = luck[-1] if luck else None
+    if robbed and robbed["luck"] <= -LUCK_FACT_MIN:
+        deserved = f"{robbed['expected_points']:g}"
+        awards.append(award("unlucky", "Unluckiest", robbed["entry_id"],
+                            f"{robbed['league_points']} league points, deserved {deserved}"))
+    return awards
+
+
 def league_banter(details):
     """
     Fun facts and match-ups for a head-to-head league, worked out from the league
@@ -990,7 +1043,9 @@ def league_banter(details):
     luck: every manager, luckiest first, with league_points, expected_points (what they'd have
     if they'd played everyone every week, see expected_league_points) and luck (the difference:
     positive means lucky, negative unlucky). The page draws it as a chart.
-    Tone is mild teasing; it's all worked out from the numbers, not written by AI.
+    awards: the season's titles (see season_awards), [] until a few gameweeks have finished.
+    Tone is playful teasing, a notch sharper than mild: it pokes at the result or the decision,
+    never at the person. It's all worked out from the numbers, not written by AI.
     """
     history = league_history(details)
     if history is None:
@@ -1065,11 +1120,11 @@ def league_banter(details):
     if robbed_entry:
         facts.append({"kind": "unlucky", "text": (
             f"{mark(robbed['team'])} have {robbed['league_points']} league points, but their scores deserved "
-            f"{robbed['expected_points']:g}. Robbed by the fixture list.")})
+            f"{robbed['expected_points']:g}. Robbed by the fixture list, and nobody has even apologised.")})
     if kissed["luck"] >= LUCK_FACT_MIN:
         facts.append({"kind": "lucky", "text": (
             f"{mark(kissed['team'])} have {kissed['league_points']} league points, but their scores only "
-            f"deserved {kissed['expected_points']:g}. Don't ask questions.")})
+            f"deserved {kissed['expected_points']:g}. Daylight robbery, and they're keeping the points.")})
 
     # luck by table place: who sits furthest below where their points scored say they should be
     # (left out if the "play everyone" fact above already names that team)
@@ -1079,7 +1134,7 @@ def league_banter(details):
     if table[unlucky][0] - scored_place >= LUCK_MIN_GAP and unlucky != robbed_entry:
         facts.append({"kind": "luck", "text": (
             f"{mark(name(unlucky))} are {ordinal(scored_place)} for points scored but only "
-            f"{ordinal(table[unlucky][0])} in the table. The fixture list has not been kind.")})
+            f"{ordinal(table[unlucky][0])} in the table. The fixture list has it in for them.")})
 
     # the highest score that still lost
     losses = ([(m["pa"], m["pb"], m["a"], m["b"], m["gw"]) for m in played if m["pa"] < m["pb"]]
@@ -1088,7 +1143,7 @@ def league_banter(details):
         mine, theirs, loser, winner, gw = max(losses)
         facts.append({"kind": "harsh", "text": (
             f"{mark(name(loser))} scored {mine} in GW{gw} and still lost to "
-            f"{mark(name(winner))} ({theirs}). Harsh.")})
+            f"{mark(name(winner))} ({theirs}). Brutal. Nobody should lose with that.")})
 
     # the longest winning or losing run that's still going
     runs = []
@@ -1103,9 +1158,11 @@ def league_banter(details):
                 runs.append((n, result, m["entry_id"]))
     if runs:
         n, result, entry = max(runs)
+        team = mark(name(entry))
         facts.append({"kind": "streak", "text": (
-            f"{mark(name(entry))} have won {n} in a row. Somebody stop them." if result == "W"
-            else f"{mark(name(entry))} have lost {n} in a row. A hug may be needed.")})
+            f"{team} have won {n} in a row. Somebody stop them before the rest of you get embarrassed."
+            if result == "W" else
+            f"{team} have lost {n} in a row. Has anyone checked they're still setting a lineup?")})
 
     decided = [m for m in played if m["pa"] != m["pb"]]
     if decided:
@@ -1118,12 +1175,12 @@ def league_banter(details):
         win, lose, top, bottom = outcome(big)
         facts.append({"kind": "thrashing", "text": (
             f"Biggest beating so far: {mark(name(win))} {top}-{bottom} {mark(name(lose))} in GW{big['gw']}, "
-            f"a {top - bottom}-point gap. Handshake optional.")})
+            f"a {top - bottom}-point gap. {mark(name(lose))} may want to mute the group chat.")})
         near = min(decided, key=lambda m: abs(m["pa"] - m["pb"]))
         win, lose, top, bottom = outcome(near)
         facts.append({"kind": "closest", "text": (
             f"Closest match so far: {mark(name(win))} edged {mark(name(lose))} {top}-{bottom} "
-            f"in GW{near['gw']}.")})
+            f"in GW{near['gw']}. {mark(name(lose))} will be thinking about that one for a while.")})
 
     scores = [(pts, entry, m["gw"]) for m in played
               for pts, entry in ((m["pa"], m["a"]), (m["pb"], m["b"]))]
@@ -1131,13 +1188,91 @@ def league_banter(details):
         pts, entry, gw = min(scores)
         facts.append({"kind": "low", "text": (
             f"Lowest score so far: {mark(name(entry))} managed {pts} in GW{gw}. "
-            "Everyone has a bad week, but this was a bit worse.")})
+            "Everyone has a bad week. This was a bad month squeezed into one.")})
         pts, entry, gw = max(scores)
-        facts.append({"kind": "high",
-                      "text": f"Best week so far: {mark(name(entry))} put up {pts} in GW{gw}."})
+        facts.append({"kind": "high", "text": (
+            f"Best week so far: {mark(name(entry))} put up {pts} in GW{gw}. "
+            "The rest of you can take notes.")})
 
+    awards = season_awards(played, {e: name(e) for e in order}, {e: table[e][0] for e in order}, luck)
     return {"gws": history["gws"], "hot_match": hot, "battles": battles, "facts": facts[:FACT_COUNT],
-            "luck": luck}
+            "luck": luck, "awards": awards}
+
+
+def league_people(details):
+    """Everyone in the league, for the "pick your name" list: {entry_id, team, manager}, by manager name."""
+    people = [{"entry_id": e["entry_id"], "team": e.get("entry_name") or f'Team {e["entry_id"]}',
+               "manager": f'{e.get("player_first_name", "")} {e.get("player_last_name", "")}'.strip()}
+              for e in details.get("league_entries", []) if e.get("entry_id")]
+    return sorted(people, key=lambda p: (p["manager"].lower(), p["team"].lower()))
+
+
+def league_upcoming(details, strengths=None, snapshots=()):
+    """
+    Every manager's remaining matches, for the "Your matches" card on the banter page (the page shows
+    the one for whoever picked their name, so the server never needs to know who that is). Worked out
+    from the league details, plus two optional extras: strengths ({team ID: best-eleven strength},
+    from load_league) add each side's squad strength and who's the favourite, and snapshots (the saved
+    seasons plus this one, see season_snapshots) add the record against the next opponent.
+    Returns None if no gameweek has finished yet or the league isn't head-to-head, like league_history.
+
+    managers: everyone in table order: {entry_id, team, manager, position, league_points,
+    form (their last FORM_LENGTH results, oldest first, like "WWLDW") and strength (None without them)}.
+    upcoming: {team ID: [{gw, opponent (a team ID), live (that match is being played now), edge}]},
+    soonest first. edge is "favourite", "underdog" or "even" by squad strength (EDGE_MIN_STRENGTH),
+    None when either strength is missing.
+    head_to_head: {team ID: {opponent, won, drawn, lost, last}} against the opponent in their next
+    match, where last is {season, gw, mine, theirs} for their latest meeting, or None.
+    """
+    history = league_history(details)
+    if history is None:
+        return None
+    strengths = strengths or {}
+    entries = {e["entry_id"]: e for e in details.get("league_entries", []) if e.get("entry_id")}
+    entry_of = {e.get("id"): entry for entry, e in entries.items()}
+
+    managers = []
+    for position, m in enumerate(history["managers"], 1):
+        e = entries[m["entry_id"]]
+        results = [r for r in m["results"] if r]
+        managers.append({
+            "entry_id": m["entry_id"], "team": e.get("entry_name") or f'Team {m["entry_id"]}',
+            "manager": f'{e.get("player_first_name", "")} {e.get("player_last_name", "")}'.strip(),
+            "position": position, "league_points": m["league_points"][-1],
+            "form": "".join(results[-FORM_LENGTH:]), "strength": strengths.get(m["entry_id"])})
+
+    def edge(mine, theirs):
+        if strengths.get(mine) is None or strengths.get(theirs) is None:
+            return None
+        gap = strengths[mine] - strengths[theirs]
+        if gap >= EDGE_MIN_STRENGTH:
+            return "favourite"
+        return "underdog" if gap <= -EDGE_MIN_STRENGTH else "even"
+
+    upcoming = {m["entry_id"]: [] for m in managers}
+    for match in details.get("matches", []):
+        a, b = entry_of.get(match.get("league_entry_1")), entry_of.get(match.get("league_entry_2"))
+        if match.get("finished") or not match.get("event") or a not in upcoming or b not in upcoming:
+            continue
+        for mine, theirs in ((a, b), (b, a)):
+            upcoming[mine].append({"gw": match["event"], "opponent": theirs,
+                                   "live": bool(match.get("started")), "edge": edge(mine, theirs)})
+    for games in upcoming.values():
+        games.sort(key=lambda g: g["gw"])
+
+    head_to_head = {}
+    for entry, games in upcoming.items():
+        if not games:
+            continue
+        rivalry = league_rivalry(list(snapshots), entry, games[0]["opponent"])
+        last = rivalry["meetings"][-1] if rivalry["meetings"] else None
+        record = rivalry["record"]
+        head_to_head[entry] = {
+            "opponent": games[0]["opponent"], "won": record["a_won"], "drawn": record["drawn"],
+            "lost": record["b_won"],
+            "last": {"season": last["season"], "gw": last["gw"], "mine": last["a_points"],
+                     "theirs": last["b_points"]} if last else None}
+    return {"managers": managers, "upcoming": upcoming, "head_to_head": head_to_head}
 
 
 # ---------------------------------------------------------------- league charts (head-to-head)
@@ -1300,6 +1435,18 @@ def league_rivalry(snapshots, a, b):
     return {"meetings": meetings, "record": record}
 
 
+def season_snapshots(details, league_id, folder=HISTORY_DIR):
+    """
+    Every saved season's results plus this season's live results, oldest first. If this season has
+    been saved too, the live results replace the saved copy, since they're fresher.
+    """
+    snapshots = {s["season"]: s for s in saved_snapshots(league_id, folder)}
+    live = snapshot_league(details)
+    if live:
+        snapshots[live["season"]] = live
+    return [snapshots[k] for k in sorted(snapshots)]
+
+
 def league_rivalries(details, league_id, a=None, b=None, folder=HISTORY_DIR):
     """
     What the Rivalries page draws: the saved seasons plus this season's live results (so it
@@ -1310,11 +1457,7 @@ def league_rivalries(details, league_id, a=None, b=None, folder=HISTORY_DIR):
     managers: everyone who appears, {entry_id, team, manager}, with the newest names winning.
     rivalry: league_rivalry for a and b, or None unless both are given.
     """
-    snapshots = {s["season"]: s for s in saved_snapshots(league_id, folder)}
-    live = snapshot_league(details)
-    if live:
-        snapshots[live["season"]] = live
-    ordered = [snapshots[k] for k in sorted(snapshots)]
+    ordered = season_snapshots(details, league_id, folder)
     people = {}
     for snap in ordered:   # oldest first, so newer names overwrite older ones
         for m in snap.get("managers", []):
@@ -2433,7 +2576,26 @@ def banter(league_id):
         return jsonify({"error": e.message}), e.status
     return jsonify({"league_id": league_id,
                     "league_name": details.get("league", {}).get("name", f"League {league_id}"),
-                    "banter": league_banter(details)})
+                    "banter": league_banter(details), "people": league_people(details)})
+
+
+@app.route("/api/league/<int:league_id>/upcoming")
+def upcoming(league_id):
+    """
+    Every manager's remaining matches with each side's squad strength, for the "Your matches" card
+    (see league_upcoming). The page picks out the manager who chose their name.
+    """
+    try:
+        details = fetch(f"{DRAFT}/league/{league_id}/details", LEAGUE_NOT_FOUND)
+    except FplError as e:
+        return jsonify({"error": e.message}), e.status
+    try:   # the strengths are a bonus: without them the card still says who's next and how they're placed
+        strengths = {m["entry_id"]: m["strength"] for m in load_league(league_id, "week")["managers"]}
+    except FplError:
+        strengths = None
+    return jsonify({"league_id": league_id,
+                    "league_name": details.get("league", {}).get("name", f"League {league_id}"),
+                    "upcoming": league_upcoming(details, strengths, season_snapshots(details, league_id))})
 
 
 @app.route("/api/league/<int:league_id>/charts")
