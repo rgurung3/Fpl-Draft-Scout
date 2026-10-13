@@ -9,9 +9,22 @@
 <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/common.css">
 <style>
-  .sharebar { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; color: var(--muted); font-size: .9rem; margin-bottom: 20px; }
-  .sharebar input { flex: 1 1 240px; max-width: 360px; padding: 7px 10px; border: 1px solid var(--line);
-    border-radius: 6px; background: var(--surface); color: var(--ink); font-size: .9rem; }
+  .youbar { color: var(--muted); font-size: .95rem; margin: 0 0 16px; }
+  .linkbtn { background: none; border: 0; padding: 0; color: var(--pitch); font-weight: 600; cursor: pointer;
+    text-decoration: underline; }
+  dialog { border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink);
+    padding: 20px; width: min(460px, calc(100vw - 32px)); max-height: 86vh; overflow: hidden; }
+  dialog[open] { display: flex; flex-direction: column; }   /* the names scroll, the buttons stay in view */
+  dialog::backdrop { background: rgba(10, 16, 13, .6); }
+  dialog h2 { margin: 0 0 4px; }
+  dialog .btn { align-self: flex-start; }
+  .people { display: grid; gap: 6px; margin: 14px 0; overflow: auto; min-height: 0; }
+  .person { display: grid; width: 100%; text-align: left; padding: 10px 14px; background: var(--surface);
+    border: 1px solid var(--line); border-left: 5px solid var(--line); border-radius: 4px; cursor: pointer; }
+  .person:hover, .person:focus-visible { border-left-color: var(--pitch); }
+  .person.now { border-left-color: var(--amber); background: var(--amber-soft); }
+  .person .n { font-weight: 600; }
+  .person .t { color: var(--muted); font-size: .9rem; }
 
   .back { display: inline-block; margin-bottom: 8px; color: var(--pitch); font-weight: 600; text-decoration: none; }
   /* the choices: big buttons, the content appears below the one picked */
@@ -191,20 +204,13 @@
   <div id="error" class="error hidden" role="alert"></div>
 
   <div id="app" class="hidden">
-    <div class="sharebar">
-      <span id="shareLabel">Share this page:</span>
-      <input id="shareLink" readonly aria-label="Link to share">
-      <button class="btn ghost" id="copyLink" type="button">Copy link</button>
-    </div>
-    <div class="sharebar fullonly hidden">
-      <span>Full link, with My team and the way back (for one friend):</span>
-      <input id="fullLink" readonly aria-label="Full link">
-      <button class="btn ghost" id="copyFull" type="button">Copy link</button>
-    </div>
+    <p class="youbar hidden" id="youBar"><span id="youName"></span> <button class="linkbtn" id="changeYou" type="button"></button></p>
 
     <div class="choices" id="choices" role="group" aria-label="What would you like to see?">
+      <button class="choice hidden" id="mineChoice" type="button" data-tab="upcoming" aria-pressed="false">
+        <span class="t">Your matches</span><span class="d">Your next match, who you play after that and how you're placed</span></button>
       <button class="choice" type="button" data-tab="banter" aria-pressed="false">
-        <span class="t">Banter</span><span class="d">Your matches, season awards and facts to argue about</span></button>
+        <span class="t">Banter</span><span class="d">This week's match-ups, season awards and facts to argue about</span></button>
       <button class="choice" type="button" data-tab="recap" aria-pressed="false">
         <span class="t">Recap</span><span class="d">The gameweek in words, updated as the games finish</span></button>
       <button class="choice" type="button" data-tab="charts" aria-pressed="false">
@@ -216,16 +222,12 @@
     </div>
     <p class="sub" id="loading" style="display:none">Loading…</p>
 
+    <div id="panel-upcoming" class="hidden">
+      <div id="myMatches"></div>
+    </div>
+
     <div id="panel-banter" class="hidden">
       <div id="banterEmpty" class="empty hidden"></div>
-      <section id="whoSection" class="hidden">
-        <div class="pickers">
-          <label>Who are you?
-            <select id="whoAmI"><option value="">Pick your name…</option></select>
-          </label>
-        </div>
-        <div id="myMatches" class="hidden"></div>
-      </section>
       <section id="matchups">
         <h2>This week's match-ups</h2>
         <p class="sub" id="matchSub"></p>
@@ -347,15 +349,23 @@
   </div>
 </main>
 
+<dialog id="whoDialog" aria-labelledby="whoTitle">
+  <h2 id="whoTitle">Who are you?</h2>
+  <p class="sub" id="whoSub" style="margin:0"></p>
+  <div class="people" id="whoList"></div>
+  <button class="btn ghost" id="whoSkip" type="button">Just looking</button>
+</dialog>
+
 <script src="/static/common.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 const FACTS_SHOWN = 2;   // facts shown at first; "Show more" reveals the rest
 const FULL = new URLSearchParams(location.search).get("full") === "1";   // the full version: My team and the way back
-const TABS = FULL ? ["banter", "recap", "charts", "rivalries", "team"] : ["banter", "recap", "charts", "rivalries"];
+const TABS = FULL ? ["upcoming", "banter", "recap", "charts", "rivalries", "team"]
+                  : ["upcoming", "banter", "recap", "charts", "rivalries"];
 let leagueId = null;     // the league this page is open on
 let tab = null;          // the choice currently open (none until a friend picks one)
-const loaded = { banter: null, recap: null, charts: null, rivalries: null };   // which league each choice's data is for, so each loads only once
+const loaded = { upcoming: null, banter: null, recap: null, charts: null, rivalries: null };   // which league each choice's data is for, so each loads only once
 let BANTER = null, showAll = false;
 let CH = null;           // the charts the server sent (see league_charts in app.py); this page only draws them
 let myId = null;         // your team ID, if we know it, so your line and row stand out
@@ -364,7 +374,8 @@ let picked = null;       // the manager whose head-to-head record is open
 let SQ = null;           // the squads the server sent (see league_squads in app.py); this page only draws them
 let squadView = "week";  // which rating the squad chart uses: "week" (next 5) or "season" (until the break)
 let RIV = null;          // the Rivalries data: the managers and seasons (see league_rivalries in app.py)
-let UP = null, upLeague = null;   // everyone's remaining matches (see league_upcoming in app.py), and the league they're for
+let UP = null;           // everyone's remaining matches (see league_upcoming in app.py); the page shows yours
+let PEOPLE = [];         // everyone in this league, for the "Who are you?" pop-up
 let showAllMatches = false;       // "Your matches" shows the next few at first
 const MATCHES_SHOWN = 4;          // matches listed after the next one, before "Show all"
 
@@ -378,7 +389,9 @@ const tint = (good, share) => `color-mix(in srgb, var(${good ? "--pitch" : "--ri
 
 function setAddress() {
   // the address is a link anyone can open, so it never carries your team ID (see "your team" at the bottom)
-  history.replaceState(null, "", "?league=" + leagueId + (tab ? "&tab=" + tab : "") + (FULL ? "&full=1" : ""));
+  // (and not "Your matches" either: that's personal, so a copied link opens on the choices)
+  const shown = tab && tab !== "upcoming" ? "&tab=" + tab : "";
+  history.replaceState(null, "", "?league=" + leagueId + shown + (FULL ? "&full=1" : ""));
 }
 
 async function getJson(path) {
@@ -409,6 +422,7 @@ async function openTab(name) {
     if (name === "banter") renderBanter(data);
     else if (name === "recap") renderRecap(data);
     else if (name === "charts") renderCharts(data);
+    else if (name === "upcoming") renderUpcoming(data);
     else renderRivalries(data);
     loaded[name] = forLeague;
   } catch (e) {
@@ -420,20 +434,20 @@ async function openTab(name) {
 
 function openLeague(id, firstTab) {
   leagueId = id;
-  loaded.banter = loaded.recap = loaded.charts = loaded.rivalries = null;
+  loaded.upcoming = loaded.banter = loaded.recap = loaded.charts = loaded.rivalries = null;
   RIV = null;
-  UP = null; upLeague = null; showAllMatches = false;
+  UP = null; showAllMatches = false;
+  PEOPLE = []; renderYou();
   SQ = null; squadView = "week";
   document.querySelectorAll("#squadView button").forEach(x => x.setAttribute("aria-pressed", x.dataset.view === "week"));
   $("squads").innerHTML = `<p class="sub">Loading…</p>`;
   tab = null;
   $("app").classList.remove("hidden");
   $("error").classList.add("hidden");
-  $("shareLink").value = location.origin + "/league?league=" + id;   // the link to send: view-only, and it opens on the choices
-  $("fullLink").value = location.origin + "/league?league=" + id + "&full=1";
   document.querySelectorAll(".choice").forEach(b => b.setAttribute("aria-pressed", false));
   TABS.forEach(t => $("panel-" + t).classList.add("hidden"));
   if (TABS.includes(firstTab)) openTab(firstTab); else setAddress();
+  loadPeople();   // asks who they are, unless this browser already knows
 }
 
 // ---------------------------------------------------------------- banter
@@ -456,7 +470,6 @@ function renderBanter(data) {
   $("matchups").classList.toggle("hidden", !b);
   $("factsSection").classList.toggle("hidden", !b);
   $("luckSection").classList.toggle("hidden", !b);
-  $("whoSection").classList.toggle("hidden", !b);
   $("awardsSection").classList.add("hidden");
   if (!b) {
     $("banterEmpty").textContent = "The banter starts once a gameweek has finished. It needs a head-to-head league, because it's built from the match results.";
@@ -470,7 +483,6 @@ function renderBanter(data) {
   b.battles.forEach(x => cards.push(card(x.title === "Battle for 3rd" ? "" : "spoon", x.title, x.a, x.b, x.line)));
   $("matchSub").textContent = b.hot_match ? `Looking ahead to gameweek ${b.hot_match.gw}.` : "No matches left to play.";
   $("cards").innerHTML = cards.join("") || `<div class="empty">Nothing to show yet.</div>`;
-  fillWho(data.people || []);
   renderAwards(b.awards || []);
   renderFacts();
   renderLuck(b.luck);
@@ -478,40 +490,82 @@ function renderBanter(data) {
 
 // ---------------------------------------------------------------- who you are, and your matches
 
-// The list of everyone in the league. The choice is kept in this browser only (the same memory the main
-// page uses for your team), so the server never learns who anyone is and the address never carries it.
-function fillWho(people) {
-  const sel = $("whoAmI");
-  sel.innerHTML = `<option value="">Pick your name…</option>` + people.map(p =>
-    `<option value="${p.entry_id}">${esc(p.manager || p.team)} · ${esc(p.team)}</option>`).join("");
-  sel.value = people.some(p => p.entry_id === myId) ? String(myId) : "";
-  if (sel.value) loadMyMatches(); else $("myMatches").classList.add("hidden");
+// Everyone in the league comes from /people. Who you are is asked once, in a pop-up, and kept in this
+// browser only (the same memory the main page uses for your team): the server never learns it and the
+// address never carries it. "Not you?" asks again, for a wrong pick.
+const knownMe = () => PEOPLE.some(p => p.entry_id === myId);
+const skipKey = () => "whoSkipped" + leagueId;
+const skipped = () => { try { return sessionStorage.getItem(skipKey()) === "1"; } catch (e) { return false; } };
+
+function renderYou() {
+  const mine = PEOPLE.find(p => p.entry_id === myId);
+  $("youBar").classList.toggle("hidden", !PEOPLE.length);
+  $("youName").textContent = mine ? `You're ${mine.manager || mine.team} (${mine.team}).` : "Pick your name to see your matches.";
+  $("changeYou").textContent = mine ? "Not you?" : "Who are you?";
+  $("mineChoice").classList.toggle("hidden", !mine);
 }
 
-async function loadMyMatches() {
-  const box = $("myMatches");
-  if (!myId) { box.classList.add("hidden"); return; }
-  if (upLeague === leagueId) { renderMyMatches(); return; }
+async function loadPeople() {
   const forLeague = leagueId;
-  box.classList.remove("hidden");
-  box.innerHTML = `<p class="sub">Loading your matches…</p>`;
   try {
-    const data = await getJson(`/api/league/${forLeague}/upcoming`);
+    const data = await getJson(`/api/league/${forLeague}/people`);
     if (forLeague !== leagueId) return;   // they opened another league while this was loading
-    UP = data.upcoming; upLeague = forLeague;
-    renderMyMatches();
+    PEOPLE = data.people;
+    $("leagueLine").textContent = data.league_name;
   } catch (e) {
-    if (forLeague === leagueId) box.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+    PEOPLE = [];   // the choices still work without the list; they just can't be asked who they are
   }
+  renderYou();
+  if (!PEOPLE.length) return;
+  if (knownMe()) { if (!tab) openTab("upcoming"); }   // open on your matches, unless they came for something else
+  else if (!skipped()) askWho();
+}
+
+function askWho() {
+  const dialog = $("whoDialog"), known = knownMe();
+  $("whoSub").textContent = known ? "Pick the right name and your matches will follow."
+    : "Pick your name and Draft Scout will show your matches. You'll only be asked once on this device.";
+  $("whoSkip").textContent = known ? "Cancel" : "Just looking";
+  $("whoList").innerHTML = PEOPLE.map(p => `<button class="person ${p.entry_id === myId ? "now" : ""}" type="button" data-id="${p.entry_id}">
+      <span class="n">${esc(p.manager || p.team)}</span><span class="t">${esc(p.team)}</span></button>`).join("");
+  if (dialog.open) return;
+  if (typeof dialog.showModal === "function") dialog.showModal(); else dialog.setAttribute("open", "");
+}
+
+function closeWho() {
+  const dialog = $("whoDialog");
+  if (typeof dialog.close === "function") dialog.close(); else dialog.removeAttribute("open");
+}
+
+// "Just looking" (or Escape) is remembered for this visit, so it isn't asked again on every reload
+function rememberSkip() {
+  if (knownMe()) return;
+  try { sessionStorage.setItem(skipKey(), "1"); } catch (e) { /* asked again next time */ }
+}
+
+function chooseMe(id) {
+  myId = id;
+  try { localStorage.setItem("teamId", String(id)); } catch (e) { /* no storage: asked again next visit */ }
+  $("teamId").value = String(id);
+  $("backLink").href = "/?team=" + id;
+  closeWho();
+  renderYou();
+  youChanged();
+  if (!tab || tab === "upcoming") openTab("upcoming");   // start on your matches, unless they went somewhere else
 }
 
 const formChips = f => f ? `<span class="form">${[...f].map(r => `<i class="r${r}">${r}</i>`).join("")}</span>` : "no results yet";
 const EDGE_WORDS = { favourite: "You're the favourite.", underdog: "You're the underdog.", even: "Too close to call." };
 
-function renderMyMatches() {
+function renderUpcoming(data) {
+  UP = data.upcoming;
+  drawMyMatches();
+}
+
+function drawMyMatches() {
   const box = $("myMatches"), mine = UP?.managers.find(m => m.entry_id === myId);
-  if (!mine) { box.classList.add("hidden"); return; }   // nobody picked, or that team isn't in this league
-  box.classList.remove("hidden");
+  if (!UP) { box.innerHTML = `<div class="empty">Your matches appear once a gameweek has finished. They need a head-to-head league.</div>`; return; }
+  if (!mine) { box.innerHTML = `<div class="empty">Pick your name to see your matches.</div>`; return; }
   const byId = Object.fromEntries(UP.managers.map(m => [m.entry_id, m]));
   const games = UP.upcoming[myId] || [];
   if (!games.length) {
@@ -552,13 +606,13 @@ function renderAwards(list) {
       <div class="t">${esc(a.title)}</div><div class="n">${esc(a.team)}</div><div class="d">${esc(a.detail)}</div></div>`).join("");
 }
 
-// picking a name (or clearing it) updates everything on the page that stands you out
+// picking a name updates everything on the page that stands you out
 function youChanged() {
   me = CH && CH.managers.some(m => m.entry_id === myId) ? myId : null;
   if (BANTER?.banter) { renderAwards(BANTER.banter.awards || []); renderLuck(BANTER.banter.luck); }
   if (CH) { picked = null; renderRace(); renderGrid(); renderHeadToHead(); renderScatter(); renderSpread(); }
   if (SQ) renderSquads();
-  loadMyMatches();
+  if (loaded.upcoming === leagueId) drawMyMatches();
 }
 
 function renderFacts() {
@@ -1034,32 +1088,19 @@ $("choices").addEventListener("click", e => {
 });
 $("moreFacts").addEventListener("click", () => { showAll = !showAll; renderFacts(); });
 $("myMatches").addEventListener("click", e => {
-  if (e.target.closest("#moreMatches")) { showAllMatches = !showAllMatches; renderMyMatches(); }
+  if (e.target.closest("#moreMatches")) { showAllMatches = !showAllMatches; drawMyMatches(); }
 });
-$("whoAmI").addEventListener("change", e => {
-  const v = e.target.value;
-  myId = v ? Number(v) : null;
-  try { if (v) localStorage.setItem("teamId", v); else localStorage.removeItem("teamId"); }
-  catch (err) { /* no storage: it still works until the page is closed */ }
-  $("teamId").value = v;
-  $("backLink").href = v ? "/?team=" + v : "/";
-  youChanged();
+$("whoList").addEventListener("click", e => {
+  const b = e.target.closest(".person"); if (b) chooseMe(Number(b.dataset.id));
 });
+$("whoSkip").addEventListener("click", () => { rememberSkip(); closeWho(); });
+$("whoDialog").addEventListener("cancel", rememberSkip);   // Escape
+$("changeYou").addEventListener("click", askWho);
 $("loadForm").addEventListener("submit", e => {
   e.preventDefault();
   const id = $("leagueId").value.trim();
   if (/^[0-9]+$/.test(id)) openLeague(id, null);
 });
-function copyButton(button, input) {
-  button.addEventListener("click", async () => {
-    try { await navigator.clipboard.writeText(input.value); }
-    catch (e) { input.select(); return; }   // no clipboard access: select it so they can copy by hand
-    button.textContent = "Copied";
-    setTimeout(() => { button.textContent = "Copy link"; }, 2000);
-  });
-}
-copyButton($("copyLink"), $("shareLink"));
-copyButton($("copyFull"), $("fullLink"));
 $("teamForm").addEventListener("submit", e => {
   e.preventDefault();
   const team = $("teamId").value.trim();
@@ -1068,10 +1109,12 @@ $("teamForm").addEventListener("submit", e => {
   location.href = "/?team=" + team + "&league=" + leagueId;
 });
 
-// a shared link looks like /league?league=12345 (add &tab=banter, &tab=recap, &tab=charts or &tab=rivalries to open straight on one).
+// the link to send is the address bar's /league?league=12345 (add &tab=banter, &tab=recap, &tab=charts or
+// &tab=rivalries to open straight on one). Nobody has to type a team ID: someone new is asked who they are
+// in a pop-up (see askWho), once per device.
 // Without &full=1 the page has no way into the rest of Draft Scout, so it can be shared as a view-only page.
-// With &full=1 (the link for one friend) it also shows the way back and My team. That's a convenience, not
-// a lock: anyone who adds &full=1 to the address gets it.
+// With &full=1 it also shows the way back and My team. That's a convenience, not a lock: anyone who adds
+// &full=1 to the address gets it.
 if (FULL) document.querySelectorAll(".fullonly").forEach(el => el.classList.remove("hidden"));
 // Your team (highlighted in the charts, prefilled in My team) is the one this browser last used in Draft Scout.
 // It's never read from or written to the address: a link copied from here can't carry your team ID, and an

@@ -3444,22 +3444,51 @@ def test_upcoming_route_gives_a_friendly_error(monkeypatch):
     assert res.status_code == 400 and "No Draft league found" in res.get_json()["error"]
 
 
-def test_banter_route_lists_the_people_for_the_name_picker(fake_api, monkeypatch):
+def test_people_route_lists_everyone_for_the_who_are_you_popup(fake_api, monkeypatch):
     with_banter_matches(monkeypatch)
-    people = app.app.test_client().get("/api/league/123/banter").get_json()["people"]
-    assert [p["entry_id"] for p in people] == [100, 101, 102, 103, 104]
-    assert people[0] == {"entry_id": 100, "team": "Team 0", "manager": "M 0"}
+
+    def too_heavy(league_id, view):
+        raise AssertionError("the pop-up's list must not load the whole league")
+
+    monkeypatch.setattr(app, "load_league", too_heavy)
+    data = app.app.test_client().get("/api/league/123/people").get_json()
+    assert data["league_name"] == "Banter League"
+    assert [p["entry_id"] for p in data["people"]] == [100, 101, 102, 103, 104]
+    assert data["people"][0] == {"entry_id": 100, "team": "Team 0", "manager": "M 0"}
+    banter = app.app.test_client().get("/api/league/123/banter").get_json()
+    assert "people" not in banter                    # the pop-up asks for them on its own
 
 
-def test_league_hub_banter_has_the_name_picker_your_matches_and_the_awards_for_everyone():
+def test_people_route_works_before_any_gameweek_has_finished(fake_api):
+    people = app.app.test_client().get("/api/league/123/people").get_json()["people"]
+    assert [p["entry_id"] for p in people] == [100]   # the fake league has one manager and no matches
+
+
+def test_people_route_gives_a_friendly_error(monkeypatch):
+    def not_found(url):
+        raise requests.HTTPError(response=type("R", (), {"status_code": 404})())
+
+    monkeypatch.setattr(app, "get_json", not_found)
+    res = app.app.test_client().get("/api/league/999/people")
+    assert res.status_code == 400 and "No Draft league found" in res.get_json()["error"]
+
+
+def test_league_hub_asks_new_visitors_who_they_are_and_has_no_share_links():
     res = app.app.test_client().get("/league?league=123")
     page = res.data.decode()
     res.close()
-    assert 'id="whoAmI"' in page and "function renderMyMatches" in page and 'id="awards"' in page
-    assert 'id="whoSection" class="hidden"' in page            # not fullonly: the view-only link has it too
-    order = ("whoSection", "matchups", "awardsSection", "factsSection")
+    assert '<dialog id="whoDialog"' in page and "function askWho" in page
+    # Your matches is a choice for everyone (not fullonly), hidden until the page knows who you are
+    assert 'class="choice hidden" id="mineChoice"' in page and 'data-tab="upcoming"' in page
+    # the old picker and the share bar with its links to copy are gone
+    for gone in ('id="whoAmI"', "function fillWho", 'id="shareLink"', 'id="fullLink"', "Share this page",
+                 "Copy link", "copyButton"):
+        assert gone not in page
+    # the address never carries Your matches, so a copied link opens on the choices
+    assert 'tab && tab !== "upcoming"' in page
+    order = ("panel-upcoming", "panel-banter", "matchups", "awardsSection", "factsSection")
     where = [page.index(f'id="{name}"') for name in order]
-    assert where == sorted(where)                              # your matches, match-ups, awards, then facts
+    assert where == sorted(where)
 
 
 # ---------------------------------------------------------------- team names stand out
