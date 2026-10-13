@@ -1200,7 +1200,7 @@ def league_banter(details):
 
 
 def league_people(details):
-    """Everyone in the league, for the "pick your name" list: {entry_id, team, manager}, by manager name."""
+    """Everyone in the league, for the "Who are you?" pop-up: {entry_id, team, manager}, by manager name."""
     people = [{"entry_id": e["entry_id"], "team": e.get("entry_name") or f'Team {e["entry_id"]}',
                "manager": f'{e.get("player_first_name", "")} {e.get("player_last_name", "")}'.strip()}
               for e in details.get("league_entries", []) if e.get("entry_id")]
@@ -2576,7 +2576,22 @@ def banter(league_id):
         return jsonify({"error": e.message}), e.status
     return jsonify({"league_id": league_id,
                     "league_name": details.get("league", {}).get("name", f"League {league_id}"),
-                    "banter": league_banter(details), "people": league_people(details)})
+                    "banter": league_banter(details)})
+
+
+@app.route("/api/league/<int:league_id>/people")
+def people(league_id):
+    """
+    Everyone in the league, for the "Who are you?" pop-up (see league_people). Light: it only needs the
+    league details, so it can be asked as soon as the hub opens, before anything else is loaded.
+    """
+    try:
+        details = fetch(f"{DRAFT}/league/{league_id}/details", LEAGUE_NOT_FOUND)
+    except FplError as e:
+        return jsonify({"error": e.message}), e.status
+    return jsonify({"league_id": league_id,
+                    "league_name": details.get("league", {}).get("name", f"League {league_id}"),
+                    "people": league_people(details)})
 
 
 @app.route("/api/league/<int:league_id>/upcoming")
