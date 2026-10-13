@@ -44,6 +44,31 @@
     border-radius: 4px; padding: 12px 16px; }
   .tablewrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; }
 
+  /* who you are, your matches and the season awards */
+  .mine { background: var(--surface); border: 1px solid var(--line); border-left: 5px solid var(--amber);
+    border-radius: 4px; padding: 14px 16px; margin-bottom: 36px; display: grid; gap: 8px; }
+  .mine .tag { font-family: var(--display); font-weight: 600; font-size: 1.25rem; }
+  .mine .note { color: var(--muted); font-size: .95rem; }
+  .mine h3 { margin: 8px 0 0; font-family: var(--display); font-weight: 600; font-size: 1.1rem; }
+  .form { display: inline-flex; gap: 2px; vertical-align: middle; }
+  .form i { font-style: normal; font-weight: 600; font-size: .75rem; width: 1.5em; line-height: 1.5; text-align: center;
+    border-radius: 3px; background: var(--line); color: var(--muted); }
+  .form i.rW { background: color-mix(in srgb, var(--pitch) 28%, transparent); color: var(--ink); }
+  .form i.rL { background: color-mix(in srgb, var(--rival) 28%, transparent); color: var(--ink); }
+  .coming { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+  .coming li { display: flex; justify-content: space-between; align-items: baseline; gap: 4px 12px; flex-wrap: wrap; }
+  .coming .when, .coming .where { color: var(--muted); font-size: .92rem; }
+  .coming .where { font-variant-numeric: tabular-nums; }
+  .chip.favourite { border-color: var(--pitch); color: var(--pitch); }
+  .chip.underdog { border-color: var(--amber); color: var(--ink); background: var(--amber-soft); }
+  .awards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin: 0 0 36px; }
+  .award { background: var(--surface); border: 1px solid var(--line); border-top: 4px solid var(--amber);
+    border-radius: 4px; padding: 10px 12px; display: grid; gap: 2px; align-content: start; }
+  .award.me { background: var(--amber-soft); }
+  .award .t { color: var(--muted); font-size: .78rem; text-transform: uppercase; letter-spacing: .05em; }
+  .award .n { font-weight: 600; overflow-wrap: anywhere; }
+  .award .d { color: var(--muted); font-size: .9rem; }
+
   /* league race */
   .minihead { font-family: var(--display); font-weight: 600; font-size: 1.3rem; margin: 26px 0 2px; }
   .racecap { margin: 0 0 6px; min-height: 1.5em; font-size: .95rem; }
@@ -179,7 +204,7 @@
 
     <div class="choices" id="choices" role="group" aria-label="What would you like to see?">
       <button class="choice" type="button" data-tab="banter" aria-pressed="false">
-        <span class="t">Banter</span><span class="d">This week's match-ups and facts to argue about</span></button>
+        <span class="t">Banter</span><span class="d">Your matches, season awards and facts to argue about</span></button>
       <button class="choice" type="button" data-tab="recap" aria-pressed="false">
         <span class="t">Recap</span><span class="d">The gameweek in words, updated as the games finish</span></button>
       <button class="choice" type="button" data-tab="charts" aria-pressed="false">
@@ -193,14 +218,27 @@
 
     <div id="panel-banter" class="hidden">
       <div id="banterEmpty" class="empty hidden"></div>
+      <section id="whoSection" class="hidden">
+        <div class="pickers">
+          <label>Who are you?
+            <select id="whoAmI"><option value="">Pick your name…</option></select>
+          </label>
+        </div>
+        <div id="myMatches" class="hidden"></div>
+      </section>
       <section id="matchups">
         <h2>This week's match-ups</h2>
         <p class="sub" id="matchSub"></p>
         <div class="cards" id="cards"></div>
       </section>
+      <section id="awardsSection" class="hidden">
+        <h2>Season awards</h2>
+        <p class="sub">Handed out from this season's results so far.</p>
+        <div class="awards" id="awards"></div>
+      </section>
       <section id="factsSection">
         <h2>Facts to argue about</h2>
-        <p class="sub">Worked out from this season's results. Mild teasing only.</p>
+        <p class="sub">Worked out from this season's results. All in good fun.</p>
         <ul class="facts" id="facts"></ul>
         <button class="btn ghost hidden" id="moreFacts" type="button"></button>
       </section>
@@ -326,6 +364,9 @@ let picked = null;       // the manager whose head-to-head record is open
 let SQ = null;           // the squads the server sent (see league_squads in app.py); this page only draws them
 let squadView = "week";  // which rating the squad chart uses: "week" (next 5) or "season" (until the break)
 let RIV = null;          // the Rivalries data: the managers and seasons (see league_rivalries in app.py)
+let UP = null, upLeague = null;   // everyone's remaining matches (see league_upcoming in app.py), and the league they're for
+let showAllMatches = false;       // "Your matches" shows the next few at first
+const MATCHES_SHOWN = 4;          // matches listed after the next one, before "Show all"
 
 function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 const place = n => n + (n % 100 >= 11 && n % 100 <= 13 ? "th" : ({ 1: "st", 2: "nd", 3: "rd" }[n % 10] || "th"));
@@ -381,6 +422,7 @@ function openLeague(id, firstTab) {
   leagueId = id;
   loaded.banter = loaded.recap = loaded.charts = loaded.rivalries = null;
   RIV = null;
+  UP = null; upLeague = null; showAllMatches = false;
   SQ = null; squadView = "week";
   document.querySelectorAll("#squadView button").forEach(x => x.setAttribute("aria-pressed", x.dataset.view === "week"));
   $("squads").innerHTML = `<p class="sub">Loading…</p>`;
@@ -414,6 +456,8 @@ function renderBanter(data) {
   $("matchups").classList.toggle("hidden", !b);
   $("factsSection").classList.toggle("hidden", !b);
   $("luckSection").classList.toggle("hidden", !b);
+  $("whoSection").classList.toggle("hidden", !b);
+  $("awardsSection").classList.add("hidden");
   if (!b) {
     $("banterEmpty").textContent = "The banter starts once a gameweek has finished. It needs a head-to-head league, because it's built from the match results.";
     return;
@@ -426,8 +470,95 @@ function renderBanter(data) {
   b.battles.forEach(x => cards.push(card(x.title === "Battle for 3rd" ? "" : "spoon", x.title, x.a, x.b, x.line)));
   $("matchSub").textContent = b.hot_match ? `Looking ahead to gameweek ${b.hot_match.gw}.` : "No matches left to play.";
   $("cards").innerHTML = cards.join("") || `<div class="empty">Nothing to show yet.</div>`;
+  fillWho(data.people || []);
+  renderAwards(b.awards || []);
   renderFacts();
   renderLuck(b.luck);
+}
+
+// ---------------------------------------------------------------- who you are, and your matches
+
+// The list of everyone in the league. The choice is kept in this browser only (the same memory the main
+// page uses for your team), so the server never learns who anyone is and the address never carries it.
+function fillWho(people) {
+  const sel = $("whoAmI");
+  sel.innerHTML = `<option value="">Pick your name…</option>` + people.map(p =>
+    `<option value="${p.entry_id}">${esc(p.manager || p.team)} · ${esc(p.team)}</option>`).join("");
+  sel.value = people.some(p => p.entry_id === myId) ? String(myId) : "";
+  if (sel.value) loadMyMatches(); else $("myMatches").classList.add("hidden");
+}
+
+async function loadMyMatches() {
+  const box = $("myMatches");
+  if (!myId) { box.classList.add("hidden"); return; }
+  if (upLeague === leagueId) { renderMyMatches(); return; }
+  const forLeague = leagueId;
+  box.classList.remove("hidden");
+  box.innerHTML = `<p class="sub">Loading your matches…</p>`;
+  try {
+    const data = await getJson(`/api/league/${forLeague}/upcoming`);
+    if (forLeague !== leagueId) return;   // they opened another league while this was loading
+    UP = data.upcoming; upLeague = forLeague;
+    renderMyMatches();
+  } catch (e) {
+    if (forLeague === leagueId) box.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  }
+}
+
+const formChips = f => f ? `<span class="form">${[...f].map(r => `<i class="r${r}">${r}</i>`).join("")}</span>` : "no results yet";
+const EDGE_WORDS = { favourite: "You're the favourite.", underdog: "You're the underdog.", even: "Too close to call." };
+
+function renderMyMatches() {
+  const box = $("myMatches"), mine = UP?.managers.find(m => m.entry_id === myId);
+  if (!mine) { box.classList.add("hidden"); return; }   // nobody picked, or that team isn't in this league
+  box.classList.remove("hidden");
+  const byId = Object.fromEntries(UP.managers.map(m => [m.entry_id, m]));
+  const games = UP.upcoming[myId] || [];
+  if (!games.length) {
+    box.innerHTML = `<div class="mine"><div class="tag">Your matches</div><div class="note">No matches left this season.</div></div>`;
+    return;
+  }
+  const [next, ...rest] = games, opp = byId[next.opponent], hh = UP.head_to_head[myId];
+  let record = "";
+  if (hh) {
+    const met = hh.won + hh.drawn + hh.lost, last = hh.last;
+    record = !met ? "You haven't met yet."
+      : `Against them: won ${hh.won}, drawn ${hh.drawn}, lost ${hh.lost}.`
+        + (last ? ` Last time you ${last.mine > last.theirs ? "won" : last.mine < last.theirs ? "lost" : "drew"} ${last.mine}-${last.theirs} in GW${last.gw} (${last.season}).` : "");
+  }
+  const strength = mine.strength != null && opp.strength != null
+    ? `Squad strength now: ${mine.strength.toFixed(0)} v ${opp.strength.toFixed(0)}. ${EDGE_WORDS[next.edge] || ""}` : "";
+  const shown = showAllMatches ? rest : rest.slice(0, MATCHES_SHOWN);
+  const row = g => {
+    const o = byId[g.opponent];
+    const where = [place(o.position), o.strength != null ? `strength ${o.strength.toFixed(0)}` : ""].filter(Boolean).join(" · ");
+    return `<li><span><span class="when">GW${g.gw}</span> v ${esc(o.team)}</span>
+      <span class="where">${where}${g.edge && g.edge !== "even" ? ` <span class="chip ${g.edge}">${g.edge}</span>` : ""}</span></li>`;
+  };
+  box.innerHTML = `<div class="mine">
+      <div class="tag">${next.live ? "Playing now" : "Next up"} · GW${next.gw}</div>
+      <div class="versus">${side(mine)}<span class="v">v</span>${side(opp)}</div>
+      <div class="note">Recent results, latest on the right: you ${formChips(mine.form)}, them ${formChips(opp.form)}</div>
+      ${strength ? `<div class="note">${esc(strength)}</div>` : ""}
+      ${record ? `<div class="note">${esc(record)}</div>` : ""}
+      ${rest.length ? `<h3>After that</h3><ul class="coming">${shown.map(row).join("")}</ul>` : ""}
+      ${rest.length > MATCHES_SHOWN ? `<button class="btn ghost" id="moreMatches" type="button">${showAllMatches ? `Show the next ${MATCHES_SHOWN} only` : `Show all ${rest.length} more`}</button>` : ""}
+    </div>`;
+}
+
+function renderAwards(list) {
+  $("awardsSection").classList.toggle("hidden", !list.length);
+  $("awards").innerHTML = list.map(a => `<div class="award ${a.entry_id === myId ? "me" : ""}">
+      <div class="t">${esc(a.title)}</div><div class="n">${esc(a.team)}</div><div class="d">${esc(a.detail)}</div></div>`).join("");
+}
+
+// picking a name (or clearing it) updates everything on the page that stands you out
+function youChanged() {
+  me = CH && CH.managers.some(m => m.entry_id === myId) ? myId : null;
+  if (BANTER?.banter) { renderAwards(BANTER.banter.awards || []); renderLuck(BANTER.banter.luck); }
+  if (CH) { picked = null; renderRace(); renderGrid(); renderHeadToHead(); renderScatter(); renderSpread(); }
+  if (SQ) renderSquads();
+  loadMyMatches();
 }
 
 function renderFacts() {
@@ -902,6 +1033,18 @@ $("choices").addEventListener("click", e => {
   const b = e.target.closest(".choice"); if (b) openTab(b.dataset.tab);
 });
 $("moreFacts").addEventListener("click", () => { showAll = !showAll; renderFacts(); });
+$("myMatches").addEventListener("click", e => {
+  if (e.target.closest("#moreMatches")) { showAllMatches = !showAllMatches; renderMyMatches(); }
+});
+$("whoAmI").addEventListener("change", e => {
+  const v = e.target.value;
+  myId = v ? Number(v) : null;
+  try { if (v) localStorage.setItem("teamId", v); else localStorage.removeItem("teamId"); }
+  catch (err) { /* no storage: it still works until the page is closed */ }
+  $("teamId").value = v;
+  $("backLink").href = v ? "/?team=" + v : "/";
+  youChanged();
+});
 $("loadForm").addEventListener("submit", e => {
   e.preventDefault();
   const id = $("leagueId").value.trim();
