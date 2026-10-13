@@ -40,6 +40,30 @@
   .shift { font-weight: 600; font-variant-numeric: tabular-nums; }
   .shift.up { color: var(--pitch); } .shift.down { color: var(--rival); }
   #tradeResult .error { margin: 16px 0 0; }
+  /* trade ideas by club */
+  #ideas { margin-bottom: 32px; }
+  .clubs { display: grid; gap: 8px; }
+  details.club { background: var(--surface); border: 1px solid var(--line); border-radius: 4px; }
+  details.club summary { display: flex; gap: 12px; align-items: baseline; padding: 10px 14px; cursor: pointer;
+    list-style: none; }
+  details.club summary::-webkit-details-marker { display: none; }
+  details.club summary::before { content: "›"; color: var(--muted); font-weight: 700; width: 1ch; }
+  details.club[open] summary::before { content: "⌄"; }
+  .club .code { font-family: var(--display); font-weight: 600; font-size: 1.35rem; }
+  .club .best { margin-left: auto; color: var(--muted); font-size: .9rem; font-variant-numeric: tabular-nums; }
+  .club .best.up { color: var(--pitch); font-weight: 600; }
+  .csquad { padding: 0 14px 6px; }
+  .cplayer { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 2px 12px; align-items: baseline;
+    padding: 8px 0; border-top: 1px solid var(--line); }
+  .cplayer .pname { font-weight: 600; min-width: 0; }
+  .cplayer .owner { color: var(--muted); font-size: .9rem; text-align: right; }
+  .cplayer .owner.you { color: var(--pitch); font-weight: 600; }
+  .cplayer .idea { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center;
+    font-size: .95rem; }
+  .cplayer .none { grid-column: 1 / -1; color: var(--muted); font-size: .9rem; }
+  .tag { padding: 0 8px; border: 1px solid var(--muted); border-radius: 999px; font-size: .8rem; font-weight: 600; }
+  .tag.fair { border-color: var(--pitch); color: var(--pitch); }
+  .tag.unfair { border-color: var(--amber); background: var(--amber-soft); color: var(--ink); }
   @media (max-width: 640px) { .tradecols, .tsides { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -62,6 +86,19 @@
         <button type="button" data-view="season" aria-pressed="false">Until the break</button>
       </div>
     </div>
+    <section id="ideas" class="hidden">
+      <h2>Trade ideas by club</h2>
+      <p class="sub">Open a club to see its whole squad and who owns each player. For a player another manager owns you'll see the one-for-one offer that lifts your best eleven most, and what it does to theirs. Free agents are for waivers, not trades. For anything bigger, build the trade below.</p>
+      <div class="controls">
+        <div class="tabs" id="ideaSort" role="group" aria-label="Order clubs by">
+          <button type="button" data-sort="az" aria-pressed="true">A–Z</button>
+          <button type="button" data-sort="best" aria-pressed="false">Best trades first</button>
+        </div>
+      </div>
+      <div id="ideasBody" aria-live="polite"></div>
+    </section>
+
+    <h2>Build a trade yourself</h2>
     <p class="sub">Pick a manager, tick the players going each way, and see how the trade changes both teams' best eleven, including which positions get stronger or weaker. Both sides need the same positions, because every Draft squad keeps 2 GKP, 5 DEF, 5 MID and 3 FWD.</p>
     <div id="tradeEmpty" class="empty hidden"></div>
     <div id="tradeArea">
@@ -81,8 +118,11 @@
 <script>
 const $ = id => document.getElementById(id);
 let DATA = null;
-let state = { me: null, view: "week", tradeWith: null, give: new Set(), get: new Set() };
+let state = { me: null, view: "week", tradeWith: null, give: new Set(), get: new Set(), ideasSort: "az" };
 const POS_ORDER = { GKP: 0, DEF: 1, MID: 2, FWD: 3 };
+let IDEAS = null;              // /trade-ideas: every club's squad with my best trade for each player
+const openClubs = new Set();   // clubs the visitor has opened, kept across re-draws and view changes
+let ideasRequest = 0;          // so a slow answer for the old view can't overwrite the new one
 
 function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 function recall(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
@@ -130,6 +170,11 @@ function render() {
   document.querySelectorAll("#viewTabs button").forEach(b => b.setAttribute("aria-pressed", b.dataset.view === state.view));
   resetTrade();
   renderTrade();
+  // trade ideas need a drafted squad of mine and someone to trade with (same rule as the analyzer below)
+  const ready = DATA.managers.some(m => m.entry_id === state.me) && DATA.players.some(p => p.owner === state.me)
+    && DATA.managers.some(m => m.entry_id !== state.me);
+  $("ideas").classList.toggle("hidden", !ready);
+  if (ready) loadIdeas();
 }
 
 // a new league or view was loaded: start with nothing ticked and the wanted (or first other) manager picked
@@ -169,6 +214,89 @@ function renderTrade() {
   $("giveList").innerHTML = pickList(state.me, state.give, "give");
   $("getList").innerHTML = pickList(state.tradeWith, state.get, "get");
   $("tradeResult").innerHTML = "";
+}
+
+// ---- trade ideas by club. The server works out every idea (see trade_ideas in app.py); this just draws them.
+async function loadIdeas() {
+  const request = ++ideasRequest;
+  $("ideasBody").innerHTML = `<p class="sub">Finding trade ideas…</p>`;
+  const params = new URLSearchParams({ league: DATA.league_id, view: DATA.view });
+  try {
+    let r;
+    try { r = await fetch(`/api/team/${teamId}/trade-ideas?${params}`); }
+    catch (e) { throw new Error("Can't reach Draft Scout. Check your connection and try again."); }
+    let j = null;
+    try { j = await r.json(); } catch (e) { /* not JSON, e.g. a crash page */ }
+    if (!r.ok || !j) throw new Error(j?.error || "Draft Scout hit an unexpected error while finding trade ideas.");
+    if (request !== ideasRequest) return;
+    IDEAS = j;
+    renderIdeas();
+  } catch (e) {
+    if (request !== ideasRequest) return;
+    $("ideasBody").innerHTML = `<div class="error" role="alert">${esc(e.message)}</div>`;
+  }
+}
+
+const signed = v => `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(1)}`;
+
+function ideaHtml(p) {
+  const idea = p.idea;
+  if (!idea) return `<div class="none">No one-for-one offer lifts your best eleven.</div>`;
+  const fair = idea.verdict === "good_and_fair";
+  const tag = fair ? `<span class="tag fair" title="Their team doesn't lose much">Fair</span>`
+    : `<span class="tag unfair" title="Their team gets noticeably weaker, so expect a no">They'd lose</span>`;
+  return `
+    <div class="idea">
+      <span>Give <strong>${esc(idea.give_name)}</strong></span>
+      <span class="shift ${idea.me > 0 ? "up" : "down"}">You ${signed(idea.me)}</span>
+      <span class="shift ${idea.them > 0 ? "up" : idea.them < 0 ? "down" : ""}">Them ${signed(idea.them)}</span>
+      ${tag}
+      <button class="btn ghost" type="button" data-with="${p.owner}" data-give="${idea.give}" data-get="${p.id}">Check this trade</button>
+    </div>`;
+}
+
+function clubPlayerHtml(p) {
+  const owner = p.mine ? `<span class="owner you">You</span>`
+    : p.owner === null ? `<span class="owner">Free agent</span>`
+    : `<span class="owner">${esc(p.owner_name ?? `Team ${p.owner}`)}</span>`;
+  return `
+    <div class="cplayer">
+      <span class="pname">${esc(p.name)} <span class="pos">${esc(p.pos)}, ${p.total} pts</span></span>
+      ${owner}
+      <span class="score">${p.score.toFixed(0)}</span>
+      ${p.mine || p.owner === null ? "" : ideaHtml(p)}
+    </div>`;
+}
+
+function clubHtml(c) {
+  const best = c.best_gain === null ? `<span class="best">No good trade here</span>`
+    : `<span class="best up">Best: ${signed(c.best_gain)}</span>`;
+  return `
+    <details class="club" data-club="${esc(c.club)}" ${openClubs.has(c.club) ? "open" : ""}>
+      <summary><span class="code">${esc(c.club)}</span>${best}</summary>
+      <div class="csquad">${c.players.map(clubPlayerHtml).join("")}</div>
+    </details>`;
+}
+
+function renderIdeas() {
+  if (!IDEAS) return;
+  const clubs = [...IDEAS.clubs];
+  if (state.ideasSort === "best") {
+    clubs.sort((a, b) => (b.best_gain ?? -1) - (a.best_gain ?? -1) || a.club.localeCompare(b.club));
+  }
+  $("ideasBody").innerHTML = clubs.length ? `<div class="clubs">${clubs.map(clubHtml).join("")}</div>`
+    : `<p class="sub">No clubs to show yet.</p>`;
+  document.querySelectorAll("#ideaSort button").forEach(b => b.setAttribute("aria-pressed", b.dataset.sort === state.ideasSort));
+}
+
+// "Check this trade": fill in the analyzer below (their manager, one player each way) and run it
+function useIdea(button) {
+  state.tradeWith = Number(button.dataset.with);
+  state.give = new Set([Number(button.dataset.give)]);
+  state.get = new Set([Number(button.dataset.get)]);
+  renderTrade();
+  $("tradeArea").scrollIntoView({ behavior: "smooth", block: "start" });
+  analyzeTrade();
 }
 
 // one side of the result: strength before and after, formation, who moves in or out of the eleven
@@ -243,6 +371,20 @@ $("tradeCols").addEventListener("change", e => {
   $("tradeResult").innerHTML = "";   // the old result no longer matches what's ticked
 });
 $("tradeBtn").addEventListener("click", analyzeTrade);
+$("ideaSort").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  state.ideasSort = b.dataset.sort;
+  renderIdeas();
+});
+$("ideasBody").addEventListener("click", e => {
+  const b = e.target.closest("button[data-get]");
+  if (b) useIdea(b);
+});
+// remember which clubs are open (the toggle event doesn't bubble, so listen while it travels down)
+$("ideasBody").addEventListener("toggle", e => {
+  const club = e.target.dataset?.club; if (!club) return;
+  if (e.target.open) openClubs.add(club); else openClubs.delete(club);
+}, true);
 
 if (/^[0-9]+$/.test(teamId || "")) {
   loadTeam();

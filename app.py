@@ -861,6 +861,65 @@ def evaluate_trade(players, me, them, give, get):
             "me": mine, "them": theirs}
 
 
+def best_offer(players, me, target, mine):
+    """
+    My best 1-for-1 offer for `target` (a player another manager owns): the one of
+    my players in his position that lifts my best eleven most. If two lift it the
+    same, the one that costs them least wins, then the lower-rated player. Returns
+    None if no offer lifts my team by at least TRADE_MIN_GAIN.
+    """
+    best = None
+    for give in mine:
+        if give["pos"] != target["pos"]:
+            continue
+        result = evaluate_trade(players, me, target["owner"], [give["id"]], [target["id"]])
+        key = (result["me"]["change"], result["them"]["change"], -give["score"])
+        if best is None or key > best[0]:
+            best = (key, give, result)
+    if best is None or best[2]["me"]["change"] < TRADE_MIN_GAIN:
+        return None
+    _key, give, result = best
+    return {"give": give["id"], "give_name": give["name"], "me": result["me"]["change"],
+            "them": result["them"]["change"], "verdict": result["verdict"]}
+
+
+def trade_ideas(players, me, managers):
+    """
+    Every Premier League club's whole squad, with who owns each player and, for
+    each player another manager owns, my best 1-for-1 trade to get him (see
+    best_offer). Free agents and my own players get no idea: free agents are a
+    waiver claim, not a trade. Bigger trades are built by hand in the analyzer.
+
+    Returns {"me": my team ID, "clubs": [{"club": "ARS", "best_gain": the biggest
+    lift among the club's ideas or None, "players": [...]}]}, clubs A-Z and
+    players in squad order (GKP first), best first. Each player is {id, name, pos,
+    score, total, owner, owner_name, mine, idea}; idea is None or {give, give_name,
+    me, them, verdict}, where me and them are the change in each best eleven's
+    strength and verdict is the same one the analyzer would give.
+    """
+    names = {m["entry_id"]: m["team_name"] for m in managers}
+    mine = sorted((p for p in players if p["owner"] == me), key=lambda p: p["id"])
+    order = {pos: i for i, pos in enumerate(FORMATION)}
+
+    clubs = {}
+    for p in players:
+        clubs.setdefault(p["team"], []).append(p)
+
+    out = []
+    for club in sorted(clubs):
+        squad = sorted(clubs[club], key=lambda p: (order.get(p["pos"], len(order)), -p["score"], p["name"]))
+        rows = []
+        for p in squad:
+            other = p["owner"] is not None and p["owner"] != me
+            rows.append({"id": p["id"], "name": p["name"], "pos": p["pos"], "score": p["score"],
+                         "total": p["total"], "owner": p["owner"], "owner_name": names.get(p["owner"]),
+                         "mine": p["owner"] == me,
+                         "idea": best_offer(players, me, p, mine) if other else None})
+        gains = [r["idea"]["me"] for r in rows if r["idea"]]
+        out.append({"club": club, "best_gain": max(gains) if gains else None, "players": rows})
+    return {"me": me, "clubs": out}
+
+
 # ---------------------------------------------------------------- league history (head-to-head)
 
 WIN_POINTS = 3   # head-to-head league points for a win
@@ -2712,6 +2771,21 @@ def trade(entry_id):
         return jsonify(evaluate_trade(data["players"], entry_id, them, give, get))
     except (FplError, TradeError) as e:
         return jsonify({"error": e.message}), e.status
+
+
+@app.route("/api/team/<int:entry_id>/trade-ideas")
+def trade_ideas_data(entry_id):
+    """
+    Every club's squad with my best trade for each player another manager owns,
+    e.g. /api/team/276914/trade-ideas?league=52607&view=season (see trade_ideas).
+    """
+    try:
+        data, _leagues = league_for_team(entry_id, request.args.get("league", type=int),
+                                         request.args.get("view", "week"))
+    except FplError as e:
+        return jsonify({"error": e.message}), e.status
+    return jsonify({"league_id": data["league_id"], "view": data["view"],
+                    **trade_ideas(data["players"], entry_id, data["managers"])})
 
 
 if __name__ == "__main__":
