@@ -1537,6 +1537,228 @@ def test_trade_endpoint_explains_bad_trades(two_managers, query, text):
     assert text in res.get_json()["error"]
 
 
+# ---------------------------------------------------------------- trade ideas by club
+
+IDEA_MANAGERS = [{"entry_id": 100, "team_name": "Me FC"}, {"entry_id": 200, "team_name": "Rival FC"}]
+
+
+def club_league(clubs=None):
+    """trade_league with a Premier League club (default ARS) and a points total on everyone."""
+    players = trade_league()
+    for p in players:
+        p["team"] = (clubs or {}).get(p["id"], "ARS")
+        p["total"] = 40
+    return players
+
+
+def idea_for(out, pid):
+    """The row for one player in a trade_ideas result."""
+    return next(p for c in out["clubs"] for p in c["players"] if p["id"] == pid)
+
+
+def test_trade_ideas_list_every_club_with_its_whole_squad():
+    out = app.trade_ideas(club_league({1: "CHE", 101: "CHE"}), 100, IDEA_MANAGERS)
+    assert [c["club"] for c in out["clubs"]] == ["ARS", "CHE"]           # A-Z
+    assert sorted(p["id"] for p in out["clubs"][1]["players"]) == [1, 101]
+    assert sum(len(c["players"]) for c in out["clubs"]) == 30             # nobody left out
+
+
+def test_trade_ideas_squad_is_in_position_order_best_first():
+    players = with_scores(club_league(), {105: 90, 4: 70})   # two defenders stand out
+    squad = app.trade_ideas(players, 100, IDEA_MANAGERS)["clubs"][0]["players"]
+    order = [p["pos"] for p in squad]
+    assert order == sorted(order, key=["GKP", "DEF", "MID", "FWD"].index)
+    defenders = [p["id"] for p in squad if p["pos"] == "DEF"]
+    assert defenders[:2] == [105, 4]
+
+
+def test_trade_idea_is_my_best_offer_and_matches_the_analyzer():
+    # my bench midfielder (30) for their star (80): the cheapest offer that does the job
+    players = with_scores(club_league(), {8: 30, 108: 80})
+    star = idea_for(app.trade_ideas(players, 100, IDEA_MANAGERS), 108)
+    idea = star["idea"]
+    assert star["owner"] == 200 and star["owner_name"] == "Rival FC" and not star["mine"]
+    assert idea["give"] == 8 and idea["give_name"] == "P8"      # equal lifts: the lower-rated player goes
+    assert idea["verdict"] == "good_but_unfair"
+    analyzer = app.evaluate_trade(players, 100, 200, give=[8], get=[108])
+    assert idea["me"] == analyzer["me"]["change"] >= app.TRADE_MIN_GAIN
+    assert idea["them"] == analyzer["them"]["change"] < -app.FAIR_MARGIN
+
+
+def test_trade_ideas_only_swap_the_same_position_and_my_own_players():
+    players = club_league()
+    for p in players:                                  # uneven ratings, so there is plenty to find
+        p["score"] = 30 + (p["id"] * 7) % 50
+    by_id = {p["id"]: p for p in players}
+    out = app.trade_ideas(players, 100, IDEA_MANAGERS)
+    ideas = [(r, r["idea"]) for c in out["clubs"] for r in c["players"] if r["idea"]]
+    assert ideas
+    for row, idea in ideas:
+        assert by_id[idea["give"]]["owner"] == 100
+        assert by_id[idea["give"]]["pos"] == row["pos"]
+        assert row["owner"] == 200
+
+
+def test_my_players_and_free_agents_get_no_idea():
+    players = with_scores(club_league(), {108: 80, 8: 30})
+    next(p for p in players if p["id"] == 115)["owner"] = None   # a free agent
+    out = app.trade_ideas(players, 100, IDEA_MANAGERS)
+    assert idea_for(out, 8)["mine"] and idea_for(out, 8)["idea"] is None
+    free = idea_for(out, 115)
+    assert free["owner"] is None and free["owner_name"] is None and free["idea"] is None
+
+
+def test_trade_ideas_need_a_real_lift():
+    out = app.trade_ideas(club_league(), 100, IDEA_MANAGERS)       # everyone rates 50: nothing improves
+    assert all(r["idea"] is None for c in out["clubs"] for r in c["players"])
+    assert all(c["best_gain"] is None for c in out["clubs"])
+
+
+def test_each_club_reports_its_best_gain():
+    players = with_scores(club_league({108: "CHE", 109: "MUN"}), {8: 30, 108: 80, 109: 65})
+    clubs = {c["club"]: c for c in app.trade_ideas(players, 100, IDEA_MANAGERS)["clubs"]}
+    assert clubs["CHE"]["best_gain"] == idea_for({"clubs": [clubs["CHE"]]}, 108)["idea"]["me"]
+    assert clubs["CHE"]["best_gain"] > clubs["MUN"]["best_gain"] > 0
+    assert clubs["ARS"]["best_gain"] is None
+
+
+def test_trade_ideas_do_not_change_the_real_owners():
+    players = with_scores(club_league(), {8: 30, 108: 80})
+    before = [dict(p) for p in players]
+    app.trade_ideas(players, 100, IDEA_MANAGERS)
+    assert players == before
+
+
+def free_agents(players, ids):
+    """Make these players free agents (nobody owns them)."""
+    for p in players:
+        if p["id"] in ids:
+            p["owner"] = None
+    return players
+
+
+def test_free_agent_claim_drops_my_weakest_and_matches_the_waiver_swap():
+    # free agent 109 (a MID) rates 80; my MIDs rate 50 except bench player 8 on 30
+    players = free_agents(with_scores(club_league(), {8: 30, 109: 80}), {109})
+    star = idea_for(app.trade_ideas(players, 100, IDEA_MANAGERS), 109)
+    claim = star["claim"]
+    assert star["owner"] is None and star["idea"] is None          # a claim, not a trade
+    assert claim["drop"] == 8 and claim["drop_name"] == "P8"
+    # the same pair the waiver cards at the top of the page would suggest, with the same lift
+    swap = next(t for t in app.waiver_targets(players, 100) if t["claim"] == 109)
+    assert swap["drop"] == claim["drop"]
+    assert claim["me"] == app.xi_lift(swap) >= app.WORTH_XI_GAIN
+
+
+def test_claim_never_drops_a_kept_player():
+    players = free_agents(with_scores(club_league(), {8: 30, 109: 80}), {109})
+    claim = idea_for(app.trade_ideas(players, 100, IDEA_MANAGERS, keep={8}), 109)["claim"]
+    assert claim["drop"] == 9        # the next weakest (tied at 50, lowest ID first)
+    everyone = {8, 9, 10, 11, 12}    # all five of my midfielders kept: nobody left to drop
+    assert idea_for(app.trade_ideas(players, 100, IDEA_MANAGERS, keep=everyone), 109)["claim"] is None
+
+
+def test_a_free_agent_who_would_not_help_gets_no_claim():
+    for score in (40, 50, 51):       # worse than, level with, and only just better than my weakest
+        players = free_agents(with_scores(club_league(), {109: score}), {109})
+        assert idea_for(app.trade_ideas(players, 100, IDEA_MANAGERS), 109)["claim"] is None
+
+
+def test_only_free_agents_get_a_claim():
+    players = free_agents(with_scores(club_league(), {8: 30, 108: 80, 109: 80}), {109})
+    out = app.trade_ideas(players, 100, IDEA_MANAGERS)
+    assert idea_for(out, 109)["claim"] is not None and idea_for(out, 109)["idea"] is None
+    assert idea_for(out, 108)["claim"] is None and idea_for(out, 108)["idea"] is not None
+    assert idea_for(out, 8)["claim"] is None
+
+
+def test_each_club_reports_its_best_claim_apart_from_its_best_trade():
+    players = free_agents(with_scores(club_league({109: "CHE", 110: "MUN"}), {8: 30, 109: 80, 110: 65}),
+                          {109, 110})
+    clubs = {c["club"]: c for c in app.trade_ideas(players, 100, IDEA_MANAGERS)["clubs"]}
+    assert clubs["CHE"]["best_claim"] == idea_for({"clubs": [clubs["CHE"]]}, 109)["claim"]["me"]
+    assert clubs["CHE"]["best_claim"] > clubs["MUN"]["best_claim"] > 0
+    assert clubs["ARS"]["best_claim"] is None
+    assert clubs["CHE"]["best_gain"] is None      # a claim isn't a trade
+
+
+def test_free_agent_rows_carry_their_fitness():
+    players = free_agents(with_scores(club_league(), {8: 30, 109: 80}), {109})
+    for p in players:
+        if p["id"] == 109:
+            p["chance"], p["news"] = 50, "Knock - 50% chance of playing"
+    row = idea_for(app.trade_ideas(players, 100, IDEA_MANAGERS), 109)
+    assert row["chance"] == 50 and row["news"] == "Knock - 50% chance of playing"
+    assert idea_for(app.trade_ideas(players, 100, IDEA_MANAGERS), 1)["news"] == ""   # no news on file
+
+
+def test_claims_do_not_change_the_real_owners():
+    players = free_agents(with_scores(club_league(), {8: 30, 109: 80}), {109})
+    before = [dict(p) for p in players]
+    app.trade_ideas(players, 100, IDEA_MANAGERS)
+    assert players == before
+
+
+def test_trade_ideas_endpoint(two_managers, monkeypatch):
+    inner = app.get_json
+
+    def stronger_rival_player(url):   # player 2 (rival's MID, CHE) is in better form than my player 1
+        data = inner(url)
+        if "draft" in url and "bootstrap" in url:
+            elements = [dict(e, form="9.0") if e["id"] == 2 else e for e in data["elements"]]
+            return {**data, "elements": elements}
+        return data
+
+    monkeypatch.setattr(app, "get_json", stronger_rival_player)
+    res = app.app.test_client().get("/api/team/100/trade-ideas?league=123")
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["league_id"] == 123 and data["view"] == "week" and data["me"] == 100
+    assert [c["club"] for c in data["clubs"]] == ["ARS", "CHE"]
+    target = idea_for(data, 2)
+    assert target["owner_name"] == "Rival FC"
+    assert target["idea"]["give"] == 1 and target["idea"]["me"] >= app.TRADE_MIN_GAIN
+    assert idea_for(data, 1)["mine"]
+    assert idea_for(data, 3)["idea"] is None          # a forward: I have none to give
+
+
+def test_trade_ideas_endpoint_follows_the_view(two_managers):
+    res = app.app.test_client().get("/api/team/100/trade-ideas?view=season")
+    assert res.status_code == 200
+    assert res.get_json()["view"] == "season"
+
+
+def test_trade_ideas_endpoint_claims_free_agents_and_honours_keep(fake_api, monkeypatch):
+    inner = app.get_json
+
+    def better_free_agent(url):   # player 2 (a free MID) is in better form than my only player, 1
+        data = inner(url)
+        if "draft" in url and "bootstrap" in url:
+            elements = [dict(e, form="9.0", points_per_game="9.0") if e["id"] == 2 else e
+                        for e in data["elements"]]
+            return {**data, "elements": elements}
+        return data
+
+    monkeypatch.setattr(app, "get_json", better_free_agent)
+    client = app.app.test_client()
+    claim = idea_for(client.get("/api/team/100/trade-ideas?league=123").get_json(), 2)["claim"]
+    assert claim["drop"] == 1 and claim["me"] >= app.WORTH_XI_GAIN
+    kept = client.get("/api/team/100/trade-ideas?league=123&keep=1").get_json()
+    assert idea_for(kept, 2)["claim"] is None          # his only possible drop is kept
+
+
+def test_trade_ideas_endpoint_explains_an_unknown_team(monkeypatch):
+    def not_found(url):
+        resp = requests.Response()
+        resp.status_code = 404
+        raise requests.HTTPError(response=resp)
+
+    monkeypatch.setattr(app, "get_json", not_found)
+    res = app.app.test_client().get("/api/team/999999/trade-ideas")
+    assert res.status_code == 400
+    assert "No Draft team found" in res.get_json()["error"]
+
+
 # ---------------------------------------------------------------- league banter
 
 def banter_league(matches):
@@ -1711,7 +1933,8 @@ def test_ordinal(n, text):
 
 # ---------------------------------------------------------------- trade and banter pages
 
-@pytest.mark.parametrize("path,text", [("/trade", b"Trade analyzer"), ("/league", b"League hub")])
+@pytest.mark.parametrize("path,text", [("/trade", b"Trade analyzer"), ("/trade", b"Trade ideas by club"),
+                                       ("/", b"Players by club"), ("/league", b"League hub")])
 def test_extra_pages_load(path, text):
     res = app.app.test_client().get(path)
     assert res.status_code == 200
