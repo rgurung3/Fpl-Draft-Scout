@@ -1759,6 +1759,137 @@ def test_trade_ideas_endpoint_explains_an_unknown_team(monkeypatch):
     assert "No Draft team found" in res.get_json()["error"]
 
 
+# ---------------------------------------------------------------- weekly lineups
+
+# players 1-2 GKP, 3-7 DEF, 8-12 MID, 13-15 FWD (full_squad); varied ratings so the shapes differ
+LINEUP_SCORES = {1: 70, 2: 40, 3: 80, 4: 75, 5: 60, 6: 55, 7: 50, 8: 90, 9: 85, 10: 65, 11: 45,
+                 12: 40, 13: 88, 14: 72, 15: 30}
+
+
+def lineup_squad(scores=None, blank=(), gw=7):
+    """My 15 players, each with a club, no news and one game in gameweek `gw` (none for `blank`)."""
+    squad = with_scores(full_squad(100), scores or {})
+    for p in squad:
+        p["team"], p["news"] = "ARS", ""
+        p["fixtures"] = [] if p["id"] in blank else [{"gw": gw, "opp": "CHE", "home": True, "difficulty": 3}]
+    return squad
+
+
+def shape_totals(squad):
+    """Each legal shape's total rating (best players of each position), for checking by hand."""
+    top = {pos: sorted((p["score"] for p in squad if p["pos"] == pos), reverse=True) for pos in app.FORMATION}
+    return {f"{d}-{m}-{f}": top["GKP"][0] + sum(top["DEF"][:d]) + sum(top["MID"][:m]) + sum(top["FWD"][:f])
+            for d, m, f in app.SHAPES}
+
+
+def test_there_are_eight_legal_shapes():
+    assert len(app.SHAPES) == 8 and (4, 4, 2) in app.SHAPES and (5, 5, 0) not in app.SHAPES
+    assert all(sum(s) == 10 for s in app.SHAPES)
+
+
+def test_best_lineup_is_the_best_eleven_in_the_best_shape():
+    squad = lineup_squad(LINEUP_SCORES)
+    best = app.week_lineups(squad, 100, 7)["best"]
+    league_squads = app.squad_strength(squad, 100)
+    assert {p["id"] for p in best["xi"]} == set(league_squads["best_xi"])     # the League squads eleven
+    assert best["formation"] == league_squads["formation"]
+    assert best["strength"] == league_squads["strength"] == round(max(shape_totals(squad).values()) / 11, 1)
+    positions = [p["pos"] for p in best["xi"]]
+    assert positions == sorted(positions, key=list(app.FORMATION).index)       # keeper, DEF, MID, FWD
+
+
+def test_second_best_lineup_is_another_shape_with_who_comes_in_and_out():
+    squad = lineup_squad(LINEUP_SCORES)
+    out = app.week_lineups(squad, 100, 7)
+    best, second = out["best"], out["second"]
+    assert second["formation"] != best["formation"] and len(second["xi"]) == 11
+    others = {s: t for s, t in shape_totals(squad).items() if s != best["formation"]}
+    assert second["formation"] == max(others, key=others.get)                  # the best of the rest
+    assert second["strength"] == round(max(others.values()) / 11, 1) <= best["strength"]
+    assert second["change"] <= 0     # and it adds up from the two numbers the page shows
+    assert second["change"] == round(second["strength"] - best["strength"], 1)
+    best_ids, second_ids = {p["id"] for p in best["xi"]}, {p["id"] for p in second["xi"]}
+    assert {p["id"] for p in second["xi"] if p["new"]} == second_ids - best_ids
+    assert {p["id"] for p in second["out"]} == best_ids - second_ids
+    assert second_ids - best_ids and not any(p["new"] for p in best["xi"])
+
+
+def test_level_shapes_report_no_change_not_minus_zero():
+    out = app.week_lineups(lineup_squad(), 100, 7)           # everyone rates 50
+    assert out["second"]["change"] == 0 and str(out["second"]["change"]) == "0.0"
+
+
+def test_bench_has_the_spare_keeper_first_then_the_best_of_the_rest():
+    squad = lineup_squad(LINEUP_SCORES)
+    best = app.week_lineups(squad, 100, 7)["best"]
+    bench = best["bench"]
+    assert len(bench) == 4 and len(best["xi"]) == 11
+    assert bench[0]["pos"] == "GKP"
+    assert [p["score"] for p in bench[1:]] == sorted((p["score"] for p in bench[1:]), reverse=True)
+    assert {p["id"] for p in bench}.isdisjoint(p["id"] for p in best["xi"])
+
+
+def test_a_player_with_no_game_that_week_sits_on_the_bench():
+    squad = lineup_squad({13: 95}, blank={13})              # a star forward whose club doesn't play
+    out = app.week_lineups(squad, 100, 7)
+    assert 13 in app.squad_strength(squad, 100)["best_xi"]  # League squads would still start him
+    assert 13 not in {p["id"] for p in out["best"]["xi"]}
+    star = next(p for p in out["best"]["bench"] if p["id"] == 13)
+    assert star["no_game"] and star["games"] == []
+    assert not any(p["no_game"] for p in out["best"]["xi"])
+    without = [p for p in squad if p["id"] != 13]
+    assert out["best"]["strength"] == app.squad_strength(without, 100)["strength"]
+
+
+def test_nobody_is_benched_when_no_club_has_a_game_that_week():
+    squad = lineup_squad({13: 95}, blank=set(range(1, 16)))   # an empty fixture feed
+    out = app.week_lineups(squad, 100, 7)
+    assert 13 in {p["id"] for p in out["best"]["xi"]}
+    assert not any(p["no_game"] for line in (out["best"]["xi"], out["best"]["bench"]) for p in line)
+    squad = lineup_squad(blank=set(range(1, 16)), gw=9)       # games only in a later gameweek
+    assert 1 in {p["id"] for p in app.week_lineups(squad, 100, 7)["best"]["xi"]}
+
+
+def test_lineup_rows_carry_games_doubles_and_fitness():
+    squad = lineup_squad(LINEUP_SCORES)
+    star = next(p for p in squad if p["id"] == 8)           # a double gameweek and a knock
+    star["fixtures"] = star["fixtures"] + [{"gw": 7, "opp": "LIV", "home": False, "difficulty": 5},
+                                           {"gw": 8, "opp": "MCI", "home": True, "difficulty": 4}]
+    star["chance"], star["news"] = 75, "Knock - 75% chance of playing"
+    row = next(p for p in app.week_lineups(squad, 100, 7)["best"]["xi"] if p["id"] == 8)
+    assert [g["opp"] for g in row["games"]] == ["CHE", "LIV"]       # gameweek 8 isn't this week's
+    assert row["games"][1] == {"opp": "LIV", "home": False, "difficulty": 5}
+    assert row["club"] == "ARS" and row["chance"] == 75 and row["news"] == "Knock - 75% chance of playing"
+
+
+def test_a_thin_position_only_offers_the_shapes_it_can_fill():
+    squad = [p for p in lineup_squad(LINEUP_SCORES) if p["id"] != 15]    # only two forwards
+    out = app.week_lineups(squad, 100, 7)
+    for lineup in (out["best"], out["second"]):
+        assert int(lineup["formation"].split("-")[2]) <= 2 and len(lineup["xi"]) == 11
+
+
+def test_no_lineup_without_an_eleven_and_other_managers_are_left_out():
+    assert app.week_lineups(lineup_squad()[:10], 100, 7) is None
+    rivals = [dict(p, id=p["id"] + 100, owner=200) for p in lineup_squad(LINEUP_SCORES)]
+    out = app.week_lineups(lineup_squad() + rivals, 100, 7)
+    assert all(p["id"] <= 15 for line in (out["best"]["xi"], out["best"]["bench"]) for p in line)
+
+
+def test_lineups_do_not_change_the_real_players():
+    squad = lineup_squad(LINEUP_SCORES, blank={13})
+    before = [dict(p) for p in squad]
+    app.week_lineups(squad, 100, 7)
+    assert squad == before
+
+
+def test_team_endpoint_has_lineups_but_the_trade_page_view_skips_them(fake_api):
+    client = app.app.test_client()
+    full = client.get("/api/team/100").get_json()
+    assert "lineups" in full and full["lineups"] is None          # one player isn't an eleven
+    assert "lineups" not in client.get("/api/team/100?swaps=0").get_json()
+
+
 # ---------------------------------------------------------------- league banter
 
 def banter_league(matches):

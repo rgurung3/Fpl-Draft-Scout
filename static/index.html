@@ -61,6 +61,57 @@
     .swap .gain { grid-column: 2; grid-row: 2 / span 2; }
   }
 
+  /* your team this week: two pitches side by side (stacked on a phone) */
+  #lineups { margin-bottom: 32px; }
+  .lineups { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; align-items: start; }
+  .lineup { background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 12px; min-width: 0; }
+  .lineup.best { border-top: 4px solid var(--amber); }
+  .lhead { display: flex; flex-wrap: wrap; gap: 0 12px; align-items: baseline; }
+  .lhead .what { flex-basis: 100%; font-size: .8rem; font-weight: 600; letter-spacing: .04em;
+    text-transform: uppercase; color: var(--muted); }
+  .lhead .shape { font-family: var(--display); font-weight: 700; font-size: 1.7rem; line-height: 1.15; }
+  .lhead .str { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .lhead .chg { font-weight: 600; font-variant-numeric: tabular-nums; color: var(--rival); }
+  .lhead .chg.level { color: var(--muted); }
+  .lmoves { margin: 4px 0 10px; font-size: .9rem; color: var(--muted); }
+  .lmoves strong { color: var(--ink); }
+  .lmoves .tag { font-weight: 600; color: var(--amber); }
+  .pitch { position: relative; display: flex; flex-direction: column; justify-content: space-around; gap: 8px;
+    min-height: 400px; padding: 16px 4px; border-radius: 6px; overflow: hidden;
+    border: 2px solid rgba(255, 255, 255, .6);
+    background: repeating-linear-gradient(0deg, #2e7d4f 0 50px, #286f45 50px 100px); }
+  .pitch::before { content: ""; position: absolute; left: 0; right: 0; top: 50%;
+    border-top: 2px solid rgba(255, 255, 255, .4); }
+  .pitch::after { content: ""; position: absolute; left: 50%; top: 50%; width: 80px; height: 80px;
+    margin: -40px 0 0 -40px; border: 2px solid rgba(255, 255, 255, .4); border-radius: 50%; }
+  .pbox { position: absolute; left: 28%; right: 28%; height: 48px; border: 2px solid rgba(255, 255, 255, .4); }
+  .pbox.top { top: -2px; border-top: 0; } .pbox.bot { bottom: -2px; border-bottom: 0; }
+  .pline { position: relative; z-index: 1; display: flex; justify-content: space-evenly; gap: 4px; padding: 0 4px; }
+  .tok { flex: 0 1 78px; min-width: 0; display: grid; justify-items: center; gap: 3px; text-align: center; }
+  .tok .rate { position: relative; width: 38px; height: 38px; border-radius: 50%; background: #fff; color: #16211C;
+    display: grid; place-items: center; font-family: var(--display); font-weight: 700; font-size: 1.2rem;
+    line-height: 1; box-shadow: 0 1px 3px rgba(0, 0, 0, .4); }
+  .tok.new .rate { box-shadow: 0 0 0 3px var(--amber), 0 1px 3px rgba(0, 0, 0, .4); }
+  .tok.blank .rate { opacity: .55; }
+  .tok .warn { position: absolute; top: -5px; right: -8px; width: 17px; height: 17px; border-radius: 50%;
+    background: var(--amber); color: #fff; font-size: .72rem; font-weight: 700; display: grid; place-items: center; }
+  .tok .nm { max-width: 100%; box-sizing: border-box; padding: 1px 4px; border-radius: 3px;
+    background: rgba(0, 0, 0, .62); color: #fff; font-size: .74rem; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pline.five { gap: 0; padding: 0; }   /* five across: less room, so a little tighter */
+  .pline.five .nm { font-size: .68rem; padding: 1px 2px; }
+  .tok .fx { gap: 2px; justify-content: center; flex-wrap: wrap; }
+  .tok .fx span { font-size: .68rem; padding: 1px 4px; }
+  .tok .nogame { font-size: .7rem; font-weight: 600; padding: 1px 6px; border-radius: 3px;
+    background: var(--rival); color: #fff; }
+  .tok .tpos { display: none; font-size: .72rem; color: var(--muted); }
+  .bench { margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--line); }
+  .bench .blabel { margin-bottom: 8px; font-size: .85rem; color: var(--muted); }
+  .bench .brow { display: flex; flex-wrap: wrap; gap: 10px 4px; }
+  .bench .tok .rate { border: 1px solid var(--line); box-shadow: none; }
+  .bench .tok.new .rate { box-shadow: 0 0 0 3px var(--amber); }
+  .bench .tok .tpos { display: block; }
+
   /* players by club */
   #clubs { margin-bottom: 32px; }
   .clubs { display: grid; gap: 8px; }
@@ -180,6 +231,13 @@
       <p class="sub">Free agents who rate higher than your weakest player in the same position, with the main reasons in rating points. Players with a small injury doubt (75% chance of playing) are included, with a backup in case they're ruled out.</p>
       <div class="keepbar hidden" id="keepBar"></div>
       <div class="swaps" id="swaps"></div>
+    </section>
+
+    <section id="lineups" class="hidden">
+      <h2>Your team this week</h2>
+      <p class="sub" id="lineupSub"></p>
+      <div class="lineups" id="lineupBody"></div>
+      <p class="note">The number in each circle is the player's rating. A gold ring means he comes in compared with the best lineup, a ! means a fitness doubt (hover for the news), and a capital opponent (LIV) is a home game.</p>
     </section>
 
     <section id="clubs" class="hidden">
@@ -337,7 +395,7 @@ function render() {
       : "Switch to Until the break to look further ahead, with less weight on recent form. ")
     + "Each stat is measured against the top 5% of regular players, so one standout week doesn't skew everyone else. It's a guide, not a prediction.";
 
-  renderSwaps(); renderTable(); renderStrength(); loadClubs();
+  renderSwaps(); renderLineups(); renderTable(); renderStrength(); loadClubs();
 }
 
 const player = id => DATA.players.find(p => p.id === id);
@@ -523,8 +581,63 @@ $("posTabs").addEventListener("click", e => {
   document.querySelectorAll("#posTabs button").forEach(x => x.setAttribute("aria-pressed", x === b));
   renderTable();
 });
+// ---- your team this week. The server picks both lineups (see week_lineups in app.py); this just draws them.
+const LINE_ORDER = ["FWD", "MID", "DEF", "GKP"];   // the top of the pitch first
+
+function tokenHtml(p) {
+  const games = p.no_game ? `<span class="nogame">No game</span>`
+    : p.games.length ? `<span class="fx">${p.games.map(g =>
+        `<span class="d${g.difficulty}" title="${esc(g.opp)} ${g.home ? "home" : "away"}, difficulty ${g.difficulty}">${esc(g.home ? g.opp : g.opp.toLowerCase())}</span>`).join("")}</span>` : "";
+  const doubt = p.chance < 100
+    ? `<span class="warn" title="${esc(p.news || `${p.chance}% chance of playing`)}">!</span>` : "";
+  const title = `${p.name} (${p.pos}, ${p.club}), rated ${p.score.toFixed(0)}${p.news ? ". " + p.news : ""}`;
+  return `
+    <div class="tok ${p.new ? "new" : ""} ${p.no_game ? "blank" : ""}" title="${esc(title)}">
+      <span class="rate">${p.score.toFixed(0)}${doubt}</span>
+      <span class="nm">${esc(p.name)}</span>
+      <span class="tpos">${esc(p.pos)}</span>
+      ${games}
+    </div>`;
+}
+
+function lineupHtml(l, best) {
+  const lines = LINE_ORDER.map(pos => {
+    const row = l.xi.filter(p => p.pos === pos);
+    return row.length ? `<div class="pline ${row.length >= 5 ? "five" : ""}">${row.map(tokenHtml).join("")}</div>` : "";
+  }).join("");
+  const names = list => list.map(p => `<strong>${esc(p.name)}</strong>`).join(", ");
+  const change = best ? ""
+    : l.change === 0 ? `<span class="chg level">same strength</span>`
+    : `<span class="chg">−${Math.abs(l.change).toFixed(1)}</span>`;
+  const moves = best ? "Your strongest eleven for this gameweek."
+    : `<span class="tag">In</span> ${names(l.xi.filter(p => p.new))} · <span class="tag">Out</span> ${names(l.out)}`;
+  return `
+    <div class="lineup ${best ? "best" : "second"}">
+      <div class="lhead">
+        <span class="what">${best ? "Best lineup" : "Next best lineup"}</span>
+        <span class="shape">${esc(l.formation)}</span>
+        <span class="str">${l.strength.toFixed(1)}</span>${change}
+      </div>
+      <p class="lmoves">${moves}</p>
+      <div class="pitch"><div class="pbox top"></div><div class="pbox bot"></div>${lines}</div>
+      <div class="bench">
+        <div class="blabel">Bench, suggested order (spare keeper first)</div>
+        <div class="brow">${l.bench.map(tokenHtml).join("")}</div>
+      </div>
+    </div>`;
+}
+
+function renderLineups() {
+  const l = DATA.lineups;
+  $("lineups").classList.toggle("hidden", !l);
+  if (!l) return;
+  $("lineupSub").textContent = `Gameweek ${l.gw}: the strongest eleven you can field, and the strongest in another formation, so you can see who the subs are. Ratings follow the toggle above, and a player whose club has no game that week sits on the bench.`;
+  $("lineupBody").innerHTML = lineupHtml(l.best, true)
+    + (l.second ? lineupHtml(l.second, false) : `<p class="sub">No other formation fits this squad.</p>`);
+}
+
 // ---- players by club. The server works out every claim and trade idea (see trade_ideas in app.py); this just draws them.
-let CLUBS = null;               // /trade-ideas: every club's squad with my best claim or trade for each player
+let CLUBS = null;              // /trade-ideas: every club's squad with my best claim or trade for each player
 let clubSort = "az";
 const openClubs = new Set();    // clubs the visitor has opened, kept across re-draws and view changes
 let clubsRequest = 0;           // so a slow answer for the old view can't overwrite the new one
