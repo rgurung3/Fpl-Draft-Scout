@@ -748,6 +748,97 @@ def waiver_verdict(targets):
     return "move" if any(t["worth"] for t in targets) else "none"
 
 
+# ---------------------------------------------------------------- lineups
+
+# every legal shape (DEF, MID, FWD) for the ten outfielders, worked out from FORMATION; biggest
+# defence first, so a tie goes the way best_eleven's fill order does
+SHAPES = sorted(((d, m, f)
+                 for d in range(FORMATION["DEF"][0], FORMATION["DEF"][1] + 1)
+                 for m in range(FORMATION["MID"][0], FORMATION["MID"][1] + 1)
+                 for f in range(FORMATION["FWD"][0], FORMATION["FWD"][1] + 1)
+                 if d + m + f == 10), reverse=True)
+
+
+def lineup_row(p, gw, known, new=False):
+    """One player as the lineup shows him: rating, his games in gameweek `gw`, and any fitness doubt."""
+    games = [{"opp": f["opp"], "home": f["home"], "difficulty": f["difficulty"]}
+             for f in p["fixtures"] if f["gw"] == gw]
+    return {"id": p["id"], "name": p["name"], "pos": p["pos"], "club": p["team"], "score": p["score"],
+            "games": games, "no_game": known and not games, "chance": p["chance"], "news": p["news"],
+            "new": new}
+
+
+def week_lineups(players, me, next_gw):
+    """
+    What my team should look like for gameweek `next_gw`: my best eleven and bench, and the best
+    eleven in a different formation, so I can see who comes in from the bench and who goes out.
+
+    A player with no game that week can't score, so he counts as 0 and sits on the bench. If nobody
+    in the league has a game that week in our data (the fixture feed failed, or the week is off),
+    nobody is benched for it. Ratings are the chosen view's, like League squads, so with no blanks
+    the best lineup is the same eleven as the League squads one.
+
+    Returns None if my squad can't make an eleven. Otherwise {"gw", "best", "second"}; each lineup is
+    {formation, strength, xi (by position, best first), bench (spare keeper first, then best first)}
+    of rows (see lineup_row). "second" also has "change" (its strength minus the best's, never
+    positive), "out" (the best eleven's players who leave) and marks the players who come in with
+    new=True; it is None when no other shape fits the squad.
+    """
+    squad = [p for p in players if p["owner"] == me]
+    if len(squad) < 11:
+        return None
+    known = any(f["gw"] == next_gw for p in players for f in p["fixtures"])
+
+    def worth(p):
+        return p["score"] if not known or any(f["gw"] == next_gw for f in p["fixtures"]) else 0
+
+    by_id = {p["id"]: p for p in squad}
+    order = {pos: i for i, pos in enumerate(FORMATION)}
+    best_ids = [p["id"] for p in best_eleven([{**p, "score": worth(p)} for p in squad])]
+
+    def shape(ids):
+        count = Counter(by_id[i]["pos"] for i in ids)
+        return f'{count["DEF"]}-{count["MID"]}-{count["FWD"]}'
+
+    def total(ids):
+        return sum(worth(by_id[i]) for i in ids)
+
+    def lineup(ids, new=()):
+        ids = set(ids)
+        xi = sorted((by_id[i] for i in ids),
+                    key=lambda p: (order[p["pos"]], -worth(p), -p["score"], p["id"]))
+        bench = sorted((p for p in squad if p["id"] not in ids),
+                       key=lambda p: (p["pos"] != "GKP", -worth(p), -p["score"], p["id"]))
+        return {"formation": shape(ids), "strength": round(total(ids) / 11, 1),
+                "xi": [lineup_row(p, next_gw, known, p["id"] in new) for p in xi],
+                "bench": [lineup_row(p, next_gw, known) for p in bench]}
+
+    best = lineup(best_ids)
+
+    # the best eleven in every other shape the squad can fill: the top players of each position
+    def by_week(p):
+        return (-worth(p), -p["score"], p["id"])
+
+    ranked = {pos: sorted((p for p in squad if p["pos"] == pos), key=by_week) for pos in FORMATION}
+    second_ids = None
+    for d, m, f in SHAPES:
+        need = {"GKP": 1, "DEF": d, "MID": m, "FWD": f}
+        if f"{d}-{m}-{f}" == best["formation"] or any(len(ranked[pos]) < n for pos, n in need.items()):
+            continue
+        ids = [p["id"] for pos, n in need.items() for p in ranked[pos][:n]]
+        if second_ids is None or total(ids) > total(second_ids):
+            second_ids = ids
+    if second_ids is None:
+        return {"gw": next_gw, "best": best, "second": None}
+
+    second = lineup(second_ids, new=set(second_ids) - set(best_ids))
+    # from the two rounded strengths the page shows, so the numbers on screen add up (and never "-0.0")
+    second["change"] = round(second["strength"] - best["strength"], 1) or 0.0
+    second["out"] = [{"id": i, "name": by_id[i]["name"], "pos": by_id[i]["pos"]}
+                     for i in best_ids if i not in second_ids]
+    return {"gw": next_gw, "best": best, "second": second}
+
+
 # ---------------------------------------------------------------- trades
 
 TRADE_MIN_GAIN = 0.5  # my best-eleven strength must rise this much for a trade to count as better
@@ -2772,6 +2863,7 @@ def team(entry_id):
     data["keep"] = sorted(p["id"] for p in data["players"] if p["owner"] == entry_id and p["id"] in keep)
     data["waiver_targets"] = waiver_targets(data["players"], entry_id, keep)
     data["waiver_verdict"] = waiver_verdict(data["waiver_targets"])
+    data["lineups"] = week_lineups(data["players"], entry_id, data["next_gw"])
     # the last few gameweeks of minutes for the players in the swaps (one request each)
     in_swaps = [p for t in data["waiver_targets"] for p in (t["drop"], t["claim"])]
     data["recent"] = recent_minutes(in_swaps, data["current_gw"])
