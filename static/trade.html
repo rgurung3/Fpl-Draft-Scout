@@ -88,7 +88,7 @@
     </div>
     <section id="ideas" class="hidden">
       <h2>Trade ideas by club</h2>
-      <p class="sub">Open a club to see its whole squad and who owns each player. For a player another manager owns you'll see the one-for-one offer that lifts your best eleven most, and what it does to theirs. Free agents are for waivers, not trades. For anything bigger, build the trade below.</p>
+      <p class="sub">Open a club to see its whole squad and who owns each player. For a player another manager owns you'll see the one-for-one offer that lifts your best eleven most, and what it does to theirs. Free agents are for waivers, not trades (the main page's Players by club shows the claim for each). For anything bigger, build the trade below.</p>
       <div class="controls">
         <div class="tabs" id="ideaSort" role="group" aria-label="Order clubs by">
           <button type="button" data-sort="az" aria-pressed="true">A–Z</button>
@@ -129,10 +129,13 @@ function recall(k) { try { return localStorage.getItem(k); } catch (e) { return 
 const player = id => DATA.players.find(p => p.id === id);
 
 // the page is opened as /trade?team=276914&league=...&view=season&with=<their team ID>
+// and, from the main page's Players by club, with the trade as well: &give=<my player IDs>&get=<their player IDs>
 const fromLink = new URLSearchParams(location.search);
 const teamId = fromLink.get("team") || recall("teamId");
 const leagueId = fromLink.get("league");
 const wanted = /^[0-9]+$/.test(fromLink.get("with") || "") ? Number(fromLink.get("with")) : null;
+const idList = text => (text || "").split(",").filter(s => /^[0-9]+$/.test(s)).map(Number);
+let linkGive = idList(fromLink.get("give")), linkGet = idList(fromLink.get("get"));   // used once, on arrival
 state.view = fromLink.get("view") === "season" ? "season" : "week";
 
 async function loadTeam(view = state.view) {
@@ -170,6 +173,7 @@ function render() {
   document.querySelectorAll("#viewTabs button").forEach(b => b.setAttribute("aria-pressed", b.dataset.view === state.view));
   resetTrade();
   renderTrade();
+  useLinkTrade();
   // trade ideas need a drafted squad of mine and someone to trade with (same rule as the analyzer below)
   const ready = DATA.managers.some(m => m.entry_id === state.me) && DATA.players.some(p => p.owner === state.me)
     && DATA.managers.some(m => m.entry_id !== state.me);
@@ -183,6 +187,19 @@ function resetTrade() {
   const chosen = others.find(m => m.entry_id === (state.tradeWith ?? wanted)) || others[0];
   state.tradeWith = chosen ? chosen.entry_id : null;
   state.give = new Set(); state.get = new Set();
+}
+
+// a link can carry a whole trade (&give= and &get=): tick it and check it, once, when the page first loads.
+// Players who aren't where the link says (a stale link) are left out, and nothing runs if a side is empty.
+function useLinkTrade() {
+  const give = linkGive.filter(id => player(id)?.owner === state.me);
+  const get = linkGet.filter(id => state.tradeWith !== null && player(id)?.owner === state.tradeWith);
+  linkGive = []; linkGet = [];
+  if (!give.length || !get.length) return;
+  state.give = new Set(give); state.get = new Set(get);
+  renderTrade();
+  $("tradeArea").scrollIntoView({ behavior: "smooth", block: "start" });
+  analyzeTrade();
 }
 
 // one manager's squad as tickable rows, keeper first, best first within each position

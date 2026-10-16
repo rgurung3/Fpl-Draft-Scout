@@ -1629,6 +1629,76 @@ def test_trade_ideas_do_not_change_the_real_owners():
     assert players == before
 
 
+def free_agents(players, ids):
+    """Make these players free agents (nobody owns them)."""
+    for p in players:
+        if p["id"] in ids:
+            p["owner"] = None
+    return players
+
+
+def test_free_agent_claim_drops_my_weakest_and_matches_the_waiver_swap():
+    # free agent 109 (a MID) rates 80; my MIDs rate 50 except bench player 8 on 30
+    players = free_agents(with_scores(club_league(), {8: 30, 109: 80}), {109})
+    star = idea_for(app.trade_ideas(players, 100, IDEA_MANAGERS), 109)
+    claim = star["claim"]
+    assert star["owner"] is None and star["idea"] is None          # a claim, not a trade
+    assert claim["drop"] == 8 and claim["drop_name"] == "P8"
+    # the same pair the waiver cards at the top of the page would suggest, with the same lift
+    swap = next(t for t in app.waiver_targets(players, 100) if t["claim"] == 109)
+    assert swap["drop"] == claim["drop"]
+    assert claim["me"] == app.xi_lift(swap) >= app.WORTH_XI_GAIN
+
+
+def test_claim_never_drops_a_kept_player():
+    players = free_agents(with_scores(club_league(), {8: 30, 109: 80}), {109})
+    claim = idea_for(app.trade_ideas(players, 100, IDEA_MANAGERS, keep={8}), 109)["claim"]
+    assert claim["drop"] == 9        # the next weakest (tied at 50, lowest ID first)
+    everyone = {8, 9, 10, 11, 12}    # all five of my midfielders kept: nobody left to drop
+    assert idea_for(app.trade_ideas(players, 100, IDEA_MANAGERS, keep=everyone), 109)["claim"] is None
+
+
+def test_a_free_agent_who_would_not_help_gets_no_claim():
+    for score in (40, 50, 51):       # worse than, level with, and only just better than my weakest
+        players = free_agents(with_scores(club_league(), {109: score}), {109})
+        assert idea_for(app.trade_ideas(players, 100, IDEA_MANAGERS), 109)["claim"] is None
+
+
+def test_only_free_agents_get_a_claim():
+    players = free_agents(with_scores(club_league(), {8: 30, 108: 80, 109: 80}), {109})
+    out = app.trade_ideas(players, 100, IDEA_MANAGERS)
+    assert idea_for(out, 109)["claim"] is not None and idea_for(out, 109)["idea"] is None
+    assert idea_for(out, 108)["claim"] is None and idea_for(out, 108)["idea"] is not None
+    assert idea_for(out, 8)["claim"] is None
+
+
+def test_each_club_reports_its_best_claim_apart_from_its_best_trade():
+    players = free_agents(with_scores(club_league({109: "CHE", 110: "MUN"}), {8: 30, 109: 80, 110: 65}),
+                          {109, 110})
+    clubs = {c["club"]: c for c in app.trade_ideas(players, 100, IDEA_MANAGERS)["clubs"]}
+    assert clubs["CHE"]["best_claim"] == idea_for({"clubs": [clubs["CHE"]]}, 109)["claim"]["me"]
+    assert clubs["CHE"]["best_claim"] > clubs["MUN"]["best_claim"] > 0
+    assert clubs["ARS"]["best_claim"] is None
+    assert clubs["CHE"]["best_gain"] is None      # a claim isn't a trade
+
+
+def test_free_agent_rows_carry_their_fitness():
+    players = free_agents(with_scores(club_league(), {8: 30, 109: 80}), {109})
+    for p in players:
+        if p["id"] == 109:
+            p["chance"], p["news"] = 50, "Knock - 50% chance of playing"
+    row = idea_for(app.trade_ideas(players, 100, IDEA_MANAGERS), 109)
+    assert row["chance"] == 50 and row["news"] == "Knock - 50% chance of playing"
+    assert idea_for(app.trade_ideas(players, 100, IDEA_MANAGERS), 1)["news"] == ""   # no news on file
+
+
+def test_claims_do_not_change_the_real_owners():
+    players = free_agents(with_scores(club_league(), {8: 30, 109: 80}), {109})
+    before = [dict(p) for p in players]
+    app.trade_ideas(players, 100, IDEA_MANAGERS)
+    assert players == before
+
+
 def test_trade_ideas_endpoint(two_managers, monkeypatch):
     inner = app.get_json
 
@@ -1656,6 +1726,25 @@ def test_trade_ideas_endpoint_follows_the_view(two_managers):
     res = app.app.test_client().get("/api/team/100/trade-ideas?view=season")
     assert res.status_code == 200
     assert res.get_json()["view"] == "season"
+
+
+def test_trade_ideas_endpoint_claims_free_agents_and_honours_keep(fake_api, monkeypatch):
+    inner = app.get_json
+
+    def better_free_agent(url):   # player 2 (a free MID) is in better form than my only player, 1
+        data = inner(url)
+        if "draft" in url and "bootstrap" in url:
+            elements = [dict(e, form="9.0", points_per_game="9.0") if e["id"] == 2 else e
+                        for e in data["elements"]]
+            return {**data, "elements": elements}
+        return data
+
+    monkeypatch.setattr(app, "get_json", better_free_agent)
+    client = app.app.test_client()
+    claim = idea_for(client.get("/api/team/100/trade-ideas?league=123").get_json(), 2)["claim"]
+    assert claim["drop"] == 1 and claim["me"] >= app.WORTH_XI_GAIN
+    kept = client.get("/api/team/100/trade-ideas?league=123&keep=1").get_json()
+    assert idea_for(kept, 2)["claim"] is None          # his only possible drop is kept
 
 
 def test_trade_ideas_endpoint_explains_an_unknown_team(monkeypatch):
@@ -1845,7 +1934,7 @@ def test_ordinal(n, text):
 # ---------------------------------------------------------------- trade and banter pages
 
 @pytest.mark.parametrize("path,text", [("/trade", b"Trade analyzer"), ("/trade", b"Trade ideas by club"),
-                                       ("/league", b"League hub")])
+                                       ("/", b"Players by club"), ("/league", b"League hub")])
 def test_extra_pages_load(path, text):
     res = app.app.test_client().get(path)
     assert res.status_code == 200

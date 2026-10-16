@@ -883,22 +883,47 @@ def best_offer(players, me, target, mine):
             "them": result["them"]["change"], "verdict": result["verdict"]}
 
 
-def trade_ideas(players, me, managers):
+def claim_idea(players, me, target, mine, before, keep=()):
     """
-    Every Premier League club's whole squad, with who owns each player and, for
-    each player another manager owns, my best 1-for-1 trade to get him (see
-    best_offer). Free agents and my own players get no idea: free agents are a
-    waiver claim, not a trade. Bigger trades are built by hand in the analyzer.
+    What claiming `target` (a free agent) would do for me: drop my weakest player
+    in his position (skipping `keep`, like a waiver swap does) and add him. Dropping
+    the weakest always leaves the best squad, so there is nothing else to try. The
+    lift is worked out like a waiver swap's (strength_after_swap minus `before`, my
+    strength now), so the numbers match the cards at the top of the page. Returns
+    None if he couldn't beat anyone I'd drop, or the lift is under WORTH_XI_GAIN.
+    """
+    options = [p for p in mine if p["pos"] == target["pos"] and p["id"] not in keep]
+    if not options:
+        return None
+    drop = min(options, key=lambda p: (p["score"], p["id"]))
+    if drop["score"] >= target["score"]:
+        return None
+    lift = round(strength_after_swap(players, me, drop, target) - before, 1)
+    if lift < WORTH_XI_GAIN:
+        return None
+    return {"drop": drop["id"], "drop_name": drop["name"], "me": lift}
+
+
+def trade_ideas(players, me, managers, keep=()):
+    """
+    Every Premier League club's whole squad, with who owns each player and what
+    he could do for me. For each player another manager owns, my best 1-for-1
+    trade to get him (see best_offer); for each free agent, the claim that helps
+    me most (see claim_idea). My own players get neither. Bigger trades are built
+    by hand in the analyzer. Players in `keep` are never suggested as a drop.
 
     Returns {"me": my team ID, "clubs": [{"club": "ARS", "best_gain": the biggest
-    lift among the club's ideas or None, "players": [...]}]}, clubs A-Z and
-    players in squad order (GKP first), best first. Each player is {id, name, pos,
-    score, total, owner, owner_name, mine, idea}; idea is None or {give, give_name,
-    me, them, verdict}, where me and them are the change in each best eleven's
-    strength and verdict is the same one the analyzer would give.
+    lift among the club's trade ideas or None, "best_claim": the biggest lift
+    among its claims or None, "players": [...]}]}, clubs A-Z and players in squad
+    order (GKP first), best first. Each player is {id, name, pos, score, total,
+    chance, news, owner, owner_name, mine, idea, claim}; idea is None or {give,
+    give_name, me, them, verdict}, where me and them are the change in each best
+    eleven's strength and verdict is the same one the analyzer would give; claim
+    is None or {drop, drop_name, me}, the change in my best eleven's strength.
     """
     names = {m["entry_id"]: m["team_name"] for m in managers}
     mine = sorted((p for p in players if p["owner"] == me), key=lambda p: p["id"])
+    before = squad_strength(players, me)["strength"]
     order = {pos: i for i, pos in enumerate(FORMATION)}
 
     clubs = {}
@@ -912,11 +937,16 @@ def trade_ideas(players, me, managers):
         for p in squad:
             other = p["owner"] is not None and p["owner"] != me
             rows.append({"id": p["id"], "name": p["name"], "pos": p["pos"], "score": p["score"],
-                         "total": p["total"], "owner": p["owner"], "owner_name": names.get(p["owner"]),
+                         "total": p["total"], "chance": p["chance"], "news": p.get("news", ""),
+                         "owner": p["owner"], "owner_name": names.get(p["owner"]),
                          "mine": p["owner"] == me,
-                         "idea": best_offer(players, me, p, mine) if other else None})
+                         "idea": best_offer(players, me, p, mine) if other else None,
+                         "claim": claim_idea(players, me, p, mine, before, keep)
+                         if p["owner"] is None else None})
         gains = [r["idea"]["me"] for r in rows if r["idea"]]
-        out.append({"club": club, "best_gain": max(gains) if gains else None, "players": rows})
+        claims = [r["claim"]["me"] for r in rows if r["claim"]]
+        out.append({"club": club, "best_gain": max(gains) if gains else None,
+                    "best_claim": max(claims) if claims else None, "players": rows})
     return {"me": me, "clubs": out}
 
 
@@ -2776,16 +2806,19 @@ def trade(entry_id):
 @app.route("/api/team/<int:entry_id>/trade-ideas")
 def trade_ideas_data(entry_id):
     """
-    Every club's squad with my best trade for each player another manager owns,
-    e.g. /api/team/276914/trade-ideas?league=52607&view=season (see trade_ideas).
+    Every club's squad with my best trade for each player another manager owns and
+    my best claim for each free agent, e.g.
+    /api/team/276914/trade-ideas?league=52607&view=season (see trade_ideas).
+    ?keep=12,34 protects those players from being suggested as a drop, like on the main page.
     """
     try:
         data, _leagues = league_for_team(entry_id, request.args.get("league", type=int),
                                          request.args.get("view", "week"))
     except FplError as e:
         return jsonify({"error": e.message}), e.status
+    keep = kept_ids(request.args.get("keep"))
     return jsonify({"league_id": data["league_id"], "view": data["view"],
-                    **trade_ideas(data["players"], entry_id, data["managers"])})
+                    **trade_ideas(data["players"], entry_id, data["managers"], keep)})
 
 
 if __name__ == "__main__":
