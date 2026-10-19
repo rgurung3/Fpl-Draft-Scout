@@ -195,7 +195,17 @@
   .sqrow .bar { height: 12px; background: var(--pitch-soft); border-radius: 2px; overflow: hidden; }
   .sqrow .bar i { display: block; height: 100%; background: var(--pitch); }
   .sqrow.me .bar i { background: var(--amber); }
-  .sqrow .val { font-family: var(--display); font-weight: 700; font-size: 1.3rem; line-height: 1; font-variant-numeric: tabular-nums; }
+  .sqrow .val { font-family: var(--display); font-weight: 700; font-size: 1.3rem; line-height: 1; font-variant-numeric: tabular-nums;
+    display: flex; align-items: baseline; gap: 6px; }
+  /* how much it has moved: green up, red down (always with the sign, so it isn't only colour) */
+  .chg { font-family: var(--body); font-size: .8rem; font-weight: 600; color: var(--muted); }
+  .chg.up { color: var(--pitch); }
+  .chg.down { color: var(--rival); }
+  .sqroster div.mv span:last-child { text-align: right; }
+  @media (max-width: 480px) {   /* on a phone the change goes under the number, so the bar keeps its length */
+    .sqrow .val { flex-direction: column; align-items: flex-end; gap: 3px; }
+  }
+  .race .gwdiv { stroke: var(--line); stroke-dasharray: 3 4; }
   .sqroster { padding: 4px 0 14px 12px; border-left: 2px solid var(--line); margin: 0 0 4px 4px; display: grid; gap: 2px; }
   .sqroster div { display: flex; justify-content: space-between; gap: 12px; max-width: 420px; }
   .sqroster .label { color: var(--muted); font-size: .85rem; margin-top: 6px; display: block; }
@@ -356,6 +366,13 @@
           </div>
           <span class="sub" id="squadWindow" style="margin:0"></span>
         </div>
+        <div id="strengthWrap" class="hidden">
+          <h3 class="minihead">Strength over time</h3>
+          <p class="racecap" id="strengthCaption" aria-live="polite"></p>
+          <div class="chartwrap"><svg class="race" id="strengthChart" role="img"></svg></div>
+          <p class="sub">One point for each day saved (about 6am UTC), with the gameweek that was on underneath. At the start of each gameweek the ratings look one gameweek further ahead, so the fixtures part of everyone's rating shifts there.</p>
+        </div>
+        <p class="sub hidden" id="squadSince"></p>
         <div class="squads" id="squads"><p class="sub">Loading…</p></div>
       </section>
     </div>
@@ -693,10 +710,32 @@ const RATING_PIECES = [["form", "Recent form"], ["ppg", "Points per game"], ["xg
   ["mins", "Minutes played"], ["cs", "Clean-sheet chances"], ["dc", "Defensive work"], ["crea", "Creativity"],
   ["fix", "Fixtures"], ["avail", "Injury doubts"]];
 const signed = x => (x > 0 ? "+" : "") + x.toFixed(1);
+const signedWhole = x => (x > 0 ? "+" : "") + Math.round(x);
+const trend = x => `<span class="chg ${x > 0 ? "up" : x < 0 ? "down" : ""}">${signed(x)}</span>`;
+const dayLabel = d => new Date(d + "T00:00:00Z").toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" });
+
+// how a manager's eleven has moved since the end of last gameweek (the server works out every number)
+function movedBlock(mv) {
+  const names = list => list.map(p => `${esc(p.name)} ${Math.round(p.rating)}`).join(", ");
+  const pieces = RATING_PIECES.filter(([k]) => mv.pieces[k]).map(([k, label]) =>
+    `<div><span>${label}</span><span>${trend(mv.pieces[k])}</span></div>`).join("");
+  return `<span class="label">Since the end of GW${SQ.since.gw}</span>`
+    + `<div><span><strong>Strength</strong></span><span><strong>${mv.from.toFixed(1)} → ${mv.to.toFixed(1)}</strong> ${trend(mv.change)}</span></div>`
+    + `<div><span>Same players, ratings moved</span><span>${trend(mv.same_players)}</span></div>`
+    + `<div><span>Different players in the eleven</span><span>${trend(mv.new_players)}</span></div>`
+    + (mv.came_in.length ? `<div class="mv"><span>Came in (rating now)</span><span>${names(mv.came_in)}</span></div>` : "")
+    + (mv.went_out.length ? `<div class="mv"><span>Left (rating then)</span><span>${names(mv.went_out)}</span></div>` : "")
+    + (mv.riser ? `<div><span>Biggest riser</span><span>${esc(mv.riser.name)} <span class="chg up">${signedWhole(mv.riser.change)}</span></span></div>` : "")
+    + (mv.faller ? `<div><span>Biggest faller</span><span>${esc(mv.faller.name)} <span class="chg down">${signedWhole(mv.faller.change)}</span></span></div>` : "")
+    + (pieces ? `<span class="label">What moved the rating (the whole eleven, by piece)</span>${pieces}` : "");
+}
 
 function renderSquads() {
   const ms = SQ.managers, max = Math.max(...ms.map(m => m.strength), 1), w = SQ.windows[SQ.view];
   $("squadWindow").textContent = `Looks at gameweeks ${w.from}-${w.to}.`;
+  $("squadSince").classList.toggle("hidden", !SQ.since);
+  if (SQ.since) $("squadSince").textContent = `The green and red numbers are the change since the end of GW${SQ.since.gw} (today's numbers against the last day saved in that gameweek).`;
+  renderStrengthChart();
   // a player whose form is well away from his points per game this season is marked "running hot" or "cold"
   const heat = p => p.heat ? ` <span class="pos">running ${p.heat}: form ${p.form.toFixed(1)} v ${p.ppg.toFixed(1)} a game</span>` : "";
   const line = (p, cls = "") => `<div class="${cls}"><span>${esc(p.name)} <span class="pos">${p.pos}, ${esc(p.club)}</span>${heat(p)}</span><span>${Math.round(p.rating)}</span></div>`;
@@ -708,18 +747,91 @@ function renderSquads() {
   $("squads").innerHTML = ms.map(m => {
     const mine = m.entry_id === myId;
     const roster = m.best_xi.length
-      ? madeOf(m) + `<span class="label">Best eleven, ${esc(m.formation)}</span>${m.best_xi.map(p => line(p)).join("")}`
+      ? (m.movement ? movedBlock(m.movement) : "") + madeOf(m) + `<span class="label">Best eleven, ${esc(m.formation)}</span>${m.best_xi.map(p => line(p)).join("")}`
         + (m.bench.length ? `<span class="label">Bench</span>${m.bench.map(p => line(p, "bench")).join("")}` : "")
       : "<div>No players yet</div>";
     return `<div>
       <button class="sqrow ${mine ? "me" : ""}" type="button" aria-expanded="${mine}" data-id="${m.entry_id}">
         <span class="tn">${esc(m.team)}${mine ? ' <span class="you">(you)</span>' : ""}</span>
         <span class="bar"><i style="width:${(m.strength / max * 100).toFixed(1)}%"></i></span>
-        <span class="val">${m.strength.toFixed(0)}</span>
+        <span class="val">${m.strength.toFixed(0)}${m.movement ? trend(m.movement.change) : ""}</span>
       </button>
       <div class="sqroster ${mine ? "" : "hidden"}" id="sq-${m.entry_id}">${roster}</div>
     </div>`;
   }).join("");
+}
+
+// ---------------------------------------------------------------- strength over time
+
+// the line a hovered or tapped manager has drawn: their first and latest saved strength
+function strengthCaption(line, you) {
+  const c = SQ.chart, vals = line.values.map((v, i) => [v, i]).filter(([v]) => v != null);
+  const [first, last] = [vals[0], vals.at(-1)];
+  const name = you ? "<strong>You</strong>" : `<strong>${esc(line.team)}</strong>`;
+  if (first[1] === last[1]) return `${name}: ${last[0].toFixed(1)} on ${dayLabel(c.days[last[1]].date)}.`;
+  return `${name}: ${first[0].toFixed(1)} on ${dayLabel(c.days[first[1]].date)}, ${last[0].toFixed(1)} on ${dayLabel(c.days[last[1]].date)} (${signed(last[0] - first[0])}).`;
+}
+
+function strengthDefaultCaption() {
+  const line = SQ.chart.lines.find(l => l.entry_id === myId);
+  return line ? strengthCaption(line, true) : "Hover or tap a line to see whose it is.";
+}
+
+function renderStrengthChart() {
+  const c = SQ.chart;
+  $("strengthWrap").classList.toggle("hidden", !c);
+  if (!c) return;   // fewer than two days saved (or no file for this league): nothing to draw yet
+  const W = 720, H = 280, L = 44, R = 170, T = 14, B = 34;
+  const all = c.lines.flatMap(l => l.values).filter(v => v != null);
+  const span = Math.max(...all) - Math.min(...all), step = span > 40 ? 20 : span > 20 ? 10 : span > 8 ? 5 : 2;
+  const lo = Math.floor(Math.min(...all) / step) * step;
+  const hi = Math.max(Math.ceil(Math.max(...all) / step) * step, lo + step);
+  const t = i => Date.parse(c.days[i].date + "T00:00:00Z"), t0 = t(0), tn = t(c.days.length - 1);
+  const x = i => L + (tn === t0 ? 0 : (t(i) - t0) / (tn - t0)) * (W - L - R);
+  const y = v => T + (hi - v) * (H - T - B) / (hi - lo);
+
+  let svg = "";
+  for (let v = lo; v <= hi; v += step) {
+    svg += `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text x="${L - 8}" y="${y(v) + 4}" text-anchor="end">${v}</text>`;
+  }
+  // the gameweek that was on, under its days, with a dashed line where one gameweek gives way to the next
+  const runs = [];
+  c.days.forEach((d, i) => {
+    if (runs.length && runs.at(-1).gw === d.gw) runs.at(-1).to = i; else runs.push({ gw: d.gw, from: i, to: i });
+  });
+  runs.forEach((r, k) => {
+    svg += `<text x="${((x(r.from) + x(r.to)) / 2).toFixed(1)}" y="${H - 10}" text-anchor="middle">GW${r.gw}</text>`;
+    if (k) svg += `<line class="gwdiv" x1="${((x(runs[k - 1].to) + x(r.from)) / 2).toFixed(1)}" x2="${((x(runs[k - 1].to) + x(r.from)) / 2).toFixed(1)}" y1="${T}" y2="${H - B}"/>`;
+  });
+
+  // other managers first, so yours is drawn on top
+  const lines = [...c.lines].sort((a, b) => (a.entry_id === myId) - (b.entry_id === myId));
+  lines.forEach(l => {
+    const pts = l.values.map((v, i) => v == null ? null : [x(i), y(v), v, i]).filter(Boolean);
+    const end = pts.at(-1), mine = l.entry_id === myId;
+    svg += `<g class="line ${mine ? "me" : ""}" data-id="${l.entry_id}"><title>${esc(l.team)}</title>`
+      + `<polyline class="ink" points="${pts.map(p => p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" ")}"/>`
+      + `<polyline class="hit" points="${pts.map(p => p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" ")}"/>`
+      + pts.map(p => `<circle class="wkdot" cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3.5"><title>${esc(l.team)}, ${dayLabel(c.days[p[3]].date)} (GW${c.days[p[3]].gw}): ${p[2].toFixed(1)}</title></circle>`).join("")
+      + `<circle class="dot" cx="${end[0].toFixed(1)}" cy="${end[1].toFixed(1)}" r="${mine ? 5 : 3}"/></g>`;
+  });
+
+  // labels at the end of the lines: the strongest team, and you (nudged apart if they'd overlap)
+  const latest = l => l.values.filter(v => v != null).at(-1);
+  const top = c.lines.reduce((a, b) => latest(b) > latest(a) ? b : a), mineLine = c.lines.find(l => l.entry_id === myId);
+  const endX = x(c.days.length - 1) + 12, topY = y(latest(top));
+  if (top !== mineLine) svg += `<text class="lbl" x="${endX}" y="${topY + 4}">${esc(top.team.length > 22 ? top.team.slice(0, 21) + "…" : top.team)}, ${latest(top).toFixed(1)}</text>`;
+  if (mineLine) {
+    let myY = y(latest(mineLine));
+    if (top !== mineLine && Math.abs(myY - topY) < 16) myY = topY + 16;
+    svg += `<text class="lbl" x="${endX}" y="${myY + 4}">You, ${latest(mineLine).toFixed(1)}</text>`;
+  }
+
+  const chart = $("strengthChart");
+  chart.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  chart.setAttribute("aria-label", `Line chart of squad strength for ${c.lines.length} managers, ${dayLabel(c.days[0].date)} to ${dayLabel(c.days.at(-1).date)}.`);
+  chart.innerHTML = svg;
+  $("strengthCaption").innerHTML = strengthDefaultCaption();
 }
 
 // ---------------------------------------------------------------- recap
@@ -1173,6 +1285,18 @@ $("squadView").addEventListener("click", e => {
   squadView = b.dataset.view;
   document.querySelectorAll("#squadView button").forEach(x => x.setAttribute("aria-pressed", x.dataset.view === squadView));
   loadSquads();
+});
+$("strengthChart").addEventListener("pointerover", e => {
+  const g = e.target.closest(".line"); if (!g) return;
+  document.querySelectorAll("#strengthChart .hot").forEach(x => x.classList.remove("hot"));
+  g.classList.add("hot");
+  $("strengthChart").appendChild(g);   // bring it to the front
+  const id = Number(g.dataset.id);
+  $("strengthCaption").innerHTML = strengthCaption(SQ.chart.lines.find(l => l.entry_id === id), id === myId);
+});
+$("strengthChart").addEventListener("pointerleave", () => {
+  document.querySelectorAll("#strengthChart .hot").forEach(x => x.classList.remove("hot"));
+  if (SQ?.chart) $("strengthCaption").innerHTML = strengthDefaultCaption();
 });
 $("rivalA").addEventListener("change", loadRivalry);
 $("rivalB").addEventListener("change", loadRivalry);
