@@ -11,7 +11,7 @@ import threading
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -2695,6 +2695,399 @@ def load_recap(league_id):
         "stars": facts["stars"], "moves": facts["moves"]}}
 
 
+# ---------------------------------------------------------------- deals (trades and waiver moves)
+
+DEAL_MIN_SWING = 6          # a deal has to swing at least this many points to be called a win...
+DEAL_WIN_SIGMAS = 1.5       # ... and at least this many times the luck you'd expect from the players in it
+DEAL_ROBBERY_SIGMAS = 2.5   # a swing this many times the usual luck is a robbery
+DEAL_SETTLED_WEEKS = 4      # the trade tracker gives its final verdict after this many finished gameweeks
+DEAL_NEWS_WEEKS = 3         # a trade stays on the recap for this many finished gameweeks after it
+DEALS_SHOWN = 3             # at most this many trades are on the recap at once (the tracker lists them all)
+MOVE_MIN_SWING = 6          # a pickup (or a drop) must beat (lose to) the player swapped by this many points
+MISSED_MIN_RATING = 65      # a free agent has to rate this high (0-100) to be called a miss...
+MISSED_HAUL_POINTS = 10     # ... or to have scored this many points in the last gameweek
+MISSED_DAYS = 7             # "nobody bid" means nobody in this many days
+
+# The lines about a trade. {w} won and {l} lost (names are marked for bold), and every number already has its
+# unit ("31 points"). They poke at the deal, never at the person, like the rest of the banter.
+PRAISE_WIN = (
+    "{w} got the better of {l}: {w_in} came in and {w_out} went out. Clean work.",
+    "Good trade from {w}: {w_in} arrived against {w_out} that left. {l} may want a word.",
+    "{w} won that one against {l}, {w_in} in to {w_out} out. Take a bow.",
+)
+PRAISE_ROBBERY = (
+    "Daylight robbery! {w} took {w_in} off {l} and gave up only {w_out}. Frame the receipt.",
+    "{w} walked into {l}'s shop and left with the till: {w_in} in, {w_out} out.",
+    "{w} fleeced {l}: {w_in} arrived and just {w_out} left. Somebody call the league office.",
+)
+POKE_WIN = (
+    "{l} got the short end of the {w} deal: {l_in} in, {l_out} out. Bold strategy.",
+    "{l} swapped {l_out} for {l_in} in that deal with {w}. The group chat has noticed.",
+    "{l}'s trade with {w} brought back {l_in} for the {l_out} it cost. Maths was not consulted.",
+)
+POKE_ROBBERY = (
+    "{l} handed over {l_out} and got {l_in} back. That's not a trade, it's a donation.",
+    "{l} gave up {l_out} for {l_in} from {w}. Has anyone checked they meant to press accept?",
+    "{l}'s deal with {w}: {l_out} out, {l_in} in. A receipt is available on request.",
+)
+EVEN_DEALS = (
+    "{a} and {b} swapped players and it's too close to call so far: {a_in} to {a}, {b_in} to {b}. "
+    "A very polite handshake.",
+    "Too close to call between {a} and {b}: {a_in} to {a}, {b_in} to {b}. "
+    "Nobody won, nobody's telling the group chat.",
+)
+PICKUP_LINES = (
+    "{t} picked up {got} and got {got_pts} from the move, against {gave_pts} from {gave}, who made way. "
+    "Smart business.",
+    "{got} has paid off for {t}: {got_pts}, while {gave}, the player who went, managed {gave_pts}. Shrewd.",
+)
+REGRET_LINES = (
+    "{t} dropped {gave} to add {got}. {gave} then scored {gave_pts} and {got} managed {got_pts}. "
+    "Hindsight is a cruel teacher.",
+    "{t} let {gave} go and watched {gave_pts} walk out the door, while {got} brought {got_pts}. "
+    "Someone's refreshing the waiver page in shame.",
+)
+MISSED_RATING_LINES = (
+    "Everyone missed this one: {p} ({club}) rates {rating}, the best free agent in the league, "
+    "and didn't get a single bid.",
+    "Nobody bid on {p} ({club}), rated {rating} and the best player on the wire.",
+)
+MISSED_COUNT_LINE = ("{n} managers, {n} misses. {p} ({club}), rated {rating}, is the best player on the wire "
+                     "and nobody even bid.")
+MISSED_HAUL_LINES = (
+    "{p} ({club}) scored {pts} in GW{gw} and is still on the wire. Not one bid from any of you.",
+    "{pts} for {p} ({club}) in GW{gw}, and still free to a good home.",
+)
+
+
+def choose(options, key):
+    """One of the options, picked by a number (a trade's ID), so the same deal always gets the same line."""
+    return options[key % len(options)]
+
+
+def points_word(n):
+    """12 -> '12 points', 1 -> '1 point'."""
+    return f"{n} point" + ("" if abs(n) == 1 else "s")
+
+
+def draft_rows(league_id, name):
+    """The rows of a Draft league feed ("trades" or "transactions"); [] if it isn't shaped as expected."""
+    data = fetch(f"{DRAFT}/draft/league/{league_id}/{name}", LEAGUE_NOT_FOUND)
+    rows = data.get(name) if isinstance(data, dict) else None
+    return [r for r in rows or [] if isinstance(r, dict)]
+
+
+def gameweek_points(gws):
+    """
+    {gameweek: {player ID: points}} for those gameweeks, from the Draft site's live feed (one request each,
+    8 at a time, cached like the others). A gameweek that can't be read is left out, so deals count fewer.
+    """
+    def get(gw):
+        try:
+            return gw, live_stats(get_json(f"{DRAFT}/event/{gw}/live"))
+        except (requests.RequestException, ValueError):
+            return gw, {}
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        got = list(pool.map(get, gws))
+    return {gw: {pid: s["points"] for pid, s in stats.items()} for gw, stats in got if stats}
+
+
+def first_gameweek_after(when, deadlines):
+    """The first gameweek whose deadline is after `when` (a deal made then counts from it), or None."""
+    later = [gw for gw, deadline in deadlines.items() if deadline > when]
+    return min(later) if later else None
+
+
+def trade_start(trade, deadlines):
+    """The first gameweek a trade counts from (the one after it was agreed), or None."""
+    agreed = parse_time(trade.get("response_time")) or parse_time(trade.get("offer_time"))
+    return first_gameweek_after(agreed, deadlines) if agreed else None
+
+
+def deal_size(swing, players, weeks):
+    """
+    How big a swing in points is next to the luck you'd expect: "even", "win" or "robbery" (either side).
+    One player's points in a gameweek typically stray PLAYER_POINTS_SD from his average, so the more players
+    and gameweeks a deal has, the bigger a swing must be before it means more than luck.
+    """
+    luck = PLAYER_POINTS_SD * math.sqrt(players * weeks)
+    size = abs(swing)
+    if size < DEAL_MIN_SWING or size < DEAL_WIN_SIGMAS * luck:
+        return "even"
+    return "robbery" if size >= DEAL_ROBBERY_SIGMAS * luck else "win"
+
+
+def deal_player(pid, names, points, gws):
+    """A player in a deal: his name and the points he scored in those gameweeks."""
+    info = names.get(pid) or {}
+    return {"id": pid, "name": info.get("name") or f"Player {pid}", "pos": info.get("pos"),
+            "club": info.get("club"), "points": sum(points.get(gw, {}).get(pid, 0) for gw in gws)}
+
+
+def build_trade(trade, names, teams, deadlines, points, latest):
+    """
+    One trade from the Draft site's feed, judged on the points the players in it have scored since it was
+    agreed: each side's players received against the players given up, over the finished gameweeks from the
+    first one after the deal up to `latest`. A gameweek whose points couldn't be read isn't counted.
+    names is {player ID: {name, pos, club}}, teams is {team ID: {team, manager}}, points is {gameweek: {player
+    ID: points}}. Returns None for a row that can't be read.
+
+    The offering side (a) receives each item's element_in and gives its element_out; the other side (b) is the
+    mirror image, so the swings are equal and opposite. "state" is "waiting" (no gameweek has finished since),
+    "even" (the swing is within luck, see deal_size) or "decided" (winner and loser are team IDs). Each side
+    gets a "label" for the tracker: Worth it / Regretted once DEAL_SETTLED_WEEKS have finished, "Ahead so far"
+    and so on before that.
+    """
+    a_id, b_id = trade.get("offered_entry"), trade.get("received_entry")
+    swaps = [(s.get("element_in"), s.get("element_out")) for s in trade.get("tradeitem_set") or []
+             if isinstance(s, dict)]
+    swaps = [(i, o) for i, o in swaps if i and o]
+    agreed = parse_time(trade.get("response_time")) or parse_time(trade.get("offer_time"))
+    if a_id is None or b_id is None or not swaps or not agreed:
+        return None
+    first = trade_start(trade, deadlines)
+    gws = [gw for gw in range(first, latest + 1) if gw in points] if first else []
+
+    def side(entry, got, gave):
+        who = teams.get(entry) or {}
+        got_points, gave_points = sum(p["points"] for p in got), sum(p["points"] for p in gave)
+        return {"entry_id": entry, "team": who.get("team") or f"Team {entry}",
+                "manager": who.get("manager", ""), "got": got, "gave": gave,
+                "got_points": got_points, "gave_points": gave_points,
+                "swing": got_points - gave_points}
+
+    a_got = [deal_player(i, names, points, gws) for i, _ in swaps]
+    a_gave = [deal_player(o, names, points, gws) for _, o in swaps]
+    a, b = side(a_id, a_got, a_gave), side(b_id, a_gave, a_got)
+    running, total = [], 0   # a's swing after each finished gameweek (b's is the opposite)
+    for gw in gws:
+        total += sum(points[gw].get(i, 0) for i, _ in swaps) - sum(points[gw].get(o, 0) for _, o in swaps)
+        running.append({"gw": gw, "swing": total})
+
+    size = deal_size(a["swing"], len(swaps) * 2, len(gws))
+    state = "waiting" if not gws else "even" if size == "even" else "decided"
+    settled = len(gws) >= DEAL_SETTLED_WEEKS
+    winner = loser = None
+    if state == "decided":
+        winner, loser = (a, b) if a["swing"] > 0 else (b, a)
+    for s in (a, b):
+        if state == "waiting":
+            s["label"] = "Waiting for a gameweek"
+        elif state == "even":
+            s["label"] = "A wash" if settled else "Too close to call"
+        elif s is winner:
+            s["label"] = "Worth it" if settled else "Ahead so far"
+        else:
+            s["label"] = "Regretted" if settled else "Behind so far"
+    deal = {"id": trade.get("id") or 0, "agreed": agreed.isoformat(), "event": trade.get("event"),
+            "first_gw": first, "weeks": len(gws), "settled": settled, "state": state, "size": size,
+            "winner": winner["entry_id"] if winner else None, "loser": loser["entry_id"] if loser else None,
+            "a": a, "b": b, "running": running}
+    deal["lines"] = trade_lines(deal)
+    return deal
+
+
+def trade_lines(deal):
+    """
+    A trade in a line or two: praise for the side that came out ahead and a poke for the side that didn't, or
+    one line when it's level. Numbers are the points of the players each side received and gave up.
+    [] when no gameweek has finished since the deal.
+    """
+    if deal["state"] == "waiting":
+        return []
+    a, b, key = deal["a"], deal["b"], deal["id"]
+    if deal["state"] == "even":
+        text = choose(EVEN_DEALS, key).format(
+            a=mark(a["team"]), b=mark(b["team"]),
+            a_in=points_word(a["got_points"]), b_in=points_word(b["got_points"]))
+        return [{"tone": "even", "text": text}]
+    win, lose = (a, b) if deal["winner"] == a["entry_id"] else (b, a)
+    big = deal["size"] == "robbery"
+    fill = {"w": mark(win["team"]), "l": mark(lose["team"]),
+            "w_in": points_word(win["got_points"]), "w_out": points_word(win["gave_points"]),
+            "l_in": points_word(lose["got_points"]), "l_out": points_word(lose["gave_points"])}
+    return [{"tone": "praise", "text": choose(PRAISE_ROBBERY if big else PRAISE_WIN, key).format(**fill)},
+            {"tone": "roast", "text": choose(POKE_ROBBERY if big else POKE_WIN, key).format(**fill)}]
+
+
+def deal_star(deal):
+    """The best scorer in a trade and who has him now, as a sentence, or None if nobody in it scored."""
+    best = None
+    for side in (deal["a"], deal["b"]):
+        for p in side["got"]:
+            if best is None or p["points"] > best[1]["points"]:
+                best = (side, p)
+    if best is None or best[1]["points"] <= 0:
+        return None
+    side, player = best
+    return f"Best scorer in the deal: {player['name']} ({player['points']}), now with {mark(side['team'])}."
+
+
+def build_moves(transactions, names, teams, deadlines, points, latest):
+    """
+    The accepted waiver and free-agent claims whose first gameweek is `latest`, the one that has just
+    finished, each judged on that one gameweek: the player claimed against the player dropped for him.
+    [] if that gameweek's points couldn't be read. Each is {id, team, got, gave, swing}; gave is None if
+    nobody was dropped.
+    """
+    if latest not in points:
+        return []
+    moves = []
+    for t in transactions:
+        incoming, when = t.get("element_in"), parse_time(t.get("added"))
+        if t.get("kind") not in ("w", "f") or t.get("result") != "a" or not incoming or not when:
+            continue
+        if first_gameweek_after(when, deadlines) != latest:
+            continue
+        who = teams.get(t.get("entry")) or {}
+        got = deal_player(incoming, names, points, [latest])
+        gave = deal_player(t["element_out"], names, points, [latest]) if t.get("element_out") else None
+        moves.append({"id": t.get("id") or 0, "team": who.get("team") or f"Team {t.get('entry')}",
+                      "got": got, "gave": gave, "swing": got["points"] - (gave["points"] if gave else 0)})
+    return moves
+
+
+def standout_moves(moves):
+    """
+    The week's best pickup and its most regretted drop, as (pickup, regret): the moves with the biggest and
+    smallest swing, but only if it is at least MOVE_MIN_SWING points either way, otherwise None. These are
+    superlatives for a bit of fun, not a verdict on the manager, so they don't need to beat luck the way a
+    trade does.
+    """
+    best = max(moves, key=lambda m: (m["swing"], m["id"]), default=None)
+    worst = min(moves, key=lambda m: (m["swing"], m["id"]), default=None)
+    pickup = best if best and best["swing"] >= MOVE_MIN_SWING else None
+    regret = worst if worst and worst["swing"] <= -MOVE_MIN_SWING else None
+    return pickup, regret
+
+
+def move_lines(move, regret):
+    """One line about a pickup (regret False) or a drop that went wrong (regret True)."""
+    got, gave = move["got"], move["gave"]
+    fill = {"t": mark(move["team"]), "got": got["name"], "got_pts": points_word(got["points"]),
+            "gave": gave["name"] if gave else "", "gave_pts": points_word(gave["points"] if gave else 0)}
+    if regret:
+        return [{"tone": "roast", "text": choose(REGRET_LINES, move["id"]).format(**fill)}]
+    if not gave:
+        return [{"tone": "praise", "text": f"{fill['t']} picked up {got['name']} and got {fill['got_pts']} "
+                                           f"from the move. Smart business."}]
+    return [{"tone": "praise", "text": choose(PICKUP_LINES, move["id"]).format(**fill)}]
+
+
+def missed_players(free_agents, bids, last_points, managers, latest):
+    """
+    Free agents that everyone missed: the best rated one nobody bid on (if he rates MISSED_MIN_RATING or
+    more) and the one who scored most in the gameweek just finished (if it was MISSED_HAUL_POINTS or more;
+    not the same player twice). free_agents is [{id, name, club, score}], bids the set of player IDs anyone
+    claimed in the last MISSED_DAYS days (denied claims count), last_points that gameweek's {player ID:
+    points}. Returns lines.
+    """
+    open_ = [p for p in free_agents if p["id"] not in bids]
+    lines, named = [], None
+    top = max(open_, key=lambda p: (p["score"], -p["id"]), default=None)
+    if top and top["score"] >= MISSED_MIN_RATING:
+        options = MISSED_RATING_LINES + ((MISSED_COUNT_LINE,) if managers else ())
+        lines.append({"tone": "roast", "text": choose(options, top["id"]).format(
+            p=top["name"], club=top["club"], rating=round(top["score"]), n=managers)})
+        named = top["id"]
+    haul = max(open_, key=lambda p: (last_points.get(p["id"], 0), p["score"], -p["id"]), default=None)
+    if haul and haul["id"] != named and last_points.get(haul["id"], 0) >= MISSED_HAUL_POINTS:
+        lines.append({"tone": "roast", "text": choose(MISSED_HAUL_LINES, haul["id"]).format(
+            p=haul["name"], club=haul["club"], pts=points_word(last_points[haul["id"]]), gw=latest)})
+    return lines
+
+
+def league_deals(trades, transactions, names, teams, deadlines, finished, points, now,
+                 free_agents=(), managers=0):
+    """
+    The league's deals, judged on points: {"gameweek", "items", "trades"}, or None before a gameweek has
+    finished.
+      items   what the recap shows at the top: the recent trades (at most DEALS_SHOWN, each still news for
+              DEAL_NEWS_WEEKS finished gameweeks) with a compliment and a poke, the pickup of the week, the
+              most regretted drop, and the free agents everyone missed. Each is {kind, heading, lines,
+              detail, note}.
+      trades  every processed trade, newest first, for the tracker (see build_trade).
+    finished is the list of finished gameweeks, deadlines {gameweek: datetime}, points {gameweek: {player ID:
+    points}}, now the time to judge "this week's bids" from, and managers how many managers the league has.
+    """
+    if not finished:
+        return None
+    latest = max(finished)
+    ledger = [d for d in (build_trade(t, names, teams, deadlines, points, latest)
+                          for t in trades if t.get("state") == "p") if d]
+    ledger.sort(key=lambda d: (d["agreed"], d["id"]), reverse=True)
+
+    items = []
+    for d in [d for d in ledger if 1 <= d["weeks"] <= DEAL_NEWS_WEEKS][:DEALS_SHOWN]:
+        weeks = d["weeks"]
+        span = f"GW{d['running'][0]['gw']}" + (f"-{d['running'][-1]['gw']}" if weeks > 1 else "")
+        items.append({"kind": "trade", "heading": f"Trade: {d['a']['team']} and {d['b']['team']}",
+                      "lines": d["lines"], "detail": deal_star(d),
+                      "note": f"After {weeks} finished gameweek{'' if weeks == 1 else 's'} ({span})"})
+    pickup, regret = standout_moves(build_moves(transactions, names, teams, deadlines, points, latest))
+    if pickup:
+        items.append({"kind": "pickup", "heading": "Pickup of the week", "lines": move_lines(pickup, False),
+                      "detail": None, "note": f"GW{latest}"})
+    if regret:
+        items.append({"kind": "regret", "heading": "Dropped and regretted", "lines": move_lines(regret, True),
+                      "detail": None, "note": f"GW{latest}"})
+
+    since = now - timedelta(days=MISSED_DAYS)
+    bids = {t["element_in"] for t in transactions
+            if t.get("element_in") and (parse_time(t.get("added")) or since) > since}
+    missed = missed_players(free_agents, bids, points.get(latest, {}), managers, latest)
+    if missed:
+        items.append({"kind": "missed", "heading": "Everyone missed this one", "lines": missed,
+                      "detail": None, "note": f"No bids in the last {MISSED_DAYS} days"})
+    return {"gameweek": latest, "items": items, "trades": ledger}
+
+
+def load_deals(league_id):
+    """
+    Build the deals for a league: {"league_id", "league_name", "deals"} (see league_deals). It reads the Draft
+    site's trades and claims, the points of the finished gameweeks the trades cover (one request each) and our
+    ratings (for the free agents everyone missed). The transactions and the ratings are optional: without them
+    the trades still show.
+    """
+    boot = fetch(f"{DRAFT}/bootstrap-static", LEAGUE_NOT_FOUND)
+    details = fetch(f"{DRAFT}/league/{league_id}/details", LEAGUE_NOT_FOUND)
+    name = details.get("league", {}).get("name", f"League {league_id}")
+    trades = draft_rows(league_id, "trades")
+    try:
+        transactions = draft_rows(league_id, "transactions")
+    except FplError:
+        transactions = []
+
+    events = boot.get("events", {})
+    deadlines = gameweek_deadlines(events)
+    finished = sorted(e["id"] for e in events.get("data") or [] if e.get("finished") and e.get("id"))
+    if not finished:
+        return {"league_id": league_id, "league_name": name, "deals": None}
+    latest = finished[-1]
+    starts = [trade_start(t, deadlines) for t in trades if t.get("state") == "p"]
+    starts = [gw for gw in starts if gw and gw <= latest]
+    wanted = set(range(min(starts), latest + 1)) | {latest} if starts else {latest}
+    points = gameweek_points(sorted(wanted & set(finished)))
+
+    positions = {p["id"]: p["singular_name_short"] for p in boot.get("element_types") or []}
+    club = {t["id"]: t["short_name"] for t in boot.get("teams") or []}
+    names = {el["id"]: {"name": el.get("web_name"), "pos": positions.get(el.get("element_type")),
+                        "club": club.get(el.get("team"))} for el in boot.get("elements") or []}
+    teams = {e["entry_id"]: {"team": clean_name(e.get("entry_name")),
+                             "manager": f'{e.get("player_first_name", "")} '
+                                        f'{e.get("player_last_name", "")}'.strip()}
+             for e in details.get("league_entries", []) if e.get("entry_id")}
+    try:   # the best free agents by our ratings; without them the page just can't say who was missed
+        free_agents = [{"id": p["id"], "name": p["name"], "club": p["team"], "score": p["score"]}
+                       for p in load_league(league_id)["players"] if p["owner"] is None]
+    except FplError:
+        free_agents = []
+    deals = league_deals(trades, transactions, names, teams, deadlines, finished, points,
+                         datetime.now(timezone.utc), free_agents, len(teams))
+    return {"league_id": league_id, "league_name": name, "deals": deals}
+
+
 # ---------------------------------------------------------------- routes
 
 @app.route("/")
@@ -2836,6 +3229,15 @@ def recap(league_id):
     """The weekly recap, written once per stage, with the scores behind it (see load_recap)."""
     try:
         return jsonify(load_recap(league_id))
+    except FplError as e:
+        return jsonify({"error": e.message}), e.status
+
+
+@app.route("/api/league/<int:league_id>/deals")
+def deals(league_id):
+    """Trades and waiver moves judged on the points they brought, for the recap page (see load_deals)."""
+    try:
+        return jsonify(load_deals(league_id))
     except FplError as e:
         return jsonify({"error": e.message}), e.status
 

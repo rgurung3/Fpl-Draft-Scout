@@ -3872,3 +3872,447 @@ def test_the_ai_is_told_to_mark_team_names_and_give_player_points_in_brackets():
     system = app.RECAP_SYSTEM
     assert "between double asterisks, like **Wattu Wanderers**" in system
     assert "Saka (14)" in system and "**Saka**" not in system       # footballers are plain, with points
+
+
+# ---------------------------------------------------------------- deals (trades and waiver moves)
+
+DEAL_START = datetime(2026, 9, 1, tzinfo=timezone.utc)
+# one deadline a week: GW1's is the 8th of September
+DEAL_DEADLINES = {gw: DEAL_START + timedelta(days=7 * gw) for gw in range(1, 10)}
+DEAL_NAMES = {pid: {"name": f"Star{pid}", "pos": "MID", "club": "ARS"} for pid in range(1, 13)}
+DEAL_TEAMS = {100: {"team": "Team A", "manager": "Sam Lee"}, 101: {"team": "Team B", "manager": "Kim Ray"}}
+
+
+def after_deadline(gw):
+    """A moment just after a gameweek's deadline, so a deal made then counts from the next gameweek."""
+    return (DEAL_DEADLINES[gw] + timedelta(hours=1)).isoformat()
+
+
+def make_trade(given=((1, 3), (2, 4)), after=4, trade_id=9, state="p"):
+    """Team A (100) offers: it receives each pair's first player and gives up the second. Team B is 101."""
+    return {"id": trade_id, "event": after + 1, "offered_entry": 100, "received_entry": 101, "state": state,
+            "offer_time": after_deadline(after), "response_time": after_deadline(after),
+            "tradeitem_set": [{"element_in": i, "element_out": o} for i, o in given]}
+
+
+def deal_points(*weeks):
+    """{gameweek: {player ID: points}} from one {player ID: points} per gameweek, starting at GW5."""
+    return {5 + n: pts for n, pts in enumerate(weeks)}
+
+
+def judge(trade, points, latest=None):
+    return app.build_trade(trade, DEAL_NAMES, DEAL_TEAMS, DEAL_DEADLINES, points, latest or max(points))
+
+
+def test_a_deal_counts_from_the_first_gameweek_after_it_was_made():
+    assert app.first_gameweek_after(DEAL_DEADLINES[4] + timedelta(hours=1), DEAL_DEADLINES) == 5
+    assert app.first_gameweek_after(DEAL_DEADLINES[4] - timedelta(hours=1), DEAL_DEADLINES) == 4
+    assert app.first_gameweek_after(DEAL_DEADLINES[9] + timedelta(days=1), DEAL_DEADLINES) is None
+
+
+@pytest.mark.parametrize("swing, players, weeks, size", [
+    (5, 2, 1, "even"),         # under the minimum swing
+    (8, 2, 1, "win"),          # more than 1.5 times the usual luck of two players over one gameweek
+    (-8, 2, 1, "win"),         # it works for either side
+    (13, 2, 1, "robbery"),     # more than 2.5 times the luck
+    (-13, 2, 1, "robbery"),
+    (13, 10, 4, "even"),       # the same swing across ten players and four gameweeks is just luck
+    (0, 4, 0, "even"),         # nothing has been played yet
+])
+def test_a_swing_is_only_a_win_when_it_beats_luck(swing, players, weeks, size):
+    assert app.deal_size(swing, players, weeks) == size
+
+
+def test_a_trade_is_scored_on_the_points_each_side_got_and_gave_up():
+    points = deal_points({1: 10, 2: 6, 3: 1, 4: 0}, {1: 8, 2: 2, 3: 0, 4: 2})
+    deal = judge(make_trade(), points)
+    a, b = deal["a"], deal["b"]
+    assert (a["entry_id"], b["entry_id"]) == (100, 101)
+    assert (a["got_points"], a["gave_points"], a["swing"]) == (26, 3, 23)
+    assert (b["got_points"], b["gave_points"], b["swing"]) == (3, 26, -23)     # the exact mirror image
+    assert [(p["name"], p["points"]) for p in a["got"]] == [("Star1", 18), ("Star2", 8)]
+    assert [(p["name"], p["points"]) for p in b["got"]] == [("Star3", 1), ("Star4", 2)]
+    assert deal["running"] == [{"gw": 5, "swing": 15}, {"gw": 6, "swing": 23}]
+    assert (deal["first_gw"], deal["weeks"], deal["settled"]) == (5, 2, False)
+    assert (deal["state"], deal["size"], deal["winner"], deal["loser"]) == ("decided", "win", 100, 101)
+    assert (a["label"], b["label"]) == ("Ahead so far", "Behind so far")
+
+
+def test_the_side_that_lost_is_the_loser_whoever_offered():
+    points = deal_points({1: 0, 2: 1, 3: 12, 4: 9}, {1: 0, 2: 0, 3: 6, 4: 3})
+    deal = judge(make_trade(), points)
+    assert (deal["winner"], deal["loser"]) == (101, 100)
+    assert (deal["a"]["label"], deal["b"]["label"]) == ("Behind so far", "Ahead so far")
+
+
+def test_a_robbery_gets_praise_for_the_winner_and_a_poke_for_the_loser():
+    points = deal_points({1: 20, 2: 15, 3: 0, 4: 1}, {1: 12, 2: 10, 3: 0, 4: 0})
+    deal = judge(make_trade(), points)
+    assert deal["size"] == "robbery"
+    praise, poke = deal["lines"]
+    assert (praise["tone"], poke["tone"]) == ("praise", "roast")
+    assert "**Team A**" in praise["text"] and "57 points" in praise["text"] and "1 point" in praise["text"]
+    assert "**Team B**" in poke["text"] and "57 points" in poke["text"] and "1 point" in poke["text"]
+
+
+def test_an_ordinary_win_uses_the_milder_lines():
+    points = deal_points({1: 10, 2: 6, 3: 1, 4: 0}, {1: 8, 2: 2, 3: 0, 4: 2})
+    praise, poke = judge(make_trade(), points)["lines"]
+    assert praise["text"] in [t.format(w="**Team A**", l="**Team B**", w_in="26 points", w_out="3 points")
+                              for t in app.PRAISE_WIN]
+    assert poke["text"] in [t.format(w="**Team A**", l="**Team B**", l_in="3 points", l_out="26 points")
+                            for t in app.POKE_WIN]
+
+
+def test_a_small_swing_is_too_close_to_call_until_four_gameweeks_have_passed():
+    deal = judge(make_trade(), deal_points({1: 3, 2: 2, 3: 3, 4: 1}, {1: 2, 2: 2, 3: 2, 4: 3}))
+    assert (deal["state"], deal["winner"], deal["loser"]) == ("even", None, None)
+    assert deal["a"]["label"] == deal["b"]["label"] == "Too close to call"
+    assert [line["tone"] for line in deal["lines"]] == ["even"]
+    assert "**Team A**" in deal["lines"][0]["text"] and "**Team B**" in deal["lines"][0]["text"]
+    even = {1: 3, 2: 2, 3: 3, 4: 2}
+    settled = judge(make_trade(), deal_points(even, even, even, even))
+    assert (settled["settled"], settled["a"]["label"]) == (True, "A wash")
+
+
+def test_a_decided_trade_gets_its_final_verdict_after_four_gameweeks():
+    week = {1: 8, 2: 6, 3: 0, 4: 1}
+    deal = judge(make_trade(), deal_points(week, week, week, week))
+    assert deal["settled"] and deal["weeks"] == 4
+    assert (deal["a"]["label"], deal["b"]["label"]) == ("Worth it", "Regretted")
+
+
+def test_a_trade_made_after_the_last_finished_gameweek_waits():
+    deal = judge(make_trade(after=6), deal_points({1: 5}, {1: 5}), latest=6)
+    assert (deal["state"], deal["weeks"], deal["first_gw"]) == ("waiting", 0, 7)
+    assert deal["lines"] == [] and deal["running"] == []
+    assert deal["a"]["label"] == deal["b"]["label"] == "Waiting for a gameweek"
+
+
+def test_a_gameweek_that_could_not_be_read_is_not_counted():
+    points = {5: {1: 10, 2: 6, 3: 1, 4: 0}, 7: {1: 8, 2: 2, 3: 0, 4: 2}}          # GW6's feed was down
+    deal = judge(make_trade(), points, latest=7)
+    assert deal["weeks"] == 2 and [r["gw"] for r in deal["running"]] == [5, 7]
+
+
+@pytest.mark.parametrize("change", [
+    {"tradeitem_set": []},
+    {"tradeitem_set": [{"element_in": 1}]},
+    {"offered_entry": None},
+    {"response_time": "soon", "offer_time": None},
+])
+def test_a_trade_row_that_cant_be_read_is_skipped(change):
+    assert judge({**make_trade(), **change}, deal_points({1: 1})) is None
+
+
+def test_players_and_teams_the_feed_does_not_know_still_get_a_name():
+    trade = make_trade(given=((99, 98),))
+    deal = app.build_trade(trade, {}, {}, DEAL_DEADLINES, deal_points({99: 4, 98: 1}), 5)
+    assert deal["a"]["team"] == "Team 100" and deal["a"]["got"][0]["name"] == "Player 99"
+
+
+def test_the_star_of_a_deal_is_its_best_scorer_and_who_has_him_now():
+    deal = judge(make_trade(), deal_points({1: 10, 2: 6, 3: 12, 4: 0}))
+    assert app.deal_star(deal) == "Best scorer in the deal: Star3 (12), now with **Team B**."
+    assert app.deal_star(judge(make_trade(), deal_points({1: 0, 2: 0, 3: 0, 4: 0}))) is None
+
+
+def test_the_same_deal_always_gets_the_same_line_and_other_deals_can_differ():
+    assert app.choose(("a", "b", "c"), 4) == "b"
+    points = deal_points({1: 20, 2: 15, 3: 0, 4: 1}, {1: 12, 2: 10, 3: 0, 4: 0})
+    deal = judge(make_trade(), points)
+    assert app.trade_lines(deal) == deal["lines"]
+    wording = {judge(make_trade(trade_id=n), points)["lines"][0]["text"] for n in range(6)}
+    assert len(wording) > 1
+
+
+def test_points_are_counted_with_the_right_unit():
+    assert [app.points_word(n) for n in (0, 1, 12, -2)] == ["0 points", "1 point", "12 points", "-2 points"]
+
+
+# claims and drops
+
+def make_claim(claim_id=1, got=5, gave=6, after=4, kind="w", result="a", entry=100):
+    return {"id": claim_id, "entry": entry, "element_in": got, "element_out": gave, "kind": kind,
+            "result": result, "added": after_deadline(after), "event": after + 1}
+
+
+def moves_for(claims, points, latest=5):
+    return app.build_moves(claims, DEAL_NAMES, DEAL_TEAMS, DEAL_DEADLINES, points, latest)
+
+
+def test_only_accepted_claims_from_the_week_just_finished_are_judged():
+    claims = [make_claim(1), make_claim(2, kind="f"), make_claim(3, result="do"), make_claim(4, kind="t"),
+              make_claim(5, after=3), make_claim(6, got=None)]
+    moves = moves_for(claims, {5: {5: 9, 6: 1}})
+    assert [m["id"] for m in moves] == [1, 2]                  # waivers and free agents; denied, trades,
+    assert moves[0]["team"] == "Team A"                         # older weeks and no player are all left out
+
+
+def test_a_claim_is_the_player_added_against_the_player_dropped_for_him():
+    [move] = moves_for([make_claim(1, got=5, gave=6)], {5: {5: 9, 6: 1}})
+    assert (move["got"]["name"], move["got"]["points"]) == ("Star5", 9)
+    assert (move["gave"]["name"], move["gave"]["points"], move["swing"]) == ("Star6", 1, 8)
+    [bare] = moves_for([make_claim(2, gave=None)], {5: {5: 9}})
+    assert bare["gave"] is None and bare["swing"] == 9
+
+
+def test_no_claims_are_judged_when_the_gameweeks_points_are_missing():
+    assert moves_for([make_claim()], {4: {5: 9}}) == []
+
+
+def fake_move(move_id, swing):
+    return {"id": move_id, "swing": swing, "got": {}, "gave": {}}
+
+
+def test_the_best_pickup_and_worst_drop_need_a_real_swing():
+    moves = [fake_move(1, 3), fake_move(2, 9), fake_move(3, -7), fake_move(4, -2)]
+    pickup, regret = app.standout_moves(moves)
+    assert (pickup["id"], regret["id"]) == (2, 3)
+    small = [fake_move(1, app.MOVE_MIN_SWING - 1), fake_move(2, 1 - app.MOVE_MIN_SWING)]
+    assert app.standout_moves(small) == (None, None)
+    assert app.standout_moves([fake_move(1, app.MOVE_MIN_SWING)])[0]["id"] == 1
+    assert app.standout_moves([]) == (None, None)
+
+
+def test_a_pickup_and_a_regretted_drop_are_told_with_both_players_points():
+    got, gave = {"name": "Star5", "points": 9}, {"name": "Star6", "points": 1}
+    claim = {"id": 1, "team": "Team A", "got": got, "gave": gave, "swing": 8}
+    [praise] = app.move_lines(claim, False)
+    assert praise["tone"] == "praise" and "**Team A**" in praise["text"]
+    assert "Star5" in praise["text"] and "9 points" in praise["text"] and "1 point" in praise["text"]
+    [roast] = app.move_lines({**claim, "got": gave, "gave": got, "swing": -8}, True)
+    assert roast["tone"] == "roast" and "Star5" in roast["text"] and "9 points" in roast["text"]
+    [bare] = app.move_lines({**claim, "gave": None}, False)
+    assert "picked up Star5" in bare["text"] and "9 points" in bare["text"]
+
+
+# the free agents everyone missed
+
+WIRE = [{"id": 1, "name": "Iwobi", "club": "FUL", "score": 84.2},
+        {"id": 2, "name": "Cherif", "club": "COV", "score": 40.0},
+        {"id": 3, "name": "Dull", "club": "ARS", "score": 30.0}]
+
+
+def test_the_best_rated_free_agent_nobody_bid_on_is_missed():
+    [line] = app.missed_players(WIRE, set(), {}, 12, 6)
+    assert line["tone"] == "roast"
+    assert "Iwobi" in line["text"] and "FUL" in line["text"] and "84" in line["text"]
+
+
+def test_a_bid_takes_a_free_agent_out_and_a_low_rating_is_not_a_miss():
+    assert app.missed_players(WIRE, {1}, {}, 12, 6) == []             # the next best rates 40: under the bar
+    assert app.missed_players(WIRE[1:], set(), {}, 12, 6) == []
+    assert app.missed_players([], set(), {}, 12, 6) == []
+
+
+def test_the_free_agent_who_scored_most_is_missed_too_but_not_named_twice():
+    top, haul = app.missed_players(WIRE, set(), {2: 12, 3: 1}, 12, 6)
+    assert "Iwobi" in top["text"]
+    assert "Cherif" in haul["text"] and "12 points" in haul["text"] and "GW6" in haul["text"]
+    assert len(app.missed_players(WIRE, set(), {1: 14}, 12, 6)) == 1      # Iwobi again: said once
+    assert len(app.missed_players(WIRE, set(), {2: app.MISSED_HAUL_POINTS - 1}, 12, 6)) == 1
+    [only] = app.missed_players(WIRE[1:], set(), {2: 12}, 12, 6)           # a haul alone is enough
+    assert "Cherif" in only["text"]
+
+
+def test_the_count_of_managers_is_used_when_there_is_one_to_use():
+    wire = [{"id": 2, "name": "Iwobi", "club": "FUL", "score": 84.2}]
+    assert "12 managers, 12 misses" in app.missed_players(wire, set(), {}, 12, 6)[0]["text"]
+    assert "Iwobi" in app.missed_players(wire, set(), {}, 0, 6)[0]["text"]       # no count: another line
+
+
+# putting it together
+
+def deals_for(trades=(), claims=(), points=None, free=(), finished=(1, 2, 3, 4, 5, 6), now=None, managers=12):
+    now = now or DEAL_DEADLINES[6] + timedelta(days=1)
+    return app.league_deals(list(trades), list(claims), DEAL_NAMES, DEAL_TEAMS, DEAL_DEADLINES,
+                            list(finished), points or {}, now, list(free), managers)
+
+
+FLAT_POINTS = {gw: {pid: 2 for pid in range(1, 13)} for gw in range(1, 7)}
+
+
+def test_there_are_no_deals_before_a_gameweek_has_finished():
+    assert deals_for([make_trade()], finished=()) is None
+
+
+def test_recent_trades_are_news_and_older_ones_only_stay_in_the_tracker():
+    old, mid = make_trade(after=1, trade_id=1), make_trade(after=3, trade_id=3)
+    new = make_trade(after=5, trade_id=2)
+    deals = deals_for([old, mid, new], points=FLAT_POINTS)
+    assert deals["gameweek"] == 6
+    assert [t["id"] for t in deals["trades"]] == [2, 3, 1]                  # newest first, all of them
+    shown = [i for i in deals["items"] if i["kind"] == "trade"]
+    assert [i["note"] for i in shown] == ["After 1 finished gameweek (GW6)",
+                                          "After 3 finished gameweeks (GW4-6)"]
+    assert shown[0]["heading"] == "Trade: Team A and Team B"
+    assert shown[0]["lines"] and shown[0]["detail"].startswith("Best scorer in the deal")
+
+
+def test_only_a_few_trades_are_on_the_recap_and_only_processed_ones_count(monkeypatch):
+    monkeypatch.setattr(app, "DEALS_SHOWN", 1)
+    trades = [make_trade(after=4, trade_id=1), make_trade(after=5, trade_id=2),
+              make_trade(after=5, trade_id=3, state="d")]                    # declined: not a deal
+    deals = deals_for(trades, points=FLAT_POINTS)
+    assert [t["id"] for t in deals["trades"]] == [2, 1]
+    assert [i["note"] for i in deals["items"] if i["kind"] == "trade"] == ["After 1 finished gameweek (GW6)"]
+
+
+def test_a_pickup_and_a_regretted_drop_make_the_recap():
+    claims = [make_claim(1, got=5, gave=6, after=5), make_claim(2, got=7, gave=8, after=5)]
+    points = {**FLAT_POINTS, 6: {5: 9, 6: 1, 7: 0, 8: 8}}
+    deals = deals_for(claims=claims, points=points)
+    assert [i["kind"] for i in deals["items"]] == ["pickup", "regret"]
+    assert [i["heading"] for i in deals["items"]] == ["Pickup of the week", "Dropped and regretted"]
+    pickup, regret = deals["items"]
+    assert "Star5" in pickup["lines"][0]["text"] and "Star8" in regret["lines"][0]["text"]
+
+
+def test_the_free_agents_everyone_missed_make_the_recap_unless_someone_bid_this_week():
+    [item] = deals_for(points=FLAT_POINTS, free=WIRE)["items"]
+    assert (item["kind"], item["heading"], item["note"]) == (
+        "missed", "Everyone missed this one", f"No bids in the last {app.MISSED_DAYS} days")
+    now = DEAL_DEADLINES[6] + timedelta(days=1)
+    recent = {**make_claim(1, got=1, gave=9), "added": (now - timedelta(days=2)).isoformat()}
+    assert deals_for(claims=[recent], points=FLAT_POINTS, free=WIRE)["items"] == []      # a bid: not missed
+    old = {**recent, "added": (now - timedelta(days=app.MISSED_DAYS + 1)).isoformat()}
+    assert [i["kind"] for i in deals_for(claims=[old], points=FLAT_POINTS, free=WIRE)["items"]] == ["missed"]
+
+
+def test_a_quiet_week_has_nothing_to_show_but_the_tracker_still_lists_trades():
+    deals = deals_for([make_trade(after=1)], points=FLAT_POINTS)
+    assert deals["items"] == [] and len(deals["trades"]) == 1
+
+
+# the deals route
+
+@pytest.fixture
+def deals_world(monkeypatch):
+    """
+    Fake Draft and classic sites for the deals route. Gameweeks 1-6 have finished. Team A (100) and Team B
+    (101) made one trade just after GW4's deadline (so it counts from GW5), Star1 and Star2 for Star3 and
+    Star4, and stars 5-8 are free agents. The returned dict can be changed before the first request:
+    "down" takes feeds out ("transactions", "owners" or "live5"), "finished" is the finished gameweeks.
+    """
+    world = {
+        "trades": [make_trade()],
+        "transactions": [],
+        "points": {5: {1: 10, 2: 6, 3: 1, 4: 0}, 6: {1: 8, 2: 2, 3: 0, 4: 2}},
+        "finished": [1, 2, 3, 4, 5, 6],
+        "down": set(),
+        "calls": [],
+    }
+    elements = [{**make_player(i, team=1 if i % 2 else 2), "web_name": f"Star{i}"} for i in range(1, 9)]
+    details = {"league": {"name": "Deal League"},
+               "league_entries": [{"entry_id": 100, "entry_name": "Team A",
+                                   "player_first_name": "Sam", "player_last_name": "Lee"},
+                                  {"entry_id": 101, "entry_name": "Team B",
+                                   "player_first_name": "Kim", "player_last_name": "Ray"}]}
+    owners = {1: 100, 2: 100, 3: 101, 4: 101}
+    kinds = [{"id": 1, "singular_name_short": "GKP"}, {"id": 2, "singular_name_short": "DEF"},
+             {"id": 3, "singular_name_short": "MID"}, {"id": 4, "singular_name_short": "FWD"}]
+
+    def fake(url):
+        world["calls"].append(url)
+
+        def down():
+            raise requests.ConnectionError("down")
+
+        if "fantasy" in url:                                              # the classic site
+            return {"teams": TEAMS, "elements": []} if "bootstrap" in url else []
+        if url.endswith("/bootstrap-static"):
+            data = [{"id": gw, "deadline_time": DEAL_DEADLINES[gw].isoformat(),
+                     "finished": gw in world["finished"]} for gw in range(1, 10)]
+            return {"events": {"current": 6, "next": 7, "data": data}, "teams": TEAMS, "elements": elements,
+                    "element_types": kinds}
+        if url.endswith("/details"):
+            return details
+        if url.endswith("/element-status"):
+            if "owners" in world["down"]:
+                down()
+            return {"element_status": [{"element": i, "owner": owners.get(i)} for i in range(1, 9)]}
+        if url.endswith("/trades"):
+            return {"trades": world["trades"]}
+        if url.endswith("/transactions"):
+            if "transactions" in world["down"]:
+                down()
+            return {"transactions": world["transactions"]}
+        if "/live" in url:
+            gw = int(url.split("/event/")[1].split("/")[0])
+            if f"live{gw}" in world["down"]:
+                down()
+            return {"elements": {str(pid): {"stats": {"total_points": pts, "minutes": 90}}
+                                 for pid, pts in world["points"].get(gw, {}).items()}}
+        raise AssertionError(f"Unexpected URL {url}")
+
+    monkeypatch.setattr(app, "get_json", fake)
+    return world
+
+
+def get_deals(league=123):
+    return app.app.test_client().get(f"/api/league/{league}/deals").get_json()
+
+
+def test_deals_route_scores_the_trade_from_the_live_feeds(deals_world):
+    data = get_deals()
+    assert data["league_name"] == "Deal League"
+    deals = data["deals"]
+    assert deals["gameweek"] == 6
+    [trade] = deals["trades"]
+    a = trade["a"]
+    assert (a["team"], a["manager"], a["swing"], trade["weeks"]) == ("Team A", "Sam Lee", 23, 2)
+    first = deals["items"][0]
+    assert first["kind"] == "trade" and [line["tone"] for line in first["lines"]] == ["praise", "roast"]
+    live = sorted(url.split("/event/")[1].split("/")[0] for url in deals_world["calls"] if "/live" in url)
+    assert live == ["5", "6"]                      # only the gameweeks the trade covers, not the whole season
+
+
+def test_deals_route_names_a_free_agent_everyone_missed(deals_world, monkeypatch):
+    monkeypatch.setattr(app, "MISSED_MIN_RATING", 0)
+    items = get_deals()["deals"]["items"]
+    missed = [i for i in items if i["kind"] == "missed"]
+    assert len(missed) == 1 and any(f"Star{n}" in missed[0]["lines"][0]["text"] for n in range(5, 9))
+
+
+def test_deals_route_is_empty_before_a_gameweek_has_finished(deals_world):
+    deals_world["finished"] = []
+    assert get_deals()["deals"] is None
+    assert not any("/live" in url for url in deals_world["calls"])
+
+
+def test_deals_route_still_shows_the_trades_without_the_claims_or_the_ratings(deals_world):
+    deals_world["down"] = {"transactions", "owners"}
+    deals = get_deals()["deals"]
+    assert [i["kind"] for i in deals["items"]] == ["trade"] and len(deals["trades"]) == 1
+
+
+def test_deals_route_counts_fewer_gameweeks_when_one_feed_is_down(deals_world):
+    deals_world["down"] = {"live5"}
+    [trade] = get_deals()["deals"]["trades"]
+    assert trade["weeks"] == 1 and trade["running"] == [{"gw": 6, "swing": 8}]
+
+
+def test_deals_route_skips_a_trade_feed_row_it_cannot_read(deals_world):
+    deals_world["trades"] = [{"id": 1, "state": "p"}, make_trade()]
+    assert [t["id"] for t in get_deals()["deals"]["trades"]] == [9]
+
+
+def test_deals_route_gives_a_friendly_error(monkeypatch):
+    def not_found(url):
+        raise requests.HTTPError(response=type("R", (), {"status_code": 404})())
+
+    monkeypatch.setattr(app, "get_json", not_found)
+    res = app.app.test_client().get("/api/league/999/deals")
+    assert res.status_code == 400
+    assert "No Draft league found" in res.get_json()["error"]
+
+
+def test_league_hub_has_the_trades_choice_and_the_deals_card_on_the_recap():
+    res = app.app.test_client().get("/league?league=123")
+    page = res.data.decode()
+    res.close()
+    assert '<button class="choice" type="button" data-tab="deals"' in page          # not fullonly
+    assert 'id="panel-deals"' in page and "function renderDeals" in page and "function fillDealCard" in page
+    assert page.index('id="dealsCard"') < page.index('id="recapEmpty"')               # on top of the recap
+    assert page.count('"deals"') >= 3 and "deals: null" in page                        # a tab like the others

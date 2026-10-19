@@ -155,6 +155,36 @@
   .moves .up { color: var(--pitch); font-weight: 600; }
   .moves .down { color: var(--rival); font-weight: 600; }
 
+  /* deals: the card at the top of the recap and the trade tracker */
+  .dealsbox { margin: 0 0 28px; }
+  .dealsbox .head2 { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .deals { display: grid; gap: 10px; margin: 0 0 8px; }
+  .deal, .tracker { background: var(--surface); border: 1px solid var(--line); border-left: 5px solid var(--amber);
+    border-radius: 4px; padding: 12px 16px; display: grid; gap: 6px; }
+  .deal.trade { border-left-color: var(--pitch); }
+  .deal.regret, .deal.missed { border-left-color: var(--rival); }
+  .deal .head, .tracker .thead { font-family: var(--display); font-weight: 600; font-size: 1.2rem; overflow-wrap: anywhere; }
+  .deal .note, .tracker .note { color: var(--muted); font-size: .88rem; }
+  .say { margin: 0; overflow-wrap: anywhere; }
+  .say::before { display: inline-block; width: 1.3em; font-size: .8em; }
+  .say.praise::before { content: "\25B2"; color: var(--pitch); }
+  .say.roast::before { content: "\25BC"; color: var(--rival); }
+  .say.even::before { content: "\25CF"; color: var(--muted); }
+  .tracker { border-left-color: var(--line); margin-bottom: 10px; }
+  .tsides { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+  .tside { display: grid; gap: 4px; align-content: start; min-width: 0; }
+  .tside .tname { overflow-wrap: anywhere; }
+  .plist { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; font-size: .95rem; }
+  .plist li { display: flex; justify-content: space-between; gap: 12px; max-width: 280px; font-variant-numeric: tabular-nums; }
+  .plist .pts { color: var(--muted); }
+  .chip.good { border-color: var(--pitch); color: var(--pitch); }
+  .chip.bad { border-color: var(--rival); color: var(--rival); }
+  .running { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .rchip { font-size: .8rem; font-weight: 600; padding: 0 8px; border-radius: 999px; line-height: 1.6;
+    background: var(--line); color: var(--muted); font-variant-numeric: tabular-nums; }
+  .rchip.up { background: color-mix(in srgb, var(--pitch) 28%, transparent); color: var(--ink); }
+  .rchip.down { background: color-mix(in srgb, var(--rival) 28%, transparent); color: var(--ink); }
+
   /* squad strength */
   .pos { color: var(--muted); font-size: .85rem; }
   .squads { display: grid; gap: 6px; }
@@ -213,6 +243,8 @@
         <span class="t">Banter</span><span class="d">This week's match-ups, season awards and facts to argue about</span></button>
       <button class="choice" type="button" data-tab="recap" aria-pressed="false">
         <span class="t">Recap</span><span class="d">The gameweek in words, updated as the games finish</span></button>
+      <button class="choice" type="button" data-tab="deals" aria-pressed="false">
+        <span class="t">Trades</span><span class="d">Every trade this season, and whether it paid off</span></button>
       <button class="choice" type="button" data-tab="charts" aria-pressed="false">
         <span class="t">Charts</span><span class="d">The league race, head-to-head records and who's scoring</span></button>
       <button class="choice" type="button" data-tab="rivalries" aria-pressed="false">
@@ -253,6 +285,13 @@
     </div>
 
     <div id="panel-recap" class="hidden">
+      <section id="dealsCard" class="dealsbox hidden">
+        <div class="head2">
+          <h2 id="dealsWeek">Deals of the week</h2>
+          <button class="linkbtn" id="allTrades" type="button">See every trade</button>
+        </div>
+        <div class="deals" id="dealItems"></div>
+      </section>
       <div id="recapEmpty" class="empty hidden"></div>
       <section id="recapBody">
         <h2 id="recapTitle">Recap</h2>
@@ -266,6 +305,15 @@
         <p class="sub hidden" id="boardSub"></p>
         <ul class="board" id="board"></ul>
         <p class="racecap hidden" id="starLine"></p>
+      </section>
+    </div>
+
+    <div id="panel-deals" class="hidden">
+      <div id="dealsEmpty" class="empty hidden"></div>
+      <section id="dealsBody">
+        <h2>Trade tracker</h2>
+        <p class="sub">Every trade this season, scored on the points the players on each side have scored since the deal was agreed. A small swing is "too close to call", and a verdict (worth it or regretted) is only handed out once four gameweeks have finished. Points are what the players scored, whether or not they started.</p>
+        <div id="tradeList"></div>
       </section>
     </div>
 
@@ -361,11 +409,11 @@
 const $ = id => document.getElementById(id);
 const FACTS_SHOWN = 2;   // facts shown at first; "Show more" reveals the rest
 const FULL = new URLSearchParams(location.search).get("full") === "1";   // the full version: My team and the way back
-const TABS = FULL ? ["upcoming", "banter", "recap", "charts", "rivalries", "team"]
-                  : ["upcoming", "banter", "recap", "charts", "rivalries"];
+const TABS = FULL ? ["upcoming", "banter", "recap", "deals", "charts", "rivalries", "team"]
+                  : ["upcoming", "banter", "recap", "deals", "charts", "rivalries"];
 let leagueId = null;     // the league this page is open on
 let tab = null;          // the choice currently open (none until a friend picks one)
-const loaded = { upcoming: null, banter: null, recap: null, charts: null, rivalries: null };   // which league each choice's data is for, so each loads only once
+const loaded = { upcoming: null, banter: null, recap: null, deals: null, charts: null, rivalries: null };   // which league each choice's data is for, so each loads only once
 let BANTER = null, showAll = false;
 let CH = null;           // the charts the server sent (see league_charts in app.py); this page only draws them
 let myId = null;         // your team ID, if we know it, so your line and row stand out
@@ -421,6 +469,7 @@ async function openTab(name) {
     $("leagueLine").textContent = data.league_name;
     if (name === "banter") renderBanter(data);
     else if (name === "recap") renderRecap(data);
+    else if (name === "deals") renderDeals(data);
     else if (name === "charts") renderCharts(data);
     else if (name === "upcoming") renderUpcoming(data);
     else renderRivalries(data);
@@ -434,7 +483,8 @@ async function openTab(name) {
 
 function openLeague(id, firstTab) {
   leagueId = id;
-  loaded.upcoming = loaded.banter = loaded.recap = loaded.charts = loaded.rivalries = null;
+  loaded.upcoming = loaded.banter = loaded.recap = loaded.deals = loaded.charts = loaded.rivalries = null;
+  $("dealsCard").classList.add("hidden");
   RIV = null;
   UP = null; showAllMatches = false;
   PEOPLE = []; renderYou();
@@ -697,6 +747,7 @@ function boardRow(m) {
 }
 
 function renderRecap(data) {
+  fillDealCard();   // the deals card above the recap loads on its own, so a problem there never hides the recap
   const r = data.recap;
   $("recapEmpty").classList.toggle("hidden", !!r);
   $("recapBody").classList.toggle("hidden", !r);
@@ -726,6 +777,66 @@ function renderRecap(data) {
   $("starLine").innerHTML = "<strong>Stars:</strong> "
     + r.stars.map(s => `${esc(s.player)} (${s.points} pts, ${mgr(s.team)})`).join(" · ");
   $("starLine").classList.toggle("hidden", !r.stars.length);   // stars so far: only while the games are on
+}
+
+// ---------------------------------------------------------------- deals
+
+// the server works out every verdict and writes every line (see league_deals in app.py); this just draws them
+const swingText = n => (n > 0 ? "+" : n < 0 ? "−" : "") + Math.abs(n);
+const pointsText = n => `${n} point${Math.abs(n) === 1 ? "" : "s"}`;
+const LABEL_CLASS = { "Worth it": "good", "Ahead so far": "good", "Regretted": "bad", "Behind so far": "bad" };
+
+function dealItem(it) {
+  const lines = it.lines.map(l => `<p class="say ${esc(l.tone)}">${rich(l.text)}</p>`).join("");
+  return `<article class="deal ${esc(it.kind)}"><div class="head">${esc(it.heading)}</div>${lines}`
+    + (it.detail ? `<div class="note">${rich(it.detail)}</div>` : "")
+    + `<div class="note">${esc(it.note)}</div></article>`;
+}
+
+async function fillDealCard() {
+  const forLeague = leagueId;
+  try {
+    const data = await getJson(`/api/league/${forLeague}/deals`);
+    if (forLeague !== leagueId) return;   // they opened another league while this was loading
+    const d = data.deals;
+    $("dealsCard").classList.toggle("hidden", !d);
+    if (!d) return;
+    $("dealsWeek").textContent = `Deals of the week: GW${d.gameweek}`;
+    $("dealItems").innerHTML = d.items.length ? d.items.map(dealItem).join("")
+      : `<p class="sub">A quiet market: no trades or standout moves to talk about this week.</p>`;
+  } catch (e) {
+    $("dealsCard").classList.add("hidden");
+  }
+}
+
+function tradeSide(s) {
+  const players = s.got.map(p => `<li><span>${esc(p.name)}</span><span class="pts">${p.points}</span></li>`).join("");
+  return `<div class="tside"><div class="tname">${mgr(s.team)}`
+    + `<span class="chip ${LABEL_CLASS[s.label] || ""}">${esc(s.label)}</span></div>`
+    + `<div class="note">Got ${pointsText(s.got_points)}, gave up ${s.gave_points} (${swingText(s.swing)})</div>`
+    + `<ul class="plist">${players}</ul></div>`;
+}
+
+function tradeCard(t) {
+  const running = t.running.map(r => `<span class="rchip ${r.swing > 0 ? "up" : r.swing < 0 ? "down" : ""}">GW${r.gw} ${swingText(r.swing)}</span>`).join("");
+  const when = t.weeks ? `${t.weeks} finished gameweek${t.weeks === 1 ? "" : "s"}, from GW${t.first_gw}`
+    : `waiting for GW${t.first_gw ?? "?"} to finish`;
+  return `<article class="tracker"><div class="thead">${mgr(t.a.team)} ⇄ ${mgr(t.b.team)} <span class="note">${when}</span></div>`
+    + `<div class="tsides">${tradeSide(t.a)}${tradeSide(t.b)}</div>`
+    + (running ? `<div class="running"><span class="note">Running swing for ${mgr(t.a.team)}:</span>${running}</div>` : "")
+    + t.lines.map(l => `<p class="say ${esc(l.tone)}">${rich(l.text)}</p>`).join("") + `</article>`;
+}
+
+function renderDeals(data) {
+  const d = data.deals;
+  $("dealsEmpty").classList.toggle("hidden", !!d);
+  $("dealsBody").classList.toggle("hidden", !d);
+  if (!d) {
+    $("dealsEmpty").textContent = "The trade tracker starts once a gameweek has finished.";
+    return;
+  }
+  $("tradeList").innerHTML = d.trades.length ? d.trades.map(tradeCard).join("")
+    : `<p class="sub">No trades yet this season. When two managers do a deal it shows up here and is scored every gameweek.</p>`;
 }
 
 // ---------------------------------------------------------------- charts
@@ -1087,6 +1198,7 @@ $("choices").addEventListener("click", e => {
   const b = e.target.closest(".choice"); if (b) openTab(b.dataset.tab);
 });
 $("moreFacts").addEventListener("click", () => { showAll = !showAll; renderFacts(); });
+$("allTrades").addEventListener("click", () => openTab("deals"));
 $("myMatches").addEventListener("click", e => {
   if (e.target.closest("#moreMatches")) { showAllMatches = !showAllMatches; drawMyMatches(); }
 });
@@ -1109,8 +1221,8 @@ $("teamForm").addEventListener("submit", e => {
   location.href = "/?team=" + team + "&league=" + leagueId;
 });
 
-// the link to send is the address bar's /league?league=12345 (add &tab=banter, &tab=recap, &tab=charts or
-// &tab=rivalries to open straight on one). Nobody has to type a team ID: someone new is asked who they are
+// the link to send is the address bar's /league?league=12345 (add &tab=banter, &tab=recap, &tab=deals,
+// &tab=charts or &tab=rivalries to open straight on one). Nobody has to type a team ID: someone new is asked who they are
 // in a pop-up (see askWho), once per device.
 // Without &full=1 the page has no way into the rest of Draft Scout, so it can be shared as a view-only page.
 // With &full=1 it also shows the way back and My team. That's a convenience, not a lock: anyone who adds
