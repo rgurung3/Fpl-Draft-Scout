@@ -3530,6 +3530,16 @@ def test_league_hub_charts_page_has_the_squad_strength_chart_for_everyone():
     assert "What the rating is made of" in page and "running ${p.heat}" in page
 
 
+def test_league_hub_charts_page_draws_how_strength_has_moved():
+    res = app.app.test_client().get("/league?league=123")
+    page = res.data.decode()
+    res.close()
+    assert 'id="strengthChart"' in page and "function renderStrengthChart" in page   # strength over time
+    assert page.index('id="strengthWrap"') < page.index('id="squads"')               # chart above the bars
+    assert "function movedBlock" in page and "Since the end of GW" in page           # block in an opened row
+    assert "m.movement" in page and "SQ.since" in page                               # change next to each bar
+
+
 # ---------------------------------------------------------------- saved squad strength
 
 def strength_snap(strength, day):
@@ -3611,6 +3621,166 @@ def test_the_snapshot_script_still_keeps_the_results_when_strengths_cant_be_load
     monkeypatch.setattr(app, "load_league", blocked)
     save_snapshot.save_strength(52607)           # prints a warning and carries on, it doesn't raise
     assert "Couldn't save the squad strengths" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- how squad strength has moved
+
+def saved_day(gw, date, *managers, view="week", names=None):
+    """
+    A saved strength snapshot as read back from the file. Each manager is (entry_id, strength, xi),
+    xi being [[player id, rating], ...]; the pieces are half form, half fixtures, like squad_data's.
+    """
+    def entry(eid, strength, xi):
+        half = round(sum(r for _, r in xi) / len(xi) / 2, 1) if xi else 0
+        return {"entry_id": eid, "team": f"Team {eid}", "manager": "A B",
+                view: {"strength": strength, "formation": "0-0-0", "xi": xi,
+                       "pieces": {"form": half, "fix": half}}}
+
+    return {"date": date, "current_gw": gw, "next_gw": gw + 1, "windows": {},
+            "managers": [entry(*m) for m in managers],
+            "players": {"1": "Raya", "2": "Saka", "3": "Gabriel", "4": "Haaland"} if names is None else names}
+
+
+def live_data(strength, scores, xi, view="week", gw=7):
+    """What load_league gives, cut down to what strength_moves reads: one manager (100) with players."""
+    names = {1: "Raya", 2: "Saka", 3: "Gabriel", 4: "Haaland"}
+    return {"view": view, "current_gw": gw,
+            "players": [{"id": i, "name": names[i], "score": s, "breakdown": {"form": s / 2, "fix": s / 2}}
+                        for i, s in scores.items()],
+            "managers": [{"entry_id": 100, "team_name": "Team 100", "manager": "A B",
+                          "strength": strength, "best_xi": xi}]}
+
+
+# last gameweek Raya 70, Saka 60 and Gabriel 50 (strength 60.0); now Raya is up 6, Saka down 2, and
+# Haaland (80) has come in for Gabriel
+BEFORE = saved_day(6, "2026-10-16", (100, 60.0, [[1, 70.0], [2, 60.0], [3, 50.0]]))
+NOW = live_data(71.3, {1: 76.0, 2: 58.0, 3: 49.0, 4: 80.0}, [1, 2, 4])
+
+
+def test_strength_baseline_is_the_last_snapshot_saved_before_this_gameweek():
+    days = [saved_day(5, "2026-10-09"), saved_day(6, "2026-10-14"), saved_day(6, "2026-10-16"),
+            saved_day(7, "2026-10-17")]
+    assert app.strength_baseline(days, 7)["date"] == "2026-10-16"     # the end of GW6, not the start of GW7
+    assert app.strength_baseline(days, 8)["date"] == "2026-10-17"
+    assert app.strength_baseline(days, 5) is None                      # nothing from before GW5
+    assert app.strength_baseline(days[1:3], 6) is None                 # only this gameweek so far
+    assert app.strength_baseline([], 7) is None
+
+
+def test_the_change_in_strength_splits_into_same_players_and_different_players():
+    move = app.strength_moves(NOW, BEFORE)[100]
+    assert (move["from"], move["to"], move["change"]) == (60.0, 71.3, 11.3)
+    # Raya +6 and Saka -2 are 4 rating points over 3 players; Haaland (80) for Gabriel (50) is 30 over 3
+    assert move["same_players"] == 1.3 and move["new_players"] == 10.0
+    assert move["same_players"] + move["new_players"] == move["change"]
+    assert move["came_in"] == [{"name": "Haaland", "rating": 80.0}]
+    assert move["went_out"] == [{"name": "Gabriel", "rating": 50.0}]      # his rating then, from the file
+    assert move["riser"] == {"name": "Raya", "change": 6.0}
+    assert move["faller"] == {"name": "Saka", "change": -2.0}
+
+
+def test_strength_moves_say_how_the_pieces_of_the_strength_changed():
+    pieces = app.strength_moves(NOW, BEFORE)[100]["pieces"]
+    # form and fixtures were 30.0 each; now (76 + 58 + 80) / 3 / 2 = 35.7 each
+    assert pieces["form"] == pieces["fix"] == 5.7
+    assert pieces["xgi"] == 0 and pieces["avail"] == 0                     # not missing: nothing moved
+
+
+def test_with_the_same_eleven_nothing_came_in_and_small_moves_are_not_risers():
+    # ratings wobble by less than MOVER_MIN_RATING and cancel out: nothing to report
+    now = live_data(60.0, {1: 70.4, 2: 59.6, 3: 50.0}, [1, 2, 3])
+    move = app.strength_moves(now, BEFORE)[100]
+    assert move["came_in"] == [] and move["went_out"] == []
+    assert move["riser"] is None and move["faller"] is None
+    shown = [str(move[k]) for k in ("change", "same_players", "new_players")]
+    assert shown == ["0.0", "0.0", "0.0"]                                  # never -0.0
+
+
+def test_a_player_the_file_has_no_name_for_is_still_listed_as_gone():
+    before = saved_day(6, "2026-10-16", (100, 60.0, [[1, 70.0], [2, 60.0], [3, 50.0]]), names={})
+    assert app.strength_moves(NOW, before)[100]["went_out"] == [{"name": "A player", "rating": 50.0}]
+
+
+def test_strength_moves_leave_out_a_manager_it_cannot_compare():
+    baseline = saved_day(6, "2026-10-16", (100, 60.0, [[1, 70.0], [2, 60.0], [3, 50.0]]),
+                         (300, 50.0, [[1, 50.0]]))
+    assert set(app.strength_moves(NOW, baseline)) == {100}
+    assert app.strength_moves(live_data(0, {1: 70.0}, []), baseline) == {}            # no eleven now
+    assert app.strength_moves(live_data(70.0, {1: 70.0, 2: 70.0}, [1, 2]), baseline) == {}   # 2 players v 3
+    assert app.strength_moves(live_data(60.0, {1: 70.0, 2: 60.0, 3: 50.0}, [1, 2, 3], view="season"),
+                              baseline) == {}                                       # the file only has "week"
+
+
+def day_for_chart(gw, date, strength_100, strength_200=None, view="week"):
+    managers = [(100, strength_100, [[1, strength_100]])]
+    if strength_200 is not None:
+        managers.append((200, strength_200, [[2, strength_200]]))
+    return saved_day(gw, date, *managers, view=view)
+
+
+def test_the_strength_chart_has_every_saved_day_and_one_line_per_manager():
+    days = [day_for_chart(6, "2026-10-14", 60.0, 50.0), day_for_chart(6, "2026-10-16", 61.0),
+            day_for_chart(7, "2026-10-17", 62.0, 55.0)]
+    data = {**live_data(62.0, {1: 62.0}, [1]), "managers": [
+        {"entry_id": 100, "team_name": "Team 100"}, {"entry_id": 200, "team_name": "Team 200"},
+        {"entry_id": 300, "team_name": "Never saved"}]}
+    chart = app.strength_chart(data, days)
+    assert chart["days"] == [{"date": "2026-10-14", "gw": 6}, {"date": "2026-10-16", "gw": 6},
+                             {"date": "2026-10-17", "gw": 7}]
+    assert chart["lines"] == [{"entry_id": 100, "team": "Team 100", "values": [60.0, 61.0, 62.0]},
+                              {"entry_id": 200, "team": "Team 200", "values": [50.0, None, 55.0]}]
+    # a day a manager isn't in is None, and a manager who was never saved gets no line at all
+
+
+def test_the_strength_chart_follows_the_chosen_view_and_needs_two_days():
+    days = [day_for_chart(6, "2026-10-14", 60.0), day_for_chart(7, "2026-10-17", 65.0)]
+    assert app.strength_chart(live_data(0, {}, [], view="season"), days)["lines"] == []   # no "season" saved
+    assert app.strength_chart(live_data(0, {}, []), days[:1]) is None
+    assert app.strength_chart(live_data(0, {}, []), []) is None
+
+
+def test_strength_history_waits_for_a_snapshot_from_an_earlier_gameweek():
+    days = [BEFORE, saved_day(7, "2026-10-17", (100, 65.0, [[1, 65.0]]))]
+    history = app.strength_history(NOW, days)
+    assert history["since"] == {"gw": 6, "date": "2026-10-16"}
+    assert set(history["moves"]) == {100} and history["chart"] is not None
+    early = app.strength_history(live_data(60.0, {1: 60.0}, [1], gw=6), days[:1])
+    assert early == {"since": None, "moves": {}, "chart": None}
+
+
+def test_saved_strengths_reads_this_seasons_file_and_copes_with_a_missing_or_broken_one(tmp_path):
+    today = datetime(2026, 10, 12)
+    assert app.saved_strengths(5, today, tmp_path) == []                    # no file yet
+    app.save_strength(5, strength_snap(60.0, today), folder=tmp_path)
+    app.save_strength(5, strength_snap(62.5, datetime(2026, 10, 13)), folder=tmp_path)
+    days = app.saved_strengths(5, datetime(2026, 10, 14), tmp_path)
+    assert [d["date"] for d in days] == ["2026-10-12", "2026-10-13"]
+    assert app.saved_strengths(5, datetime(2027, 8, 1), tmp_path) == []     # a new season starts a new file
+    app.strength_path(5, "2026-27", tmp_path).write_text("{oops", encoding="utf-8")
+    assert app.saved_strengths(5, today, tmp_path) == []                    # the page just has no history
+
+
+def test_squads_route_adds_movement_since_the_last_gameweek(two_managers, monkeypatch):
+    by_view = {view: app.load_league(123, view) for view in app.VIEWS}
+    earlier = {**app.strength_snapshot(by_view, today=datetime(2026, 10, 16)), "current_gw": 5}
+    later = {**earlier, "date": "2026-10-17", "current_gw": 6}
+    monkeypatch.setattr(app, "saved_strengths", lambda league_id: [earlier, later])
+    data = app.app.test_client().get("/api/league/123/squads").get_json()
+    assert data["since"] == {"gw": 5, "date": "2026-10-16"}    # GW6 is on, so the end of GW5 is the baseline
+    assert [d["gw"] for d in data["chart"]["days"]] == [5, 6]
+    for m in data["managers"]:
+        assert m["movement"]["change"] == 0 and m["movement"]["came_in"] == []   # the same squads as then
+        assert m["movement"]["from"] == m["movement"]["to"] == m["strength"]
+    lines = {line["entry_id"]: line["values"] for line in data["chart"]["lines"]}
+    for m in data["managers"]:
+        assert lines[m["entry_id"]] == [m["strength"], m["strength"]]
+
+
+def test_squads_route_has_no_movement_until_there_is_history(two_managers, monkeypatch):
+    monkeypatch.setattr(app, "saved_strengths", lambda league_id: [])
+    data = app.app.test_client().get("/api/league/123/squads").get_json()
+    assert data["since"] is None and data["chart"] is None
+    assert all(m["movement"] is None for m in data["managers"])
 
 
 # ---------------------------------------------------------------- season awards and your matches

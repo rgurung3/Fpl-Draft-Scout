@@ -37,6 +37,7 @@ SEASON_STARTS_IN = 7    # a new season starts in July: a snapshot taken from Jul
 MIN_MINUTES = 180       # per-90 stats count in full from this many minutes (in proportion below it)
 SCALE_PERCENTILE = 95   # each stat is measured against this percentile of regular players
 HOT_COLD_GAP = 1.5      # "running hot" (or cold): form this far above (below) a regular's points per game
+MOVER_MIN_RATING = 1    # a rating must move this many points since last gameweek to name a riser or faller
 EDGE_MIN_STRENGTH = 2.0  # a side whose squad (best-eleven strength) is this much stronger is the favourite
 FORM_LENGTH = 5         # how many recent results "Your matches" shows for each side
 AWARD_MIN_WEEKS = 3     # the season awards start once this many gameweeks have finished
@@ -1790,6 +1791,119 @@ def save_strength(league_id, snapshot, folder=HISTORY_DIR):
     return path
 
 
+# ---------------------------------------------------------------- how squad strength has moved
+
+def tidy(x):
+    """A number rounded to 0.1 that is never -0.0 (adding 0.0 turns -0.0 into 0.0)."""
+    return round(x, 1) + 0.0
+
+
+def saved_strengths(league_id, today=None, folder=HISTORY_DIR):
+    """
+    This season's saved strength snapshots, oldest first. [] if there's no file yet or it can't be
+    read: the page then just has no history to show (save_strength is the one that refuses to
+    write over a file it can't read).
+    """
+    try:
+        return json.loads(strength_path(league_id, season_label(today), folder)
+                          .read_text(encoding="utf-8"))["snapshots"]
+    except (OSError, ValueError, KeyError):
+        return []
+
+
+def strength_baseline(snapshots, current_gw):
+    """
+    The snapshot to compare today with: the last one saved before this gameweek began, so the
+    comparison is "since the end of last gameweek" and not "since 7 days ago". None if every
+    saved snapshot is from this gameweek (or later).
+    """
+    earlier = [s for s in snapshots if s["current_gw"] < current_gw]
+    return earlier[-1] if earlier else None
+
+
+def strength_moves(data, baseline):
+    """
+    How each manager's best eleven has moved since the baseline snapshot, worked out from the live
+    numbers in data (load_league's data for one view), so the change lines up with the strength
+    the page shows. Strength is the average rating of the eleven, so a player's rating change
+    counts for 1/11 of it, and the change splits exactly in two:
+      same_players: players in both elevens, whose ratings moved (form, fixtures...), and
+      new_players: different players in the eleven (a waiver claim or trade, or an injury or a
+                   bench player forcing his way in), the ratings of those who came in minus those
+                   who left.
+    Both are rounded so that same_players + new_players is change, the difference of the two
+    strengths the page shows. "pieces" is the change in what the strength is made of (see
+    xi_pieces), for the whole eleven: the saved file keeps each player's rating but not his pieces,
+    so it can't be split between the two groups. Also who came in and went out (name, rating then
+    or now) and the biggest riser and faller among the players who stayed (at least MOVER_MIN_RATING).
+    Returns {entry_id: move}; a manager is left out if they weren't in the baseline, have no eleven,
+    or have a different number of players in it (the maths needs both elevens the same size).
+    """
+    view = data["view"]
+    by_id = {p["id"]: p for p in data["players"]}
+    before = {m["entry_id"]: m for m in baseline["managers"]}
+    moves = {}
+    for m in data["managers"]:
+        old = before.get(m["entry_id"], {}).get(view)
+        xi = [by_id[i] for i in m["best_xi"]]
+        if not old or not xi or len(old["xi"]) != len(xi):
+            continue
+        was = {pid: rating for pid, rating in old["xi"]}
+        stayed = [p for p in xi if p["id"] in was]
+        came_in = sorted((p for p in xi if p["id"] not in was), key=lambda p: -p["score"])
+        went_out = sorted((pair for pair in old["xi"] if pair[0] not in m["best_xi"]),
+                          key=lambda pair: -pair[1])
+        moved = sorted((p["score"] - was[p["id"]], p["name"]) for p in stayed)
+        change = tidy(m["strength"] - old["strength"])
+        same = tidy(sum(p["score"] - was[p["id"]] for p in stayed) / len(xi))
+        now_pieces = xi_pieces(xi)
+        moves[m["entry_id"]] = {
+            "from": old["strength"], "to": m["strength"], "change": change,
+            "same_players": same, "new_players": tidy(change - same),
+            "pieces": {k: tidy(v - old["pieces"].get(k, 0)) for k, v in now_pieces.items()},
+            "came_in": [{"name": p["name"], "rating": p["score"]} for p in came_in],
+            "went_out": [{"name": baseline["players"].get(str(pid), "A player"), "rating": rating}
+                         for pid, rating in went_out],
+            "riser": ({"name": moved[-1][1], "change": tidy(moved[-1][0])}
+                      if moved and moved[-1][0] >= MOVER_MIN_RATING else None),
+            "faller": ({"name": moved[0][1], "change": tidy(moved[0][0])}
+                       if moved and moved[0][0] <= -MOVER_MIN_RATING else None)}
+    return moves
+
+
+def strength_chart(data, snapshots):
+    """
+    What the strength-over-time chart draws: every saved day, with its gameweek, and for each
+    manager their strength on each day in the chosen view (None on a day they weren't saved).
+    Today's live number isn't added, so the last point is the latest saved day. None until two
+    days are saved: one point isn't a line.
+    """
+    if len(snapshots) < 2:
+        return None
+    view = data["view"]
+    saved = [{x["entry_id"]: x for x in s["managers"]} for s in snapshots]
+    lines = []
+    for m in data["managers"]:
+        values = [day[m["entry_id"]][view]["strength"] if view in day.get(m["entry_id"], {}) else None
+                  for day in saved]
+        if any(v is not None for v in values):
+            lines.append({"entry_id": m["entry_id"], "team": m["team_name"], "values": values})
+    return {"days": [{"date": s["date"], "gw": s["current_gw"]} for s in snapshots], "lines": lines}
+
+
+def strength_history(data, snapshots):
+    """
+    The squad strength page's history, from load_league's data and the saved snapshots (see
+    saved_strengths): "since" (the gameweek and date of the baseline), "moves" (see strength_moves)
+    and "chart" (see strength_chart). "since" is None, and moves empty, until a snapshot from an
+    earlier gameweek exists.
+    """
+    baseline = strength_baseline(snapshots, data["current_gw"])
+    return {"since": {"gw": baseline["current_gw"], "date": baseline["date"]} if baseline else None,
+            "moves": strength_moves(data, baseline) if baseline else {},
+            "chart": strength_chart(data, snapshots)}
+
+
 # ---------------------------------------------------------------- weekly recap
 
 def clean_name(name):
@@ -3216,12 +3330,21 @@ def rivalries(league_id):
 
 @app.route("/api/league/<int:league_id>/squads")
 def squads(league_id):
-    """Every manager's squad strength, best eleven and bench, for the league page (see league_squads)."""
+    """
+    Every manager's squad strength, best eleven and bench, for the league page (see league_squads),
+    plus how it has moved: each manager's "movement" since the end of the last gameweek, "since"
+    (which gameweek that was) and "chart" (strength on every saved day). See strength_history.
+    """
     try:
         data = load_league(league_id, request.args.get("view", "week"))
     except FplError as e:
         return jsonify({"error": e.message}), e.status
-    return jsonify({"league_id": league_id, "league_name": data["league_name"], **league_squads(data)})
+    out = league_squads(data)
+    history = strength_history(data, saved_strengths(league_id))
+    for m in out["managers"]:
+        m["movement"] = history["moves"].get(m["entry_id"])
+    return jsonify({"league_id": league_id, "league_name": data["league_name"], **out,
+                    "since": history["since"], "chart": history["chart"]})
 
 
 @app.route("/api/league/<int:league_id>/recap")
