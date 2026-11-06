@@ -6,6 +6,7 @@ Run:  python app.py   then open http://127.0.0.1:5000
 import json
 import math
 import os
+import random
 import re
 import threading
 import time
@@ -1360,17 +1361,57 @@ def season_awards(played, names, place, luck):
     return awards
 
 
-def league_banter(details):
+def pair_record(snapshots, a, b, names):
+    """
+    How two managers have got on against each other, for the match-up cards: {won (a's), drawn, lost (b's),
+    meetings, line}. snapshots are the saved seasons plus this one, oldest first (see season_snapshots), so
+    the record covers every season we have. line is one sentence, names marked for bold (see mark): "First
+    meeting on record.", or when they've met, how many times and the latest result. A season is only named
+    for a meeting from an earlier season than the newest one. names is {team ID: team name}.
+    """
+    found = league_rivalry(list(snapshots), a, b)
+    record, meetings = found["record"], found["meetings"]
+    summary = {"won": record["a_won"], "drawn": record["drawn"], "lost": record["b_won"],
+               "meetings": len(meetings)}
+    if not meetings:
+        return {**summary, "line": "First meeting on record."}
+    first, second = mark(names[a]), mark(names[b])
+    last = meetings[-1]
+    when = f"GW{last['gw']}"
+    if last["season"] != snapshots[-1]["season"]:
+        when += f" of {last['season']}"
+    if last["winner"] == "a":
+        result = f"{first} won {last['a_points']}-{last['b_points']}"
+    elif last["winner"] == "b":
+        result = f"{second} won {last['b_points']}-{last['a_points']}"
+    else:
+        result = f"{first} and {second} drew {last['a_points']}-{last['b_points']}"
+    if len(meetings) == 1:
+        return {**summary, "line": f"Met once, in {when}: {result}."}
+    wins, losses = record["a_won"], record["b_won"]
+    standing = (f"All square at {wins}-{losses}" if wins == losses
+                else f"{first if wins > losses else second} lead {max(wins, losses)}-{min(wins, losses)}")
+    if record["drawn"]:
+        standing += f" ({record['drawn']} drawn)"
+    return {**summary, "line": f"Met {len(meetings)} times: {standing}. Last, in {when}: {result}."}
+
+
+def league_banter(details, snapshots=()):
     """
     Fun facts and match-ups for a head-to-head league, worked out from the league
     details (matches and table) with no extra requests. Returns None if no gameweek
     has finished yet or the league isn't head-to-head, like league_history.
+    snapshots (the saved seasons plus this one, see season_snapshots) are optional: with them each match-up
+    card also has a "record" of how the two managers have got on against each other (see pair_record).
 
     hot_match, and the two cards in battles, are three different matches from the next
     gameweek, so no manager is on two cards: hot_match is the best-placed pair, "Battle for
     3rd" the pair closest to 3rd place, and "Wooden spoon watch" the lowest-placed pair.
-    Each card has a short "line" (how far apart they are) and a "tease" (a line of banter,
-    see CARD_TEASES). Cards are left out when the gameweek has too few matches.
+    Each card has a short "line" (how far apart they are), a "tease" (a line of banter,
+    see CARD_TEASES) and a "record" (None without snapshots). Cards are left out when the
+    gameweek has too few matches.
+    scoring: every manager in table order with their points_for and points_against over their finished
+    matches and their league_points, for the points scored and conceded chart.
     facts: up to FACT_COUNT one-sentence facts, best first, each {kind, text}. These are the
     season's records, so they only change when someone breaks one.
     week: {gw, facts}, the same kind of facts about the latest finished gameweek only (its best
@@ -1432,7 +1473,9 @@ def league_banter(details):
         gap = gap_of(m)
         apart = f"{gap} {'point' if gap == 1 else 'points'} apart." if gap else "Level on league points."
         return {**extra, "gw": m["gw"], "a": person(m["a"]), "b": person(m["b"]), "gap": gap, "line": apart,
-                "tease": banter_wording(CARD_TEASES[kind], kind, m["gw"])}
+                "tease": banter_wording(CARD_TEASES[kind], kind, m["gw"]),
+                "record": (pair_record(snapshots, m["a"], m["b"], {e: name(e) for e in order})
+                           if snapshots else None)}
 
     hot, battles = None, []
     week = [m for m in coming if m["gw"] == coming[0]["gw"]] if coming else []
@@ -1565,8 +1608,16 @@ def league_banter(details):
                     new=ordinal(after[entry]), gw=latest)})
 
     awards = season_awards(played, {e: name(e) for e in order}, {e: table[e][0] for e in order}, luck)
+    scored, conceded = {e: 0 for e in order}, {e: 0 for e in order}
+    for m in played:
+        scored[m["a"]] += m["pa"]
+        conceded[m["a"]] += m["pb"]
+        scored[m["b"]] += m["pb"]
+        conceded[m["b"]] += m["pa"]
+    scoring = [{"entry_id": e, "team": name(e), "points_for": scored[e], "points_against": conceded[e],
+                "league_points": table[e][1]} for e in order]
     return {"gws": history["gws"], "hot_match": hot, "battles": battles, "facts": facts[:FACT_COUNT],
-            "week": {"gw": latest, "facts": this_week}, "luck": luck, "awards": awards}
+            "week": {"gw": latest, "facts": this_week}, "luck": luck, "awards": awards, "scoring": scoring}
 
 
 def league_people(details):
@@ -1745,6 +1796,124 @@ def league_charts(details):
                              "vs": [opponents[o] for o in order if o in opponents]})
     return {"history": history, "managers": managers, "head_to_head": head_to_head,
             "places": league_places(history, {m["entry_id"]: m["team"] for m in managers})}
+
+
+# ---------------------------------------------------------------- season odds (head-to-head)
+
+ODDS_RUNS = 4000        # how many seasons are played out
+ODDS_MIN_WEEKS = 3      # the odds start once this many gameweeks have finished
+ODDS_PRIOR_WEEKS = 5    # weeks of the league's average score mixed into each manager's own average
+ODDS_STRENGTH_SD = 4    # points: how far a manager's true weekly average may sit from our estimate of it
+ODDS_MIN_SD = 1.0       # a floor for the week-to-week spread, so identical scores can't make it zero
+ODDS_KEPT = 20          # odds kept in memory (one per league and result)
+_odds = {}
+_odds_lock = threading.Lock()
+
+
+def percent_text(p):
+    """0.714 -> '71%'; a chance under 1% (but not 0) -> 'under 1%'."""
+    return "under 1%" if 0 < p < 0.01 else f"{round(p * 100)}%"
+
+
+def season_odds(details, runs=None):
+    """
+    Each manager's chance of every finishing place, from playing the rest of the season out `runs` times
+    (ODDS_RUNS). A guide, not a prediction. Returns None until ODDS_MIN_WEEKS gameweeks have finished or if
+    the league isn't head-to-head, like league_history.
+
+    How: each manager's weekly score is a normal curve around their average so far, with the spread the
+    league's managers show week to week (one spread for everybody: a few weeks of scores are too few to
+    measure each manager's own). Their average is pulled towards the league average (ODDS_PRIOR_WEEKS weeks'
+    worth) because early on a hot start says less than it seems to, and in every simulated season each
+    manager's true average is also nudged up or down by about ODDS_STRENGTH_SD points, because the scores so
+    far can't pin down how good a squad is and squads change. Without that nudge the leader looked 93% to
+    win after nine gameweeks. Every match still to play (the fixture list is in the league details) is then
+    decided on that week's two scores, 3 points for a win and 1 for a draw as in the table, on top of the
+    real table; points scored break ties, as in the real table. Nothing else is known to it: squads,
+    injuries and fixtures don't count. The random numbers are seeded from the results, so the same results
+    always give the same odds.
+
+    Returns {runs, gws_played, gws_left, managers, lines}. managers are in table order, each {entry_id, team,
+    manager, place (now), league_points, average (the average the simulation used), odds (the chance of each
+    place, 1st first, adding up to 1), win, top3, last, expected_place}. lines are the headline sentences
+    (names marked for bold): the title favourite and the wooden spoon favourite.
+    """
+    runs = ODDS_RUNS if runs is None else runs
+    history = league_history(details)
+    if history is None or len(history["gws"]) < ODDS_MIN_WEEKS:
+        return None
+    entries = {e["entry_id"]: e for e in details.get("league_entries", []) if e.get("entry_id")}
+    entry_of = {e.get("id"): e["entry_id"] for e in entries.values()}
+    ids = [m["entry_id"] for m in history["managers"]]   # table order
+    scores = {m["entry_id"]: [p for p in m["points"] if p is not None] for m in history["managers"]}
+    every = [p for s in scores.values() for p in s]
+    league_average = sum(every) / len(every)
+
+    def variance(values):
+        mean = sum(values) / len(values)
+        return sum((v - mean) ** 2 for v in values) / len(values)
+
+    spreads = [variance(s) for s in scores.values() if len(s) >= 2]
+    sd = max(math.sqrt(sum(spreads) / len(spreads)) if spreads else 0, ODDS_MIN_SD)
+    average = {t: (sum(s) + ODDS_PRIOR_WEEKS * league_average) / (len(s) + ODDS_PRIOR_WEEKS)
+               for t, s in scores.items()}
+
+    left = []   # the matches still to play, as (team ID, team ID)
+    for m in details.get("matches", []):
+        a, b = entry_of.get(m.get("league_entry_1")), entry_of.get(m.get("league_entry_2"))
+        if not m.get("finished") and m.get("event") and a in scores and b in scores:
+            left.append((m["event"], a, b))
+    start_points = {m["entry_id"]: m["league_points"][-1] for m in history["managers"]}
+    start_scored = {m["entry_id"]: m["scored"] for m in history["managers"]}
+
+    rng = random.Random(f"{history['gws'][-1]}-{len(left)}-{runs}")
+    size = len(ids)
+    count = {t: [0] * size for t in ids}
+    for _ in range(runs):
+        strength = {t: average[t] + rng.gauss(0, ODDS_STRENGTH_SD) for t in ids}
+        points, scored = dict(start_points), dict(start_scored)
+        for _gw, a, b in left:
+            sa, sb = round(rng.gauss(strength[a], sd)), round(rng.gauss(strength[b], sd))
+            scored[a] += sa
+            scored[b] += sb
+            if sa == sb:
+                points[a] += DRAW_POINTS
+                points[b] += DRAW_POINTS
+            else:
+                points[a if sa > sb else b] += WIN_POINTS
+        for place, t in enumerate(sorted(ids, key=lambda t: (points[t], scored[t]), reverse=True)):
+            count[t][place] += 1
+
+    managers = []
+    for place, t in enumerate(ids, 1):
+        odds = [c / runs for c in count[t]]
+        info = entries.get(t, {})
+        managers.append({
+            "entry_id": t, "team": info.get("entry_name") or f"Team {t}",
+            "manager": f'{info.get("player_first_name", "")} {info.get("player_last_name", "")}'.strip(),
+            "place": place, "league_points": start_points[t], "average": round(average[t], 1),
+            "odds": [round(p, 4) for p in odds], "win": round(odds[0], 4), "top3": round(sum(odds[:3]), 4),
+            "last": round(odds[-1], 4),
+            "expected_place": round(sum((i + 1) * p for i, p in enumerate(odds)), 1)})
+    favourite = max(managers, key=lambda m: (m["win"], -m["place"]))
+    spoon = max(managers, key=lambda m: (m["last"], m["place"]))
+    lines = [f"Title favourite: {mark(favourite['team'])}, {percent_text(favourite['win'])}.",
+             f"Wooden spoon favourite: {mark(spoon['team'])}, {percent_text(spoon['last'])}."]
+    return {"runs": runs, "gws_played": len(history["gws"]), "gws_left": len({gw for gw, _, _ in left}),
+            "managers": managers, "lines": lines}
+
+
+def get_odds(league_id, details):
+    """season_odds, worked out once for each league and set of results, then kept (it takes a second)."""
+    matches = details.get("matches", [])
+    finished = [m for m in matches if m.get("finished") and m.get("event")]
+    key = (league_id, max((m["event"] for m in finished), default=0), len(finished), len(matches))
+    with _odds_lock:
+        if key not in _odds:
+            _odds[key] = season_odds(details)
+            while len(_odds) > ODDS_KEPT:
+                _odds.pop(next(iter(_odds)))
+        return _odds[key]
 
 
 # ---------------------------------------------------------------- saved seasons and rivalries
@@ -3469,6 +3638,225 @@ def load_deals(league_id):
     return {"league_id": league_id, "league_name": name, "deals": deals}
 
 
+# ---------------------------------------------------------------- moves (is being active paying off?)
+
+MOVES_SHARP_MIN = 3      # a manager needs this many moves to be named the sharpest or the busiest
+MOVES_BEST_SHOWN = 3     # how many of the best (and worst) single moves the page lists
+
+# The lines under the moves chart: three wordings each, picked by the gameweek like BANTER_LINES. {t} is a
+# team name (marked), {moves} a count of moves ("7 moves"), and {net} and {per} are points with their unit
+# already on ("132 points"); the direction is in the words.
+MOVE_LINES = {
+    "moves_top": (   # t, moves, net
+        "{t} lead the waiver wire: {moves}, {net} ahead of the players they let go. "
+        "It's basically a second job.",
+        "{t} have made the most of the wire: {net} from {moves}. Somebody give them a desk.",
+        "{moves} for {t} and {net} to show for it. The wire loves them.",
+    ),
+    "moves_sharp": (   # t, moves, per
+        "Sharpest eye on the wire: {t}, {per} a move over {moves}.",
+        "{t} don't miss much: {per} a move from {moves}.",
+        "If every move were like {t}'s ({per} each over {moves}), the wire would be rigged.",
+    ),
+    "moves_busy": (   # t, moves, net
+        "{t} have made {moves} for {net} in total. A lot of effort for not much to show.",
+        "{moves} and only {net} for {t}. The wire is open, nobody said it had to be busy.",
+        "{t} are the busiest on the wire ({moves}) and it has paid {net}. Quantity over quality.",
+    ),
+    "moves_red": (   # t, moves, net
+        "{t} made {moves} and lost {net} on them. The players they let go had the last laugh.",
+        "{t}'s moves have cost {net} so far. The players they dropped are doing fine, thanks.",
+        "{moves}, {net} down, for {t}. Hindsight is a cruel teacher.",
+    ),
+    "moves_idle": (   # t
+        "{t} haven't touched the waiver wire all season. It's open, you know.",
+        "No moves at all from {t}. The squad they drafted is the squad they're keeping, for better or worse.",
+        "{t} have left the wire alone all season. Brave, or they forgot the password.",
+    ),
+}
+
+
+def moves_word(n):
+    """7 -> '7 moves', 1 -> '1 move'."""
+    return f"{n} move" + ("" if n == 1 else "s")
+
+
+def points_text(x):
+    """Points for a sentence, whole numbers without the .0: 17.0 -> '17 points', 6.8 -> '6.8 points'."""
+    return points_word(int(x) if x == int(x) else x)
+
+
+def league_moves(trades, transactions, names, teams, deadlines, finished, points):
+    """
+    Is being active paying off? Every accepted waiver or free-agent claim, and every processed trade,
+    judged on the points it has brought: the player claimed against the player dropped for him, over the
+    finished gameweeks from the first one after the claim until he was dropped again (or the latest finished
+    gameweek). A claim's dropped player is always the same position (Draft squads are fixed), so the points
+    compare. Like Deals, these are raw points whether or not the player started, which flatters a claim (a
+    dropped player is often injured or on the bench). A claim whose gameweek hasn't finished is only counted
+    as "waiting". Trades are judged as in build_trade, each side's swing. None before a gameweek has
+    finished. finished is the finished gameweeks, deadlines {gameweek: datetime}, points {gameweek: {player
+    ID: points}}, names {player ID: {name, pos, club}} and teams {team ID: {team, manager}} (everyone in the
+    league).
+
+    Returns {gameweek, claims, trades, waiting, average_claim, headline, managers, best, worst, lines}:
+      managers  everyone, most net points first and managers with no moves last, each {entry_id, team,
+                manager, moves, claims, trades, net (points from the moves, summed), per_move (None with no
+                moves), best and worst (their biggest and smallest single move, or None)}
+      best/worst  the biggest and smallest single moves in the league (MOVES_BEST_SHOWN of each, the smallest
+                only if they lost points), each {team, text, swing}
+      average_claim  the average swing of a claim, which the headline sentence reports
+      lines     a few lines of banter ({tone, text}) about the busiest, sharpest and idlest managers
+    """
+    if not finished:
+        return None
+    latest = max(finished)
+    claims = [t for t in transactions
+              if t.get("kind") in ("w", "f") and t.get("result") == "a" and t.get("element_in")
+              and parse_time(t.get("added")) and t.get("entry") in teams]
+    moves, waiting = [], 0
+    for c in claims:
+        when = parse_time(c["added"])
+        first = first_gameweek_after(when, deadlines)
+        if first is None:
+            continue
+        if first > latest:
+            waiting += 1
+            continue
+        end = latest
+        for later in claims:   # dropped again by the same manager: his points stop counting for this claim
+            if later["entry"] == c["entry"] and later.get("element_out") == c["element_in"] \
+                    and parse_time(later["added"]) > when:
+                dropped = first_gameweek_after(parse_time(later["added"]), deadlines)
+                end = min(end, dropped - 1 if dropped else latest)
+        gws = [gw for gw in range(first, end + 1) if gw in points]
+        if not gws:
+            continue
+        got = deal_player(c["element_in"], names, points, gws)
+        gave = deal_player(c["element_out"], names, points, gws) if c.get("element_out") else None
+        swing = got["points"] - (gave["points"] if gave else 0)
+        text = f"{got['name']} for {gave['name']}" if gave else f"{got['name']} (nobody dropped)"
+        moves.append({"entry_id": c["entry"], "kind": "claim", "swing": swing, "text": text})
+    trades_judged = 0
+    for t in trades:
+        deal = build_trade(t, names, teams, deadlines, points, latest) if t.get("state") == "p" else None
+        if not deal or not deal["weeks"]:
+            continue
+        trades_judged += 1
+        for side, other in ((deal["a"], deal["b"]), (deal["b"], deal["a"])):
+            moves.append({"entry_id": side["entry_id"], "kind": "trade", "swing": side["swing"],
+                          "text": f"trade with {other['team']}"})
+
+    managers = []
+    for entry, who in teams.items():
+        mine = [m for m in moves if m["entry_id"] == entry]
+        net = sum(m["swing"] for m in mine)
+        managers.append({
+            "entry_id": entry, "team": who.get("team") or f"Team {entry}", "manager": who.get("manager", ""),
+            "moves": len(mine), "claims": sum(m["kind"] == "claim" for m in mine),
+            "trades": sum(m["kind"] == "trade" for m in mine), "net": net,
+            "per_move": round(net / len(mine), 1) if mine else None,
+            "best": max(mine, key=lambda m: (m["swing"], m["text"]), default=None),
+            "worst": min(mine, key=lambda m: (m["swing"], m["text"]), default=None)})
+    managers.sort(key=lambda m: (m["moves"] == 0, -m["net"], m["team"].lower()))
+
+    claim_swings = [m["swing"] for m in moves if m["kind"] == "claim"]
+    average = round(sum(claim_swings) / len(claim_swings), 1) if claim_swings else None
+    judged = f"{len(claim_swings)} claim{'' if len(claim_swings) == 1 else 's'} judged so far."
+    if average is None:
+        headline = "No claims have been judged yet."
+    elif average >= 1:
+        headline = (f"{judged} On average a claim has beaten the player dropped for it by "
+                    f"{points_text(average)}, so being active has paid.")
+    elif average > -1:
+        headline = (f"{judged} On average a claim has done about as well as the player dropped for it "
+                    f"({average:g}), so being active hasn't made much difference.")
+    else:
+        headline = (f"{judged} On average a claim has fallen {points_text(-average)} short of the player "
+                    f"dropped for it, so being active hasn't paid.")
+    if waiting:
+        headline += f" {waiting} more {'is' if waiting == 1 else 'are'} waiting for GW{latest + 1} to finish."
+
+    def single(m):
+        who = teams.get(m["entry_id"]) or {}
+        return {"team": who.get("team") or f"Team {m['entry_id']}", "text": m["text"], "swing": m["swing"]}
+
+    ranked = sorted(moves, key=lambda m: (-m["swing"], m["entry_id"], m["text"]))
+    best = [single(m) for m in ranked[:MOVES_BEST_SHOWN] if m["swing"] > 0]
+    worst = [single(m) for m in ranked[::-1][:MOVES_BEST_SHOWN] if m["swing"] < 0]
+
+    def say(kind, **fields):
+        return banter_wording(MOVE_LINES[kind], kind, latest).format(**fields)
+
+    lines = []
+
+    def add(tone, kind, **fields):
+        lines.append({"tone": tone, "text": say(kind, **fields)})
+
+    def describe(m):   # the fields most lines use: the team (marked), its moves and its net points
+        return {"t": mark(m["team"]), "moves": moves_word(m["moves"]), "net": points_word(m["net"])}
+
+    active = [m for m in managers if m["moves"]]
+    top = active[0] if active and active[0]["net"] > 0 else None
+    if top:
+        add("praise", "moves_top", **describe(top))
+    regulars = [m for m in active if m["moves"] >= MOVES_SHARP_MIN and m is not top]
+    sharp = max(regulars, key=lambda m: (m["per_move"], m["net"]), default=None)
+    if sharp and sharp["per_move"] > 0:
+        add("praise", "moves_sharp", **{**describe(sharp), "per": points_text(sharp["per_move"])})
+    busiest = max(active, key=lambda m: (m["moves"], -m["net"]), default=None)
+    if (busiest and busiest["moves"] >= MOVES_SHARP_MIN and busiest is not top and average is not None
+            and busiest["per_move"] < average):
+        add("roast", "moves_busy", **describe(busiest))
+    loser = min(active, key=lambda m: (m["net"], m["team"].lower()), default=None)
+    if loser and loser["net"] < 0:
+        add("roast", "moves_red", **{**describe(loser), "net": points_word(-loser["net"])})
+    idle = [mark(m["team"]) for m in managers if not m["moves"]]
+    if idle:
+        add("roast", "moves_idle", t=idle[0] if len(idle) == 1 else ", ".join(idle[:-1]) + " and " + idle[-1])
+    return {"gameweek": latest, "claims": len(claim_swings), "trades": trades_judged, "waiting": waiting,
+            "average_claim": average, "headline": headline, "managers": managers, "best": best,
+            "worst": worst, "lines": lines}
+
+
+def load_moves(league_id):
+    """
+    Build the moves chart's data for a league: {"league_id", "league_name", "moves"} (see league_moves). Reads
+    the Draft site's trades and claims and the points of every finished gameweek from the first move on (one
+    request each, 8 at a time, cached like the others: 9 now, up to 38 late in the season). moves is None
+    before a gameweek has finished. Claims that can't be read leave the managers with fewer moves.
+    """
+    boot = fetch(f"{DRAFT}/bootstrap-static", LEAGUE_NOT_FOUND)
+    details = fetch(f"{DRAFT}/league/{league_id}/details", LEAGUE_NOT_FOUND)
+    name = details.get("league", {}).get("name", f"League {league_id}")
+    trades = draft_rows(league_id, "trades")
+    try:
+        transactions = draft_rows(league_id, "transactions")
+    except FplError:
+        transactions = []
+    events = boot.get("events", {})
+    deadlines = gameweek_deadlines(events)
+    finished = sorted(e["id"] for e in events.get("data") or [] if e.get("finished") and e.get("id"))
+    if not finished:
+        return {"league_id": league_id, "league_name": name, "moves": None}
+    latest = finished[-1]
+    starts = [first_gameweek_after(parse_time(t.get("added")), deadlines) for t in transactions
+              if t.get("kind") in ("w", "f") and t.get("result") == "a" and parse_time(t.get("added"))]
+    starts += [trade_start(t, deadlines) for t in trades if t.get("state") == "p"]
+    starts = [gw for gw in starts if gw and gw <= latest]
+    points = gameweek_points(sorted(set(range(min(starts), latest + 1)) & set(finished))) if starts else {}
+    positions = {p["id"]: p["singular_name_short"] for p in boot.get("element_types") or []}
+    club = {t["id"]: t["short_name"] for t in boot.get("teams") or []}
+    names = {el["id"]: {"name": el.get("web_name"), "pos": positions.get(el.get("element_type")),
+                        "club": club.get(el.get("team"))} for el in boot.get("elements") or []}
+    teams = {e["entry_id"]: {"team": clean_name(e.get("entry_name")),
+                             "manager": f'{e.get("player_first_name", "")} '
+                                        f'{e.get("player_last_name", "")}'.strip()}
+             for e in details.get("league_entries", []) if e.get("entry_id")}
+    return {"league_id": league_id, "league_name": name,
+            "moves": league_moves(trades, transactions, names, teams, deadlines, finished, points)}
+
+
 # ---------------------------------------------------------------- routes
 
 @app.route("/")
@@ -3530,7 +3918,7 @@ def banter(league_id):
         return jsonify({"error": e.message}), e.status
     return jsonify({"league_id": league_id,
                     "league_name": details.get("league", {}).get("name", f"League {league_id}"),
-                    "banter": league_banter(details)})
+                    "banter": league_banter(details, season_snapshots(details, league_id))})
 
 
 @app.route("/api/league/<int:league_id>/people")
@@ -3583,16 +3971,24 @@ def charts(league_id):
 def rivalries(league_id):
     """
     Head-to-head history between two managers across saved seasons and this one
-    (see league_rivalries). ?a= and ?b= are team IDs; without them only the manager list comes back.
+    (see league_rivalries). ?a= and ?b= are team IDs; without them only the manager list comes back, with
+    "grid": every manager's won-drawn-lost record against every other this season (the head-to-head grid,
+    from league_charts: {managers, rows}), or None before a gameweek has finished.
     """
     try:
         details = fetch(f"{DRAFT}/league/{league_id}/details", LEAGUE_NOT_FOUND)
     except FplError as e:
         return jsonify({"error": e.message}), e.status
+    a, b = request.args.get("a", type=int), request.args.get("b", type=int)
+    extra = {}
+    if not (a and b):
+        charts = league_charts(details)
+        extra["grid"] = None if charts is None else {
+            "managers": [{"entry_id": m["entry_id"], "team": m["team"]} for m in charts["managers"]],
+            "rows": charts["head_to_head"]}
     return jsonify({"league_id": league_id,
                     "league_name": details.get("league", {}).get("name", f"League {league_id}"),
-                    **league_rivalries(details, league_id, request.args.get("a", type=int),
-                                       request.args.get("b", type=int))})
+                    **league_rivalries(details, league_id, a, b), **extra})
 
 
 @app.route("/api/league/<int:league_id>/squads")
@@ -3628,6 +4024,27 @@ def live_matchups(league_id):
     """Live scores for the hub's match-up cards while their gameweek is on (see load_matchups_live)."""
     try:
         return jsonify(load_matchups_live(league_id))
+    except FplError as e:
+        return jsonify({"error": e.message}), e.status
+
+
+@app.route("/api/league/<int:league_id>/odds")
+def odds(league_id):
+    """Each manager's chance of every finishing place, from simulating the rest of the season."""
+    try:
+        details = fetch(f"{DRAFT}/league/{league_id}/details", LEAGUE_NOT_FOUND)
+    except FplError as e:
+        return jsonify({"error": e.message}), e.status
+    return jsonify({"league_id": league_id,
+                    "league_name": details.get("league", {}).get("name", f"League {league_id}"),
+                    "odds": get_odds(league_id, details)})
+
+
+@app.route("/api/league/<int:league_id>/moves")
+def moves(league_id):
+    """Is being active paying off? Claims and trades judged on the points they brought (see league_moves)."""
+    try:
+        return jsonify(load_moves(league_id))
     except FplError as e:
         return jsonify({"error": e.message}), e.status
 

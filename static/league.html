@@ -55,6 +55,14 @@
   .card .tease { color: var(--muted); font-size: .88rem; font-style: italic; }
   .versus .v.score { color: var(--ink); font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums; }
   .chip.liveon { border-color: var(--rival); color: var(--rival); }
+  .card .rec { color: var(--muted); font-size: .88rem; }
+  .facts li.praise { border-left-color: var(--pitch); }
+  .facts li.roast { border-left-color: var(--rival); }
+  /* season odds: every manager against every finishing place, shaded by how likely */
+  table.odds th.num, table.odds td.num { text-align: right; }
+  table.odds td.big { font-weight: 600; min-width: 3.8em; }
+  table.odds td.wk { min-width: 2.7em; padding: 5px 3px; }
+  #gridSection { margin-bottom: 32px; }
   /* the match-ups: pinned above the choices, so they are there whichever one is open. Compact, three across */
   .matchups { margin: 0 0 24px; }
   .matchups h2 { margin-bottom: 2px; }
@@ -280,11 +288,13 @@
       <button class="choice" type="button" data-tab="recap" aria-pressed="false">
         <span class="t">Recap</span><span class="d">The gameweek in words, updated as the games finish</span></button>
       <button class="choice" type="button" data-tab="deals" aria-pressed="false">
-        <span class="t">Trades</span><span class="d">Every trade this season, and whether it paid off</span></button>
+        <span class="t">Trades and moves</span><span class="d">Every trade, and whether being active on the waiver wire pays off</span></button>
+      <button class="choice" type="button" data-tab="odds" aria-pressed="false">
+        <span class="t">Odds</span><span class="d">Who's winning the league and who's heading for the wooden spoon</span></button>
       <button class="choice" type="button" data-tab="charts" aria-pressed="false">
-        <span class="t">Charts</span><span class="d">The league race, head-to-head records and who's scoring</span></button>
+        <span class="t">Charts</span><span class="d">The league race, places over time, weekly scores and squad strength</span></button>
       <button class="choice" type="button" data-tab="rivalries" aria-pressed="false">
-        <span class="t">Rivalries</span><span class="d">Every match between two managers, with seasons saved from now on</span></button>
+        <span class="t">Rivalries</span><span class="d">Head-to-head records, and every match between two managers</span></button>
       <button class="choice fullonly hidden" type="button" data-tab="team" aria-pressed="false">
         <span class="t">My team</span><span class="d">Waiver targets, trades and squads for your own team</span></button>
     </div>
@@ -318,6 +328,11 @@
         <p class="racecap" id="luckCaption"></p>
         <div class="chartwrap"><svg class="plot" id="luck" role="img"></svg></div>
       </section>
+      <section id="scatterSection" class="hidden">
+        <h2>Points scored and conceded</h2>
+        <p class="sub" id="scatterSub"></p>
+        <div class="chartwrap"><svg class="plot" id="scatter" role="img"></svg></div>
+      </section>
     </div>
 
     <div id="panel-recap" class="hidden">
@@ -346,10 +361,30 @@
 
     <div id="panel-deals" class="hidden">
       <div id="dealsEmpty" class="empty hidden"></div>
+      <section id="activitySection" class="hidden">
+        <h2>Is being active paying off?</h2>
+        <p class="sub" id="activityHeadline"></p>
+        <ul class="facts" id="activityLines"></ul>
+        <p class="sub">Points each manager's claims and trades have brought, against the players they gave up. Bars to the right (green) are ahead, to the left (red) behind. Hover a row for their best and worst move.</p>
+        <div class="chartwrap"><svg class="plot" id="activityChart" role="img"></svg></div>
+        <div id="activityBest"></div>
+        <p class="sub" style="margin-top:12px">How it's judged: each claim counts the new player's points against the player dropped for him, from the first gameweek after the claim until he was dropped again (or the latest finished gameweek). Trades count too. These are raw points whether or not the player started, and dropped players are often injured or on the bench, so claims look a little better than they really are. Claims for a gameweek that hasn't finished yet aren't counted.</p>
+      </section>
       <section id="dealsBody">
         <h2>Trade tracker</h2>
         <p class="sub">Every trade this season, scored on the points the players on each side have scored since the deal was agreed. A small swing is "too close to call", and a verdict (worth it or regretted) is only handed out once four gameweeks have finished. Points are what the players scored, whether or not they started.</p>
         <div id="tradeList"></div>
+      </section>
+    </div>
+
+    <div id="panel-odds" class="hidden">
+      <div id="oddsEmpty" class="empty hidden"></div>
+      <section id="oddsBody">
+        <h2>Season odds</h2>
+        <p class="sub" id="oddsSub"></p>
+        <ul class="facts" id="oddsLines"></ul>
+        <div class="tablewrap"><table class="weeks odds" id="oddsTable"></table></div>
+        <p class="sub" style="margin-top:12px">A guide, not a prediction. It uses each manager's scoring so far (pulled towards the league average, because it's early) and the fixtures still to play. It knows nothing about squads, injuries or fixtures, and every simulated season nudges each manager's strength up or down a little, because a few weeks of scores can't say how good a squad really is. Title, Top 3 and Spoon are the chances of finishing 1st, in the top three and last. Each row adds up to 100%.</p>
       </section>
     </div>
 
@@ -371,17 +406,6 @@
           <p class="racecap" id="placesCaption" aria-live="polite"></p>
           <div class="chartwrap scrollx" id="placesWrap"><svg class="race" id="placesChart" role="img"></svg></div>
           <ul class="moves" id="placesNotes"></ul>
-        </section>
-        <section>
-          <h2>Head to head</h2>
-          <p class="sub">Each row is a manager's record (won-drawn-lost) against the manager at the top of the column, this season so far. Green means they're ahead, red behind. Select a row to see the points too.</p>
-          <div class="tablewrap"><table class="weeks h2h" id="h2hTable"></table></div>
-          <div class="picked hidden" id="picked"></div>
-        </section>
-        <section>
-          <h2>Points scored and conceded</h2>
-          <p class="sub" id="scatterSub"></p>
-          <div class="chartwrap"><svg class="plot" id="scatter" role="img"></svg></div>
         </section>
         <section>
           <h2>Weekly scores</h2>
@@ -413,6 +437,12 @@
     <div id="panel-rivalries" class="hidden">
       <div id="rivalriesEmpty" class="empty hidden"></div>
       <div id="rivalriesBody">
+        <section id="gridSection" class="hidden">
+          <h2>Head to head</h2>
+          <p class="sub">Each row is a manager's record (won-drawn-lost) against the manager at the top of the column, this season so far. Green means they're ahead, red behind. Select a row to see the points too.</p>
+          <div class="tablewrap"><table class="weeks h2h" id="h2hTable"></table></div>
+          <div class="picked hidden" id="picked"></div>
+        </section>
         <h2>Rivalries</h2>
         <p class="sub" id="rivalSeasons"></p>
         <div class="pickers">
@@ -459,11 +489,11 @@
 const $ = id => document.getElementById(id);
 const FACTS_SHOWN = 2;   // facts shown at first; "Show more" reveals the rest
 const FULL = new URLSearchParams(location.search).get("full") === "1";   // the full version: My team and the way back
-const TABS = FULL ? ["upcoming", "banter", "recap", "deals", "charts", "rivalries", "team"]
-                  : ["upcoming", "banter", "recap", "deals", "charts", "rivalries"];
+const TABS = FULL ? ["upcoming", "banter", "recap", "deals", "odds", "charts", "rivalries", "team"]
+                  : ["upcoming", "banter", "recap", "deals", "odds", "charts", "rivalries"];
 let leagueId = null;     // the league this page is open on
 let tab = null;          // the choice currently open (none until a friend picks one)
-const loaded = { upcoming: null, recap: null, deals: null, charts: null, rivalries: null };   // which league each choice's data is for, so each loads only once (Banter is asked for every time, see refreshBanter)
+const loaded = { upcoming: null, recap: null, deals: null, odds: null, charts: null, rivalries: null };   // which league each choice's data is for, so each loads only once (Banter is asked for every time, see refreshBanter)
 let BANTER = null, showAll = false;
 let LIVE = null;         // live scores for the match-up cards, {gw, scores: {team ID: {points, left, playing}}}, or null (see load_matchups_live in app.py)
 let banterPending = null, banterAt = 0;   // a Banter request in flight, and when the last one was made
@@ -474,6 +504,9 @@ let CH = null;           // the charts the server sent (see league_charts in app
 let myId = null;         // your team ID, if we know it, so your line and row stand out
 let me = null;           // myId, if that team is in this league
 let picked = null;       // the manager whose head-to-head record is open
+let GRID = null;         // the head-to-head grid the server sent with the Rivalries data (see the rivalries route in app.py)
+let ODDS = null;         // the season odds the server sent (see season_odds in app.py); this page only draws them
+let ACT = null;          // the moves the server sent (see league_moves in app.py)
 let SQ = null;           // the squads the server sent (see league_squads in app.py); this page only draws them
 let squadView = "week";  // which rating the squad chart uses: "week" (next 5) or "season" (until the break)
 let RIV = null;          // the Rivalries data: the managers and seasons (see league_rivalries in app.py)
@@ -526,6 +559,7 @@ async function openTab(name) {
     $("leagueLine").textContent = data.league_name;
     if (name === "recap") renderRecap(data);
     else if (name === "deals") renderDeals(data);
+    else if (name === "odds") renderOdds(data);
     else if (name === "charts") renderCharts(data);
     else if (name === "upcoming") renderUpcoming(data);
     else renderRivalries(data);
@@ -539,11 +573,11 @@ async function openTab(name) {
 
 function openLeague(id, firstTab) {
   leagueId = id;
-  loaded.upcoming = loaded.recap = loaded.deals = loaded.charts = loaded.rivalries = null;
+  loaded.upcoming = loaded.recap = loaded.deals = loaded.odds = loaded.charts = loaded.rivalries = null;
   BANTER = null; LIVE = null; banterPending = null; banterAt = 0;
   renderMatchups();   // hides the match-ups until this league's arrive
   $("dealsCard").classList.add("hidden");
-  RIV = null;
+  RIV = null; GRID = null; ODDS = null; ACT = null; picked = null;
   UP = null; showAllMatches = false;
   PEOPLE = []; renderYou();
   SQ = null; squadView = "week";
@@ -575,7 +609,8 @@ function matchCard(cls, title, c) {
     : (a.left + b.left ? `${a.left} v ${b.left} players still to play.` : "All their players have played.") + " An estimate until the gameweek ends.";
   return `<div class="card ${cls}"><div class="tag">${esc(title)}${on ? ' <span class="chip liveon">Live</span>' : ""}</div>
     <div class="versus">${side(c.a)}<span class="v ${on ? "score" : ""}">${on ? `${a.points} – ${b.points}` : "v"}</span>${side(c.b)}</div>
-    <div class="line">${esc(line)}</div>${c.tease ? `<div class="tease">${esc(c.tease)}</div>` : ""}</div>`;
+    <div class="line">${esc(line)}</div>${c.record ? `<div class="line rec">${rich(c.record.line)}</div>` : ""}`
+    + `${c.tease ? `<div class="tease">${esc(c.tease)}</div>` : ""}</div>`;
 }
 
 function renderMatchups() {
@@ -640,6 +675,7 @@ function renderBanter() {
   $("banterEmpty").classList.toggle("hidden", !!b);
   $("factsSection").classList.toggle("hidden", !b);
   $("luckSection").classList.toggle("hidden", !b);
+  $("scatterSection").classList.toggle("hidden", !b);
   $("weekSection").classList.add("hidden");
   $("awardsSection").classList.add("hidden");
   if (!b) {
@@ -650,6 +686,7 @@ function renderBanter() {
   renderAwards(b.awards || []);
   renderFacts();
   renderLuck(b.luck);
+  renderScatter(b.scoring);
 }
 
 // what happened in the latest finished gameweek: all of it is shown, because it is the part that's new each week
@@ -782,8 +819,11 @@ function renderAwards(list) {
 // picking a name updates everything on the page that stands you out
 function youChanged() {
   me = CH && CH.managers.some(m => m.entry_id === myId) ? myId : null;
-  if (BANTER?.banter) { renderAwards(BANTER.banter.awards || []); renderLuck(BANTER.banter.luck); }
-  if (CH) { picked = null; renderRace(); renderPlaces(); renderGrid(); renderHeadToHead(); renderScatter(); renderSpread(); }
+  if (BANTER?.banter) { renderAwards(BANTER.banter.awards || []); renderLuck(BANTER.banter.luck); renderScatter(BANTER.banter.scoring); }
+  if (CH) { renderRace(); renderPlaces(); renderGrid(); renderSpread(); }
+  if (GRID) { picked = null; renderHeadToHead(); }
+  if (ODDS) renderOdds(ODDS);
+  if (ACT) renderActivity(ACT);
   if (SQ) renderSquads();
   if (loaded.upcoming === leagueId) drawMyMatches();
 }
@@ -1046,6 +1086,7 @@ function tradeCard(t) {
 }
 
 function renderDeals(data) {
+  fillActivity();   // the moves chart loads on its own, so a problem there never hides the trade tracker
   const d = data.deals;
   $("dealsEmpty").classList.toggle("hidden", !!d);
   $("dealsBody").classList.toggle("hidden", !d);
@@ -1055,6 +1096,98 @@ function renderDeals(data) {
   }
   $("tradeList").innerHTML = d.trades.length ? d.trades.map(tradeCard).join("")
     : `<p class="sub">No trades yet this season. When two managers do a deal it shows up here and is scored every gameweek.</p>`;
+}
+
+// ---------------------------------------------------------------- is being active paying off?
+
+async function fillActivity() {
+  const forLeague = leagueId;
+  try {
+    const data = await getJson(`/api/league/${forLeague}/moves`);
+    if (forLeague !== leagueId) return;   // they opened another league while this was loading
+    ACT = data.moves;
+    renderActivity(ACT);
+  } catch (e) {
+    ACT = null;
+    $("activitySection").classList.add("hidden");
+  }
+}
+
+function renderActivity(m) {
+  $("activitySection").classList.toggle("hidden", !m);
+  if (!m) return;
+  // the server works out every number and writes every line (see league_moves in app.py); this just draws them
+  $("activityHeadline").textContent = m.headline;
+  $("activityLines").innerHTML = m.lines.map(l => `<li class="${esc(l.tone)}">${rich(l.text)}</li>`).join("");
+  drawActivity(m.managers);
+  const list = (title, rows) => rows.length ? `<h3 class="minihead">${title}</h3><ul class="meetings">`
+    + rows.map(r => `<li><span>${esc(r.text)} <span class="when">${esc(r.team)}</span></span><span>${swingText(r.swing)}</span></li>`).join("") + `</ul>` : "";
+  $("activityBest").innerHTML = list("Best single moves", m.best) + list("Worst single moves", m.worst);
+}
+
+function drawActivity(ms) {
+  const W = 720, rowH = 40, L = 190, R = 60, T = 10, B = 30, H = T + B + ms.length * rowH;
+  const lo = Math.min(0, ...ms.map(m => m.net)), hi = Math.max(0, ...ms.map(m => m.net));
+  const span = Math.max(hi - lo, 10), step = span <= 40 ? 10 : span <= 100 ? 20 : span <= 250 ? 50 : 100;
+  const x = v => L + (v - lo) * (W - L - R) / span;
+  let svg = "";
+  for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) {
+    svg += `<line class="grid" x1="${x(v)}" x2="${x(v)}" y1="${T}" y2="${H - B}"/><text x="${x(v)}" y="${H - B + 18}" text-anchor="middle">${v > 0 ? "+" + v : v}</text>`;
+  }
+  svg += `<line x1="${x(0)}" x2="${x(0)}" y1="${T}" y2="${H - B}" stroke="var(--ink)" stroke-opacity=".6"/>`;
+  ms.forEach((m, i) => {
+    const cy = T + i * rowH + rowH / 2, mine = m.entry_id === myId;
+    const detail = m.moves ? `${m.moves} move${m.moves === 1 ? "" : "s"}${m.per_move != null ? `, ${signed(m.per_move)} each` : ""}` : "no moves";
+    const best = m.best ? `. Best: ${m.best.text} (${swingText(m.best.swing)})` : "";
+    const worst = m.worst && m.worst !== m.best ? `. Worst: ${m.worst.text} (${swingText(m.worst.swing)})` : "";
+    svg += `<g><title>${esc(m.team)}: ${detail}, ${swingText(m.net)} points in all${esc(best + worst)}</title>`
+      + `<text class="lbl ${mine ? "me" : ""}" x="${L - 10}" y="${cy - 1}" text-anchor="end">${esc(short(m.team, 24))}</text>`
+      + `<text x="${L - 10}" y="${cy + 13}" text-anchor="end" style="font-size:11px">${esc(detail)}</text>`;
+    if (m.moves) {
+      const x0 = x(0), x1 = x(m.net), good = m.net >= 0;
+      svg += `<rect x="${Math.min(x0, x1)}" y="${cy - 9}" width="${Math.max(Math.abs(x1 - x0), 2)}" height="18" rx="2" `
+        + `style="fill:var(${good ? "--pitch" : "--rival"});fill-opacity:${mine ? 1 : .8}"/>`
+        + `<text x="${x1 + (good ? 6 : -6)}" y="${cy + 4}" text-anchor="${good ? "start" : "end"}">${swingText(m.net)}</text>`;
+    }
+    svg += `</g>`;
+  });
+  const chart = $("activityChart");
+  chart.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  chart.setAttribute("aria-label", `Bar chart of the points each of ${ms.length} managers' claims and trades have brought.`);
+  chart.innerHTML = svg;
+}
+
+// ---------------------------------------------------------------- season odds
+
+const pctCell = p => p === 0 ? "–" : p < 0.01 ? "<1%" : Math.round(p * 100) + "%";
+const pctWord = p => p === 0 ? "0%" : p < 0.01 ? "under 1%" : Math.round(p * 100) + "%";
+
+function renderOdds(data) {
+  ODDS = data;
+  const o = data.odds;
+  $("oddsEmpty").classList.toggle("hidden", !!o);
+  $("oddsBody").classList.toggle("hidden", !o);
+  if (!o) {
+    $("oddsEmpty").textContent = "The odds start once three gameweeks have finished. They need a head-to-head league, because they're worked out from the match results.";
+    return;
+  }
+  // the server plays the rest of the season out (see season_odds in app.py); this just draws the chances
+  $("oddsSub").textContent = o.gws_left
+    ? `The ${o.gws_left} gameweek${o.gws_left === 1 ? "" : "s"} still to play, played out ${o.runs.toLocaleString("en-GB")} times. Darker means likelier.`
+    : "The season is over, so this is the final table.";
+  $("oddsLines").innerHTML = o.lines.map(t => `<li>${rich(t)}</li>`).join("");
+  const n = o.managers.length;
+  const head = `<tr><th></th><th class="num">Pts</th><th class="num">Title</th><th class="num">Top 3</th><th class="num">Spoon</th>`
+    + Array.from({ length: n }, (_, i) => `<th>${place(i + 1)}</th>`).join("") + `</tr>`;
+  const rows = o.managers.map(m => {
+    const mine = m.entry_id === myId;
+    const cells = m.odds.map((p, i) => `<td class="wk" style="${p ? "background:" + tint(true, Math.min(p, 1) * 70) : ""}" `
+      + `title="${esc(m.team)} finishes ${place(i + 1)} in ${pctWord(p)} of the simulated seasons">${p === 0 ? "" : p < 0.01 ? "<1" : Math.round(p * 100)}</td>`).join("");
+    const big = (p, good) => `<td class="wk num big" style="${p ? "background:" + tint(good, Math.min(p, 1) * 70) : ""}">${pctCell(p)}</td>`;
+    return `<tr class="${mine ? "me" : ""}"><td class="team">${esc(m.team)}${mine ? " (you)" : ""}</td><td class="num">${m.league_points}</td>`
+      + big(m.win, true) + big(m.top3, true) + big(m.last, false) + cells + `</tr>`;
+  }).join("");
+  $("oddsTable").innerHTML = head + rows;
 }
 
 // ---------------------------------------------------------------- charts
@@ -1069,8 +1202,7 @@ function renderCharts(data) {
     return;
   }
   me = CH.managers.some(m => m.entry_id === myId) ? myId : null;   // that team might not be in this league
-  picked = null;
-  renderRace(); renderPlaces(); renderGrid(); renderHeadToHead(); renderScatter(); renderSpread();
+  renderRace(); renderPlaces(); renderGrid(); renderSpread();
 }
 
 // ---------------------------------------------------------------- league race
@@ -1225,11 +1357,13 @@ function renderGrid() {
 
 // ---------------------------------------------------------------- head to head
 
+const gridName = id => GRID.managers.find(m => m.entry_id === id)?.team ?? `Team ${id}`;
+
 function renderHeadToHead() {
-  const order = CH.managers.map(m => m.entry_id);
+  const order = GRID.managers.map(m => m.entry_id);
   const rec = {};   // "me-them" -> record
-  CH.head_to_head.forEach(row => row.vs.forEach(o => { rec[row.entry_id + "-" + o.entry_id] = o; }));
-  const head = `<tr><th></th>${order.map(id => `<th class="opp" title="${esc(teamName(id))}"><span>${esc(short(teamName(id), 16))}</span></th>`).join("")}</tr>`;
+  GRID.rows.forEach(row => row.vs.forEach(o => { rec[row.entry_id + "-" + o.entry_id] = o; }));
+  const head = `<tr><th></th>${order.map(id => `<th class="opp" title="${esc(gridName(id))}"><span>${esc(short(gridName(id), 16))}</span></th>`).join("")}</tr>`;
   const rows = order.map(a => {
     const cells = order.map(b => {
       if (a === b) return `<td class="wk self"></td>`;
@@ -1237,10 +1371,10 @@ function renderHeadToHead() {
       if (!o) return `<td class="wk" title="Haven't met yet">·</td>`;
       const games = o.won + o.drawn + o.lost, edge = (o.won - o.lost) / games;
       const bg = edge === 0 ? "transparent" : tint(edge > 0, Math.abs(edge) * 55);
-      return `<td class="wk" style="background:${bg}" title="${esc(teamName(a))} v ${esc(teamName(b))}: won ${o.won}, drew ${o.drawn}, lost ${o.lost}">${o.won}-${o.drawn}-${o.lost}</td>`;
+      return `<td class="wk" style="background:${bg}" title="${esc(gridName(a))} v ${esc(gridName(b))}: won ${o.won}, drew ${o.drawn}, lost ${o.lost}">${o.won}-${o.drawn}-${o.lost}</td>`;
     }).join("");
-    const mine = a === me;
-    return `<tr data-id="${a}" class="${mine ? "me" : ""}"><td class="team">${esc(teamName(a))}${mine ? " (you)" : ""}</td>${cells}</tr>`;
+    const mine = a === myId;
+    return `<tr data-id="${a}" class="${mine ? "me" : ""}"><td class="team">${esc(gridName(a))}${mine ? " (you)" : ""}</td>${cells}</tr>`;
   }).join("");
   $("h2hTable").innerHTML = head + rows;
   renderPicked();
@@ -1250,17 +1384,16 @@ function renderPicked() {
   document.querySelectorAll("#h2hTable tr[data-id]").forEach(r => r.classList.toggle("pick", Number(r.dataset.id) === picked));
   $("picked").classList.toggle("hidden", picked == null);
   if (picked == null) return;
-  const row = CH.head_to_head.find(r => r.entry_id === picked);
-  const items = row.vs.map(o => `<li><span>${esc(teamName(o.entry_id))}</span>`
+  const row = GRID.rows.find(r => r.entry_id === picked);
+  const items = row.vs.map(o => `<li><span>${esc(gridName(o.entry_id))}</span>`
     + `<span class="rec">W${o.won} D${o.drawn} L${o.lost} · ${o.points_for}-${o.points_against} pts</span></li>`).join("");
-  $("picked").innerHTML = `<strong>${esc(teamName(picked))}</strong>`
+  $("picked").innerHTML = `<strong>${esc(gridName(picked))}</strong>`
     + (items ? `<ul>${items}</ul>` : `<p class="sub" style="margin:4px 0 0">No finished matches yet.</p>`);
 }
 
 // ---------------------------------------------------------------- points scored and conceded
 
-function renderScatter() {
-  const ms = CH.managers;
+function renderScatter(ms) {   // ms: every manager's points for and against, from the banter data (see league_banter)
   const W = 720, H = 440, L = 54, R = 24, T = 16, B = 44;
   const lo = Math.floor(Math.min(...ms.map(m => Math.min(m.points_for, m.points_against))) / 20) * 20;
   const hi = Math.ceil(Math.max(...ms.map(m => Math.max(m.points_for, m.points_against))) / 20) * 20 || 20;
@@ -1279,8 +1412,8 @@ function renderScatter() {
   // labels sit beside their dot; when two would overlap, the later one moves up or down a line
   const boxes = [];
   const clear = b => !boxes.some(o => b.x0 < o.x1 && b.x1 > o.x0 && b.y0 < o.y1 && b.y1 > o.y0);
-  [...ms].sort((a, b) => (a.entry_id === me) - (b.entry_id === me)).forEach(m => {
-    const mine = m.entry_id === me, cx = x(m.points_for), cy = y(m.points_against);
+  [...ms].sort((a, b) => (a.entry_id === myId) - (b.entry_id === myId)).forEach(m => {
+    const mine = m.entry_id === myId, cx = x(m.points_for), cy = y(m.points_against);
     const text = short(m.team, 14), w = text.length * 6.6;
     const flip = cx > W - R - w - 14;   // labels at the right edge go to the left of the dot
     const x0 = flip ? cx - 10 - w : cx + 10;
@@ -1362,6 +1495,9 @@ function renderSpread() {
 
 function renderRivalries(data) {
   RIV = data;
+  GRID = data.grid; picked = null;   // the head-to-head grid sits on top of the rivalries
+  $("gridSection").classList.toggle("hidden", !GRID);
+  if (GRID) renderHeadToHead();
   const has = data.managers.length > 1;
   $("rivalriesEmpty").classList.toggle("hidden", has);
   $("rivalriesBody").classList.toggle("hidden", !has);
