@@ -52,6 +52,22 @@
   .versus .who { color: var(--muted); font-size: .85rem; }
   .versus .v { color: var(--muted); font-family: var(--display); font-size: 1.3rem; }
   .card .line { color: var(--muted); font-size: .95rem; }
+  .card .tease { color: var(--muted); font-size: .88rem; font-style: italic; }
+  .versus .v.score { color: var(--ink); font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .chip.liveon { border-color: var(--rival); color: var(--rival); }
+  /* the match-ups: pinned above the choices, so they are there whichever one is open. Compact, three across */
+  .matchups { margin: 0 0 24px; }
+  .matchups h2 { margin-bottom: 2px; }
+  .matchups .sub { margin-bottom: 10px; }
+  .matchups .cards { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; margin-bottom: 0; }
+  .matchups .card { padding: 10px 14px; gap: 5px; }
+  .matchups .card .tag { font-size: 1.05rem; }
+  .matchups .versus .v { font-size: 1.1rem; }
+  @media (max-width: 520px) {   /* on a phone each card is a slim row: no manager names, and no banter line (it would push the choices off the screen) */
+    .matchups .versus .who, .matchups .card .tease { display: none; }
+    .matchups .card { padding: 8px 12px; gap: 3px; }
+    .matchups .sub { margin-bottom: 8px; }
+  }
   .facts { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 8px; }
   .facts li { background: var(--surface); border: 1px solid var(--line); border-left: 5px solid var(--amber);
     border-radius: 4px; padding: 12px 16px; }
@@ -206,6 +222,10 @@
     .sqrow .val { flex-direction: column; align-items: flex-end; gap: 3px; }
   }
   .race .gwdiv { stroke: var(--line); stroke-dasharray: 3 4; }
+  #placesChart text.lbl { font-weight: 400; }   /* every team is named here, so only yours stands out */
+  .scrollx { overflow-x: auto; }                 /* a phone scrolls this chart sideways instead of shrinking every name */
+  .scrollx svg { min-width: 600px; }
+  #placesChart text.lbl.mine { font-weight: 600; }
   .sqroster { padding: 4px 0 14px 12px; border-left: 2px solid var(--line); margin: 0 0 4px 4px; display: grid; gap: 2px; }
   .sqroster div { display: flex; justify-content: space-between; gap: 12px; max-width: 420px; }
   .sqroster .label { color: var(--muted); font-size: .85rem; margin-top: 6px; display: block; }
@@ -246,11 +266,17 @@
   <div id="app" class="hidden">
     <p class="youbar hidden" id="youBar"><span id="youName"></span> <button class="linkbtn" id="changeYou" type="button"></button></p>
 
+    <section class="matchups hidden" id="matchups">
+      <h2>This week's match-ups</h2>
+      <p class="sub" id="matchSub"></p>
+      <div class="cards" id="cards"></div>
+    </section>
+
     <div class="choices" id="choices" role="group" aria-label="What would you like to see?">
       <button class="choice hidden" id="mineChoice" type="button" data-tab="upcoming" aria-pressed="false">
         <span class="t">Your matches</span><span class="d">Your next match, who you play after that and how you're placed</span></button>
       <button class="choice" type="button" data-tab="banter" aria-pressed="false">
-        <span class="t">Banter</span><span class="d">This week's match-ups, season awards and facts to argue about</span></button>
+        <span class="t">Banter</span><span class="d">The last gameweek in review, season awards and facts to argue about</span></button>
       <button class="choice" type="button" data-tab="recap" aria-pressed="false">
         <span class="t">Recap</span><span class="d">The gameweek in words, updated as the games finish</span></button>
       <button class="choice" type="button" data-tab="deals" aria-pressed="false">
@@ -270,10 +296,10 @@
 
     <div id="panel-banter" class="hidden">
       <div id="banterEmpty" class="empty hidden"></div>
-      <section id="matchups">
-        <h2>This week's match-ups</h2>
-        <p class="sub" id="matchSub"></p>
-        <div class="cards" id="cards"></div>
+      <section id="weekSection" class="hidden">
+        <h2 id="weekTitle">Last gameweek in review</h2>
+        <p class="sub">What happened in the latest finished gameweek. This part is new every week.</p>
+        <ul class="facts" id="weekFacts"></ul>
       </section>
       <section id="awardsSection" class="hidden">
         <h2>Season awards</h2>
@@ -282,7 +308,7 @@
       </section>
       <section id="factsSection">
         <h2>Facts to argue about</h2>
-        <p class="sub">Worked out from this season's results. All in good fun.</p>
+        <p class="sub">The season's records so far, so these only change when somebody breaks one. All in good fun.</p>
         <ul class="facts" id="facts"></ul>
         <button class="btn ghost hidden" id="moreFacts" type="button"></button>
       </section>
@@ -338,6 +364,13 @@
           <h3 class="minihead">Points each gameweek</h3>
           <p class="sub">Shaded against that week's league average: green above, red below. W, D or L is the head-to-head result.</p>
           <div class="tablewrap" id="weeksWrap"><table class="weeks" id="weeksTable"></table></div>
+        </section>
+        <section id="placesSection" class="hidden">
+          <h2>Places over time</h2>
+          <p class="sub">Where each manager sat in the table after every gameweek, with 1st at the top. Your line is amber. Hover or tap a line to see whose it is.</p>
+          <p class="racecap" id="placesCaption" aria-live="polite"></p>
+          <div class="chartwrap scrollx" id="placesWrap"><svg class="race" id="placesChart" role="img"></svg></div>
+          <ul class="moves" id="placesNotes"></ul>
         </section>
         <section>
           <h2>Head to head</h2>
@@ -430,8 +463,13 @@ const TABS = FULL ? ["upcoming", "banter", "recap", "deals", "charts", "rivalrie
                   : ["upcoming", "banter", "recap", "deals", "charts", "rivalries"];
 let leagueId = null;     // the league this page is open on
 let tab = null;          // the choice currently open (none until a friend picks one)
-const loaded = { upcoming: null, banter: null, recap: null, deals: null, charts: null, rivalries: null };   // which league each choice's data is for, so each loads only once
+const loaded = { upcoming: null, recap: null, deals: null, charts: null, rivalries: null };   // which league each choice's data is for, so each loads only once (Banter is asked for every time, see refreshBanter)
 let BANTER = null, showAll = false;
+let LIVE = null;         // live scores for the match-up cards, {gw, scores: {team ID: {points, left, playing}}}, or null (see load_matchups_live in app.py)
+let banterPending = null, banterAt = 0;   // a Banter request in flight, and when the last one was made
+let matchTimer = null, matchAt = 0;       // the timer that refreshes the cards, and when they last refreshed
+const BANTER_FRESH_MS = 15 * 1000;        // Banter and the cards share one request: it isn't repeated within this long
+const MATCH_REFRESH_MS = 5 * 60 * 1000;   // while the page is open the cards ask again this often (the server keeps what it fetched for 10 minutes)
 let CH = null;           // the charts the server sent (see league_charts in app.py); this page only draws them
 let myId = null;         // your team ID, if we know it, so your line and row stand out
 let me = null;           // myId, if that team is in this league
@@ -475,17 +513,18 @@ async function openTab(name) {
   TABS.forEach(t => $("panel-" + t).classList.toggle("hidden", t !== name));
   $("error").classList.add("hidden");
   setAddress();
-  // the recap is asked for every time it's opened, because it changes as games finish
-  // (the server keeps what the AI wrote, so asking again doesn't write it again)
-  if (name === "team" || (loaded[name] === leagueId && name !== "recap")) return;
+  // the recap and Banter are asked for every time they're opened, because they change as games finish
+  // (the server keeps what the AI wrote, so asking again doesn't write it again, and keeps the league for 10 minutes)
+  const again = name === "recap" || name === "banter";
+  if (name === "team" || (loaded[name] === leagueId && !again)) return;
   const forLeague = leagueId;
   $("loading").style.display = "";
   try {
+    if (name === "banter") { await refreshBanter(); return; }
     const data = await getJson(`/api/league/${forLeague}/${name}`);
     if (forLeague !== leagueId) return;   // they opened another league while this was loading
     $("leagueLine").textContent = data.league_name;
-    if (name === "banter") renderBanter(data);
-    else if (name === "recap") renderRecap(data);
+    if (name === "recap") renderRecap(data);
     else if (name === "deals") renderDeals(data);
     else if (name === "charts") renderCharts(data);
     else if (name === "upcoming") renderUpcoming(data);
@@ -500,7 +539,9 @@ async function openTab(name) {
 
 function openLeague(id, firstTab) {
   leagueId = id;
-  loaded.upcoming = loaded.banter = loaded.recap = loaded.deals = loaded.charts = loaded.rivalries = null;
+  loaded.upcoming = loaded.recap = loaded.deals = loaded.charts = loaded.rivalries = null;
+  BANTER = null; LIVE = null; banterPending = null; banterAt = 0;
+  renderMatchups();   // hides the match-ups until this league's arrive
   $("dealsCard").classList.add("hidden");
   RIV = null;
   UP = null; showAllMatches = false;
@@ -515,6 +556,9 @@ function openLeague(id, firstTab) {
   TABS.forEach(t => $("panel-" + t).classList.add("hidden"));
   if (TABS.includes(firstTab)) openTab(firstTab); else setAddress();
   loadPeople();   // asks who they are, unless this browser already knows
+  loadMatchups();   // the match-ups sit above the choices, so they load now, whichever choice is opened
+  clearInterval(matchTimer);
+  matchTimer = setInterval(() => { if (!document.hidden) loadMatchups(); }, MATCH_REFRESH_MS);
 }
 
 // ---------------------------------------------------------------- banter
@@ -523,36 +567,98 @@ function side(p) {
   return `<div class="side"><div class="team">${esc(p.team)}</div><div class="who">${esc(p.manager)} · ${place(p.position)}, ${p.league_points} pts</div></div>`;
 }
 
-function card(cls, title, a, b, line) {
-  return `<div class="card ${cls}"><div class="tag">${esc(title)}</div>
-    <div class="versus">${side(a)}<span class="v">v</span>${side(b)}</div>
-    <div class="line">${esc(line)}</div></div>`;
+// the match-ups pinned above the choices: a card for each, with the live score once the gameweek is on
+function matchCard(cls, title, c) {
+  const a = LIVE?.gw === c.gw ? LIVE.scores[c.a.entry_id] : null, b = LIVE?.gw === c.gw ? LIVE.scores[c.b.entry_id] : null;
+  const on = !!(a && b);
+  const line = !on ? c.line
+    : (a.left + b.left ? `${a.left} v ${b.left} players still to play.` : "All their players have played.") + " An estimate until the gameweek ends.";
+  return `<div class="card ${cls}"><div class="tag">${esc(title)}${on ? ' <span class="chip liveon">Live</span>' : ""}</div>
+    <div class="versus">${side(c.a)}<span class="v ${on ? "score" : ""}">${on ? `${a.points} – ${b.points}` : "v"}</span>${side(c.b)}</div>
+    <div class="line">${esc(line)}</div>${c.tease ? `<div class="tease">${esc(c.tease)}</div>` : ""}</div>`;
 }
 
-function renderBanter(data) {
-  BANTER = data;
+function renderMatchups() {
+  const b = BANTER?.banter, cards = [];
+  if (b?.hot_match) cards.push(matchCard("hot", `Hot match of the week (GW${b.hot_match.gw})`, b.hot_match));
+  (b?.battles || []).forEach(x => cards.push(matchCard(x.title === "Battle for 3rd" ? "" : "spoon", x.title, x)));
+  $("matchups").classList.toggle("hidden", !cards.length);
+  if (!cards.length) return;
+  const gw = b.hot_match.gw;
+  $("matchSub").textContent = LIVE?.gw === gw
+    ? `Gameweek ${gw} is being played. The scores are estimates until it ends, and refresh every few minutes.`
+    : `Looking ahead to gameweek ${gw}.`;
+  $("cards").innerHTML = cards.join("");
+}
+
+// Banter is asked for as soon as the league opens (for the cards above), and again each time Banter is opened.
+// One request feeds both; it isn't repeated within BANTER_FRESH_MS, and two callers at once share one request.
+function refreshBanter() {
+  if (banterPending) return banterPending;
+  if (BANTER && Date.now() - banterAt < BANTER_FRESH_MS) return Promise.resolve(true);
+  const forLeague = leagueId;
+  banterAt = Date.now();
+  const mine = (async () => {
+    try {
+      const data = await getJson(`/api/league/${forLeague}/banter`);
+      if (forLeague !== leagueId) return false;   // they opened another league while this was loading
+      $("leagueLine").textContent = data.league_name;
+      BANTER = data;
+      renderMatchups();
+      renderBanter();
+      return true;
+    } finally {
+      if (banterPending === mine) banterPending = null;
+    }
+  })();
+  banterPending = mine;
+  return mine;
+}
+
+async function refreshLive() {
+  const forLeague = leagueId;
+  try {
+    const data = await getJson(`/api/league/${forLeague}/live`);
+    if (forLeague !== leagueId) return;
+    LIVE = data.live;
+  } catch (e) {
+    LIVE = null;   // the scores are a bonus: the cards still show without them
+  }
+  renderMatchups();
+}
+
+async function loadMatchups() {
+  matchAt = Date.now();
+  try { await refreshBanter(); }
+  catch (e) { BANTER = null; renderMatchups(); return; }   // no cards; opening Banter shows the reason
+  await refreshLive();
+}
+
+function renderBanter() {
   const b = BANTER.banter;
   // the server works out all of this (see league_banter in app.py); this just draws it
   $("banterEmpty").classList.toggle("hidden", !!b);
-  $("matchups").classList.toggle("hidden", !b);
   $("factsSection").classList.toggle("hidden", !b);
   $("luckSection").classList.toggle("hidden", !b);
+  $("weekSection").classList.add("hidden");
   $("awardsSection").classList.add("hidden");
   if (!b) {
     $("banterEmpty").textContent = "The banter starts once a gameweek has finished. It needs a head-to-head league, because it's built from the match results.";
     return;
   }
-  const cards = [];
-  if (b.hot_match) {
-    const h = b.hot_match;
-    cards.push(card("hot", `Hot match of the week (GW${h.gw})`, h.a, h.b, h.line));
-  }
-  b.battles.forEach(x => cards.push(card(x.title === "Battle for 3rd" ? "" : "spoon", x.title, x.a, x.b, x.line)));
-  $("matchSub").textContent = b.hot_match ? `Looking ahead to gameweek ${b.hot_match.gw}.` : "No matches left to play.";
-  $("cards").innerHTML = cards.join("") || `<div class="empty">Nothing to show yet.</div>`;
+  renderWeek(b.week);
   renderAwards(b.awards || []);
   renderFacts();
   renderLuck(b.luck);
+}
+
+// what happened in the latest finished gameweek: all of it is shown, because it is the part that's new each week
+function renderWeek(w) {
+  const list = w?.facts || [];
+  $("weekSection").classList.toggle("hidden", !list.length);
+  if (!list.length) return;
+  $("weekTitle").textContent = `Gameweek ${w.gw} in review`;
+  $("weekFacts").innerHTML = list.map(f => `<li>${rich(f.text)}</li>`).join("");
 }
 
 // ---------------------------------------------------------------- who you are, and your matches
@@ -677,7 +783,7 @@ function renderAwards(list) {
 function youChanged() {
   me = CH && CH.managers.some(m => m.entry_id === myId) ? myId : null;
   if (BANTER?.banter) { renderAwards(BANTER.banter.awards || []); renderLuck(BANTER.banter.luck); }
-  if (CH) { picked = null; renderRace(); renderGrid(); renderHeadToHead(); renderScatter(); renderSpread(); }
+  if (CH) { picked = null; renderRace(); renderPlaces(); renderGrid(); renderHeadToHead(); renderScatter(); renderSpread(); }
   if (SQ) renderSquads();
   if (loaded.upcoming === leagueId) drawMyMatches();
 }
@@ -964,7 +1070,7 @@ function renderCharts(data) {
   }
   me = CH.managers.some(m => m.entry_id === myId) ? myId : null;   // that team might not be in this league
   picked = null;
-  renderRace(); renderGrid(); renderHeadToHead(); renderScatter(); renderSpread();
+  renderRace(); renderPlaces(); renderGrid(); renderHeadToHead(); renderScatter(); renderSpread();
 }
 
 // ---------------------------------------------------------------- league race
@@ -1040,6 +1146,63 @@ function renderRace() {
   chart.setAttribute("aria-label", `Line chart of league points for ${h.managers.length} managers, GW${h.gws[0]} to GW${h.gws.at(-1)}.`);
   chart.innerHTML = svg;
   $("raceCaption").innerHTML = raceDefaultCaption();
+}
+
+// ---------------------------------------------------------------- places over time
+
+// what a hovered or tapped line says: where they are now, and the best and worst place they have held
+function placesCaption(m, you) {
+  const P = CH.places, best = Math.min(...m.places), worst = Math.max(...m.places);
+  const gw = p => P.gws[m.places.indexOf(p)];
+  const name = you ? "<strong>You</strong> are" : `<strong>${esc(m.team)}</strong> are`;
+  return `${name} ${place(m.places.at(-1))}. Highest ${place(best)} (GW${gw(best)}), lowest ${place(worst)} (GW${gw(worst)}).`;
+}
+
+function placesDefaultCaption() {
+  const m = CH.places.managers.find(x => x.entry_id === me);
+  return m ? placesCaption(m, true) : "Hover or tap a line to see whose it is.";
+}
+
+function renderPlaces() {
+  const P = CH.places;
+  $("placesSection").classList.toggle("hidden", !P);
+  if (!P) return;   // fewer than two gameweeks have finished: a line needs two points
+  const n = P.gws.length, size = P.managers.length;
+  const W = 720, L = 36, R = 200, T = 14, B = 30, H = T + B + Math.max(size - 1, 1) * 24;
+  const x = i => L + i * (W - L - R) / Math.max(n - 1, 1);
+  const y = p => T + (p - 1) * (H - T - B) / Math.max(size - 1, 1);   // 1st at the top
+
+  let svg = "";
+  for (let p = 1; p <= size; p++) {
+    svg += `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(p)}" y2="${y(p)}"/><text x="${L - 10}" y="${y(p) + 4}" text-anchor="end">${p}</text>`;
+  }
+  const every = Math.ceil(n / 10);
+  P.gws.forEach((gw, i) => {
+    if (i % every === 0 || i === n - 1) svg += `<text x="${x(i)}" y="${H - 8}" text-anchor="middle">GW${gw}</text>`;
+  });
+
+  // other managers first, so yours is drawn on top
+  const order = [...P.managers].sort((a, b) => (a.entry_id === me) - (b.entry_id === me));
+  order.forEach(m => {
+    const pts = m.places.map((p, i) => `${x(i).toFixed(1)},${y(p).toFixed(1)}`).join(" ");
+    const dots = m.places.map((p, i) => `<circle class="wkdot" cx="${x(i).toFixed(1)}" cy="${y(p).toFixed(1)}" r="3.5"><title>${esc(m.team)}, GW${P.gws[i]}: ${place(p)}</title></circle>`).join("");
+    svg += `<g class="line ${m.entry_id === me ? "me" : ""}" data-id="${m.entry_id}"><title>${esc(m.team)}</title>`
+      + `<polyline class="ink" points="${pts}"/><polyline class="hit" points="${pts}"/>${dots}`
+      + `<circle class="dot" cx="${x(n - 1).toFixed(1)}" cy="${y(m.places.at(-1)).toFixed(1)}" r="${m.entry_id === me ? 5 : 3}"/></g>`;
+  });
+  // everyone's name at the end of their line (places are all different, so the names never overlap)
+  P.managers.forEach(m => {
+    const mine = m.entry_id === me;
+    svg += `<text class="lbl ${mine ? "mine" : ""}" x="${x(n - 1) + 12}" y="${y(m.places.at(-1)) + 4}">${esc(short(m.team, 24))}${mine ? " (you)" : ""}</text>`;
+  });
+
+  const chart = $("placesChart");
+  chart.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  chart.setAttribute("aria-label", `Line chart of table places for ${size} managers, GW${P.gws[0]} to GW${P.gws.at(-1)}.`);
+  chart.innerHTML = svg;
+  $("placesCaption").innerHTML = placesDefaultCaption();
+  $("placesNotes").innerHTML = P.notes.map(t => `<li>${rich(t)}</li>`).join("");
+  $("placesWrap").scrollLeft = $("placesWrap").scrollWidth;   // on a small screen start at the names and the latest weeks
 }
 
 function renderGrid() {
@@ -1312,11 +1475,26 @@ $("raceChart").addEventListener("pointerleave", () => {
   document.querySelectorAll("#raceChart .hot").forEach(x => x.classList.remove("hot"));
   $("raceCaption").innerHTML = raceDefaultCaption();
 });
+$("placesChart").addEventListener("pointerover", e => {
+  const g = e.target.closest(".line"); if (!g) return;
+  document.querySelectorAll("#placesChart .hot").forEach(x => x.classList.remove("hot"));
+  g.classList.add("hot");
+  $("placesChart").appendChild(g);   // bring it to the front
+  const id = Number(g.dataset.id);
+  $("placesCaption").innerHTML = placesCaption(CH.places.managers.find(m => m.entry_id === id), id === me);
+});
+$("placesChart").addEventListener("pointerleave", () => {
+  document.querySelectorAll("#placesChart .hot").forEach(x => x.classList.remove("hot"));
+  if (CH?.places) $("placesCaption").innerHTML = placesDefaultCaption();
+});
 $("h2hTable").addEventListener("click", e => {
   const row = e.target.closest("tr[data-id]"); if (!row) return;
   const id = Number(row.dataset.id);
   picked = picked === id ? null : id;
   renderPicked();
+});
+document.addEventListener("visibilitychange", () => {   // a tab left in the background doesn't refresh, so catch up on return
+  if (!document.hidden && leagueId && Date.now() - matchAt > MATCH_REFRESH_MS) loadMatchups();
 });
 $("choices").addEventListener("click", e => {
   const b = e.target.closest(".choice"); if (b) openTab(b.dataset.tab);

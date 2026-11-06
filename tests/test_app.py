@@ -5,6 +5,7 @@ FPL servers and always give the same result.
 Run with:  pytest -v
 """
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 import anthropic
@@ -1953,6 +1954,9 @@ def test_battle_cards_follow_the_table():
     assert teams(by_title["Battle for 3rd"]) == {104, 101}
     assert teams(by_title["Wooden spoon watch"]) == {102, 103}
     assert by_title["Wooden spoon watch"]["line"] == "3 points apart."
+    assert banter["hot_match"]["tease"] in app.CARD_TEASES["hot"]       # each card has its own line of banter
+    assert by_title["Battle for 3rd"]["tease"] in app.CARD_TEASES["third"]
+    assert by_title["Wooden spoon watch"]["tease"] in app.CARD_TEASES["spoon"]
 
 
 def test_cards_are_left_out_when_there_are_too_few_matches():
@@ -1966,6 +1970,12 @@ def test_no_battles_when_nothing_is_left_to_play():
     assert banter["hot_match"] is None and banter["battles"] == []
 
 
+@pytest.fixture
+def first_wording(monkeypatch):
+    """Always use a fact's first wording, so a test can check the exact text whatever the gameweek is."""
+    monkeypatch.setattr(app, "banter_wording", lambda options, kind, gw: options[0])
+
+
 def facts_by_kind(matches):
     return {f["kind"]: f["text"] for f in app.league_banter(banter_league(matches))["facts"]}
 
@@ -1977,14 +1987,14 @@ def test_facts_are_capped_and_not_repeated(monkeypatch):
     assert len(kinds) == len(set(kinds))
 
 
-def test_harsh_fact_names_the_highest_losing_score(monkeypatch):
+def test_harsh_fact_names_the_highest_losing_score(monkeypatch, first_wording):
     monkeypatch.setattr(app, "FACT_COUNT", 20)
     assert facts_by_kind(BANTER_WEEKS)["harsh"] == (
         "**Team 2** scored 69 in GW2 and still lost to **Team 0** (70). "
-        "Brutal. Nobody should lose with that.")
+        "Take that up with whoever drew the fixtures.")
 
 
-def test_each_fact_reads_from_the_numbers(monkeypatch):
+def test_each_fact_reads_from_the_numbers(monkeypatch, first_wording):
     monkeypatch.setattr(app, "FACT_COUNT", 20)
     facts = facts_by_kind(BANTER_WEEKS)
     assert facts["thrashing"].startswith(
@@ -1997,7 +2007,7 @@ def test_each_fact_reads_from_the_numbers(monkeypatch):
                              "The rest of you can take notes.")
 
 
-def test_luck_fact_finds_the_manager_whose_table_place_lags_their_points(monkeypatch):
+def test_luck_fact_finds_the_manager_whose_table_place_lags_their_points(monkeypatch, first_wording):
     monkeypatch.setattr(app, "FACT_COUNT", 20)
     monkeypatch.setattr(app, "LUCK_FACT_MIN", 99)   # no "play everyone" facts (they name Team 2 too)
     # Team 2 scores 200 (the most) but loses both games by a point, so it sits 4th in the table
@@ -2008,14 +2018,14 @@ def test_luck_fact_finds_the_manager_whose_table_place_lags_their_points(monkeyp
         "The fixture list has it in for them.")
 
 
-def test_a_winning_run_is_called_out(monkeypatch):
+def test_a_winning_run_is_called_out(monkeypatch, first_wording):
     monkeypatch.setattr(app, "FACT_COUNT", 20)
     weeks = [match(gw, 10, 60, 11 + gw, 40) for gw in (1, 2, 3)]
     assert facts_by_kind(weeks)["streak"] == ("**Team 0** have won 3 in a row. "
                                               "Somebody stop them before the rest of you get embarrassed.")
 
 
-def test_a_losing_run_gets_a_poke(monkeypatch):
+def test_a_losing_run_gets_a_poke(monkeypatch, first_wording):
     monkeypatch.setattr(app, "FACT_COUNT", 20)
     weeks = [match(1, 10, 60, 11, 40), match(2, 12, 60, 11, 40), match(3, 13, 60, 11, 40)]
     assert facts_by_kind(weeks)["streak"] == ("**Team 1** have lost 3 in a row. "
@@ -2054,6 +2064,212 @@ def test_banter_route_gives_a_friendly_error(monkeypatch):
     res = app.app.test_client().get("/api/league/999/banter")
     assert res.status_code == 400
     assert "No Draft league found" in res.get_json()["error"]
+
+
+# ---------------------------------------------------------------- banter wording and last gameweek's facts
+
+# the fields each kind of wording is given (the comments in BANTER_LINES list the same)
+WORDING_FIELDS = {
+    "unlucky": {"team", "pts", "exp"}, "lucky": {"team", "pts", "exp"}, "luck": {"team", "sp", "tp"},
+    "harsh": {"loser", "mine", "winner", "theirs", "gw"},
+    "streak_win": {"team", "n"}, "streak_loss": {"team", "n"},
+    "thrashing": {"win", "lose", "top", "bottom", "gw", "diff"},
+    "closest": {"win", "lose", "top", "bottom", "gw", "diff"},
+    "low": {"team", "pts", "gw"}, "high": {"team", "pts", "gw"},
+    "wk_high": {"team", "pts", "gw"}, "wk_low": {"team", "pts", "gw"},
+    "wk_win": {"win", "lose", "top", "bottom", "gw", "diff"},
+    "wk_close": {"win", "lose", "top", "bottom", "gw", "diff"},
+    "wk_draw": {"a", "b", "pts", "gw"},
+    "wk_climb": {"team", "n", "old", "new", "gw"}, "wk_fall": {"team", "n", "old", "new", "gw"},
+}
+
+
+def test_every_kind_of_fact_has_three_wordings_that_only_use_its_fields():
+    assert set(app.BANTER_LINES) == set(WORDING_FIELDS)
+    for kind, options in app.BANTER_LINES.items():
+        assert len(options) == 3 and len(set(options)) == 3
+        for text in options:
+            assert set(re.findall(r"{(\w+)}", text)) <= WORDING_FIELDS[kind], (kind, text)
+    for kind, options in app.CARD_TEASES.items():
+        assert len(options) == 3 and not any("{" in t for t in options)
+
+
+def test_a_wording_stays_the_same_all_gameweek_and_changes_the_next():
+    options = app.BANTER_LINES["wk_high"]
+
+    def pick(gw):
+        return app.banter_wording(options, "wk_high", gw)
+
+    assert pick(5) == pick(5)
+    assert len({pick(5), pick(6), pick(7)}) == 3         # three weeks running, three different wordings
+    assert pick(8) == pick(5)                            # and then round again
+
+
+def test_different_kinds_of_fact_do_not_all_use_the_same_wording():
+    positions = {options.index(app.banter_wording(options, kind, 5))
+                 for kind, options in app.BANTER_LINES.items()}
+    assert len(positions) > 1
+
+
+# GW1: Team 0 beats 1 (60-40), Team 2 beats 3 (50-30). GW2: Team 3 beats 0 (80-10), Team 1 beats 2 (75-25).
+# That leaves all four on 3 points, so points scored decides: Team 1 climbs 3rd to 1st, Team 0 falls 1st to
+# 4th.
+# (Team 4, the fifth in banter_league, never plays and stays bottom.)
+CLIMB_WEEKS = [match(1, 10, 60, 11, 40), match(1, 12, 50, 13, 30),
+               match(2, 13, 80, 10, 10), match(2, 11, 75, 12, 25)]
+
+
+def banter_leagues():
+    """Leagues that, between them, produce every kind of fact."""
+    return [
+        banter_league(BANTER_WEEKS),
+        banter_league([match(gw, 10, 60, 11 + gw, 40) for gw in (1, 2, 3)]),    # Team 0 keep winning
+        banter_league([match(1, 10, 60, 11, 40), match(2, 12, 60, 11, 40),
+                       match(3, 13, 60, 11, 40)]),                              # Team 1 keep losing
+        h2h([match(1, 10, 60, 11, 65), match(1, 12, 10, 13, 20),                # lucky and unlucky
+             match(2, 10, 58, 11, 70), match(2, 12, 10, 13, 15)]),
+        banter_league([match(1, 10, 60, 11, 40), match(1, 12, 50, 13, 50)]),                  # a draw
+        banter_league(CLIMB_WEEKS),                                             # a climb and a fall
+        {"league_entries": [{"id": 10 + i, "entry_id": 100 + i, "entry_name": f"Team {i}"} for i in range(6)],
+         "matches": [match(1, 10, 90, 11, 10), match(1, 12, 80, 13, 10), match(1, 14, 70, 15, 10),   # 3 cards
+                     match(2, 10, 0, 15, 0, finished=False), match(2, 12, 0, 13, 0, finished=False),
+                     match(2, 14, 0, 11, 0, finished=False)]},
+    ]
+
+
+@pytest.mark.parametrize("index", [0, 1, 2])
+def test_every_wording_of_every_fact_fills_in_from_real_leagues(monkeypatch, index):
+    monkeypatch.setattr(app, "FACT_COUNT", 20)
+    used = set()
+
+    def pick(options, kind, gw):
+        used.add(kind)
+        return options[index]
+
+    monkeypatch.setattr(app, "banter_wording", pick)
+    texts = []
+    for league in banter_leagues():
+        banter = app.league_banter(league)
+        texts += [f["text"] for f in banter["facts"] + banter["week"]["facts"]]
+        texts += [c["tease"] for c in [banter["hot_match"], *banter["battles"]] if c]
+    # a table-place luck fact only shows when no "play everyone" fact names the same team
+    monkeypatch.setattr(app, "LUCK_FACT_MIN", 99)
+    banter = app.league_banter(banter_league([match(1, 12, 100, 13, 101), match(1, 10, 10, 11, 5),
+                                              match(2, 12, 100, 14, 101), match(2, 10, 10, 13, 5)]))
+    texts += [f["text"] for f in banter["facts"]]
+    assert used == set(app.BANTER_LINES) | set(app.CARD_TEASES)       # every kind of wording was used
+    assert texts and not any("{" in t or "}" in t for t in texts)
+
+
+def week_facts(matches):
+    return {f["kind"]: f["text"] for f in app.league_banter(banter_league(matches))["week"]["facts"]}
+
+
+def test_the_week_facts_are_about_the_latest_gameweek_only(first_wording):
+    week = app.league_banter(banter_league(BANTER_WEEKS))["week"]
+    assert week["gw"] == 2                              # GW3 and GW4 haven't been played
+    texts = {f["kind"]: f["text"] for f in week["facts"]}
+    assert list(texts) == ["wk_high", "wk_low", "wk_win", "wk_close"]      # nobody moved two places
+    assert texts["wk_high"] == "Score of GW2: **Team 0** with 70. Everyone else was playing for second."
+    assert texts["wk_low"].startswith("Worst score of GW2: **Team 4** with 20.")
+    assert texts["wk_win"].startswith("Biggest win of GW2: **Team 1** 50-20 **Team 4**, a 30-point gap.")
+    assert texts["wk_close"].startswith("Closest match of GW2: **Team 0** edged **Team 2** 70-69.")
+
+
+def test_the_week_facts_name_the_biggest_climb_and_fall(first_wording):
+    texts = week_facts(CLIMB_WEEKS)
+    assert texts["wk_climb"] == ("**Team 1** climbed from 3rd to 1st in GW2. Expect them to mention it.")
+    assert texts["wk_fall"].startswith("**Team 0** dropped from 1st to 4th in GW2.")
+
+
+def test_small_moves_are_not_facts():
+    assert {"wk_climb", "wk_fall"}.isdisjoint(week_facts(BANTER_WEEKS))     # everyone moved a place or none
+
+
+def test_a_draw_is_the_closest_match_of_the_week(first_wording):
+    texts = week_facts([match(1, 10, 60, 11, 40), match(1, 12, 50, 13, 50)])
+    assert texts["wk_draw"] == (
+        "**Team 2** and **Team 3** drew 50-50 in GW1. Nobody won and everybody's annoyed.")
+    assert "wk_close" not in texts and "wk_climb" not in texts       # one gameweek: nobody can have moved
+
+
+def test_a_lone_match_is_the_biggest_win_but_not_also_the_closest(first_wording):
+    texts = week_facts([match(1, 10, 60, 11, 40)])
+    assert "wk_win" in texts and "wk_close" not in texts
+
+
+def test_the_week_wording_changes_with_the_gameweek():
+    gw2 = week_facts(BANTER_WEEKS)["wk_high"]
+    gw3 = week_facts(BANTER_WEEKS[:4] + [match(3, 10, 70, 11, 40), match(3, 12, 30, 13, 20)])["wk_high"]
+    assert gw2.startswith(("Score of", "**Team 0** topped", "70 from")) and gw3 != gw2
+    assert "GW3" in gw3 and "GW2" in gw2
+
+
+def test_banter_route_has_the_week_facts_and_a_tease_on_each_card(fake_api, monkeypatch):
+    fake = app.get_json
+    monkeypatch.setattr(app, "get_json", lambda url: banter_league(BANTER_WEEKS)
+                        if url.endswith("/league/123/details") else fake(url))
+    banter = app.app.test_client().get("/api/league/123/banter").get_json()["banter"]
+    assert banter["week"]["gw"] == 2 and len(banter["week"]["facts"]) == 4
+    assert banter["hot_match"]["tease"] in app.CARD_TEASES["hot"]
+
+
+# ---------------------------------------------------------------- places over time
+
+def places_of(matches):
+    places = app.league_charts(banter_league(matches))["places"]
+    return {m["entry_id"]: m["places"] for m in places["managers"]}
+
+
+def test_places_follow_the_table_after_every_gameweek():
+    places = app.league_charts(banter_league(CLIMB_WEEKS))["places"]
+    assert places["gws"] == [1, 2]
+    # all four are level on points after GW2, so points scored (115, 110, 75, 70) decides
+    assert [m["entry_id"] for m in places["managers"]] == [101, 103, 102, 100, 104]       # table order now
+    assert places_of(CLIMB_WEEKS) == {101: [3, 1], 103: [4, 2], 102: [2, 3], 100: [1, 4], 104: [5, 5]}
+    assert places["managers"][0]["team"] == "Team 1"
+
+
+def test_places_notes_name_who_led_and_the_biggest_climb_and_fall():
+    notes = app.league_charts(banter_league(CLIMB_WEEKS))["places"]["notes"]
+    assert notes == ["Most time on top: **Team 1**, first after 1 of 2 gameweeks.",
+                     "Biggest climb since GW1: **Team 1**, 3rd to 1st.",
+                     "Biggest fall since GW1: **Team 0**, 1st to 4th."]
+
+
+def test_places_notes_skip_a_move_of_one_place():
+    notes = app.league_charts(banter_league(BANTER_WEEKS))["places"]["notes"]
+    assert notes == ["Most time on top: **Team 0**, first after 1 of 2 gameweeks."]
+
+
+def test_a_manager_who_led_every_week_is_said_to_have_done_so():
+    weeks = [match(gw, 10, 90, 10 + gw, 10) for gw in (1, 2, 3)]
+    assert app.league_charts(banter_league(weeks))["places"]["notes"][0] == (
+        "Most time on top: **Team 0**, first after every gameweek.")
+
+
+def test_places_look_back_at_most_three_gameweeks():
+    # the big moves all happen between GW1 and GW2, then Teams 1 and 3 keep winning and nobody moves again
+    later = [m for gw in (3, 4, 5) for m in (match(gw, 11, 80, 10, 10), match(gw, 13, 80, 12, 10))]
+    weeks = CLIMB_WEEKS + later
+    places = app.league_charts(banter_league(weeks))["places"]
+    assert places["managers"][0]["places"] == [3, 1, 1, 1, 1]
+    # looking back three gameweeks from GW5 starts at GW2, after the moves: no climb or fall to name
+    assert places["notes"] == ["Most time on top: **Team 1**, first after 4 of 5 gameweeks."]
+
+
+def test_places_need_two_finished_gameweeks():
+    assert app.league_charts(banter_league([match(1, 10, 60, 11, 40)]))["places"] is None
+    assert app.league_charts(banter_league([match(1, 10, 60, 11, 40), match(2, 10, 0, 11, 0, finished=False)])
+                             )["places"] is None
+
+
+def test_the_charts_route_includes_the_places(fake_api, monkeypatch):
+    fake = app.get_json
+    monkeypatch.setattr(app, "get_json", lambda url: banter_league(CLIMB_WEEKS)
+                        if url.endswith("/league/123/details") else fake(url))
+    places = app.app.test_client().get("/api/league/123/charts").get_json()["charts"]["places"]
+    assert places["managers"][0]["places"] == [3, 1]
 
 
 @pytest.mark.parametrize("n,text", [(1, "1st"), (2, "2nd"), (3, "3rd"), (4, "4th"),
@@ -2397,7 +2613,7 @@ def test_banter_route_includes_luck(fake_api, monkeypatch):
     assert luck == sorted(luck, key=lambda r: r["luck"], reverse=True)       # luckiest first
 
 
-def test_luck_facts_name_the_luckiest_and_unluckiest(monkeypatch):
+def test_luck_facts_name_the_luckiest_and_unluckiest(monkeypatch, first_wording):
     monkeypatch.setattr(app, "FACT_COUNT", 20)
     # 100 scores well but meets 101, the top scorer, both weeks; 103 scores poorly but meets the bottom team
     weeks = [match(1, 10, 60, 11, 65), match(1, 12, 10, 13, 20),
@@ -3293,6 +3509,59 @@ def asked_for_live_data(world):
     return any("/live" in url or "/entry/" in url for url in world["calls"])
 
 
+# ---------------------------------------------------------------- live scores on the match-up cards
+
+def get_live(league=123):
+    return app.app.test_client().get(f"/api/league/{league}/live").get_json()
+
+
+def test_the_live_route_scores_the_six_managers_on_the_cards(recap_world):
+    data = get_live()
+    assert data["live"]["gw"] == 3
+    assert data["live"]["scores"] == {                  # no bench points, same sums as the recap
+        "100": {"points": 8, "left": 1, "playing": 0}, "101": {"points": 3, "left": 1, "playing": 0},
+        "102": {"points": 0, "left": 1, "playing": 0}, "103": {"points": 0, "left": 1, "playing": 0}}
+
+
+def test_the_live_route_only_asks_for_the_managers_on_the_cards(recap_world):
+    recap_world["matches"] = RECAP_WEEKS[:4] + [match(3, 10, 0, 11, 0, finished=False)]   # one match
+    get_live()
+    picks = [url for url in recap_world["calls"] if "/entry/" in url]
+    assert {int(u.split("/entry/")[1].split("/")[0]) for u in picks} == {100, 101} and len(picks) == 2
+
+
+def test_nothing_is_live_until_a_game_has_kicked_off(recap_world):
+    for fixture in recap_world["fixtures"]:
+        fixture["started"] = fixture["finished"] = False
+    assert get_live() == {"league_id": 123, "live": None}
+    assert not asked_for_live_data(recap_world)         # and it didn't bother the Draft site for scores
+
+
+def test_nothing_is_live_when_a_feed_is_down(recap_world):
+    recap_world["fixtures"] = None                      # which games have started is unknown
+    assert get_live()["live"] is None
+    recap_world["fixtures"] = [{"event": 3, "team_h": 1, "team_a": 2, "kickoff_time": "2026-10-10T11:30:00Z",
+                                "started": True, "finished": True}]
+    recap_world["live"] = None                          # the points feed is down
+    assert get_live()["live"] is None
+
+
+def test_nothing_is_live_for_a_league_with_no_cards(recap_world):
+    recap_world["matches"] = []
+    assert get_live()["live"] is None
+    recap_world["matches"] = RECAP_WEEKS[:4]            # everything played: no match-ups to show
+    assert get_live()["live"] is None
+
+
+def test_the_live_route_gives_a_friendly_error(monkeypatch):
+    def not_found(url):
+        raise requests.HTTPError(response=type("R", (), {"status_code": 404})())
+
+    monkeypatch.setattr(app, "get_json", not_found)
+    res = app.app.test_client().get("/api/league/999/live")
+    assert res.status_code == 400 and "No Draft league found" in res.get_json()["error"]
+
+
 def test_recap_route_shows_the_live_scoreboard_with_a_plain_recap(recap_world):
     data = get_recap_page()
     recap = data["recap"]
@@ -4010,9 +4279,49 @@ def test_league_hub_asks_new_visitors_who_they_are_and_has_no_share_links():
         assert gone not in page
     # the address never carries Your matches, so a copied link opens on the choices
     assert 'tab && tab !== "upcoming"' in page
-    order = ("panel-upcoming", "panel-banter", "matchups", "awardsSection", "factsSection")
+    order = ("panel-upcoming", "panel-banter", "weekSection", "awardsSection", "factsSection")
     where = [page.index(f'id="{name}"') for name in order]
     assert where == sorted(where)
+
+
+def hub_page():
+    res = app.app.test_client().get("/league?league=123")
+    page = res.data.decode()
+    res.close()
+    return page
+
+
+def test_the_match_ups_are_pinned_above_the_choices_so_every_choice_shows_them():
+    page = hub_page()
+    # not inside any panel: they come before the choice buttons and so before every panel
+    assert page.index('id="matchups"') < page.index('id="choices"') < page.index('id="panel-upcoming"')
+    assert page.index('id="cards"') < page.index('id="choices"')
+    assert "The last gameweek in review" in page                       # Banter's own description changed
+    assert "This week's match-ups, season awards" not in page
+
+
+def test_the_hub_loads_the_match_ups_on_opening_and_keeps_them_fresh():
+    page = hub_page()
+    assert "loadMatchups();" in page and "setInterval" in page and "MATCH_REFRESH_MS" in page
+    assert "/live`" in page                                         # the live scores for the cards
+    assert 'name === "recap" || name === "banter"' in page     # Banter is asked for each time it's opened
+    assert "banter: null" not in page                               # and is no longer a "loaded once" choice
+    assert "visibilitychange" in page                               # a background tab catches up
+
+
+def test_the_hub_shows_last_gameweeks_facts_above_the_records():
+    page = hub_page()
+    assert 'id="weekFacts"' in page and "function renderWeek" in page
+    assert page.index('id="weekSection"') < page.index('id="factsSection"')
+
+
+def test_the_charts_page_draws_places_over_time_under_the_race():
+    page = hub_page()
+    assert 'id="placesChart"' in page and "function renderPlaces" in page and 'id="placesNotes"' in page
+    assert page.index('id="raceChart"') < page.index('id="placesChart"') < page.index('id="h2hTable"')
+    charts, places = page.index('id="panel-charts"'), page.index('id="placesChart"')
+    assert charts < places < page.index('id="panel-rivalries"')
+    assert page.count("renderPlaces()") >= 2          # drawn with the charts, and again when you pick a name
 
 
 # ---------------------------------------------------------------- team names stand out
