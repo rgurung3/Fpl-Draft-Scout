@@ -1119,6 +1119,157 @@ FACT_COUNT = 9           # how many banter facts we keep (the page shows the fir
 STREAK_MIN = 3           # a winning or losing run has to be this long to be worth a mention
 LUCK_MIN_GAP = 2         # table place vs points-scored place: this many places apart counts as unlucky
 LUCK_FACT_MIN = 2        # league points above or below the "play everyone" table that count as luck
+WEEK_MOVE_MIN = 2        # climbing or falling this many places in the latest gameweek makes a fact for it
+RECENT_PLACE_WEEKS = 3   # the "Places over time" notes look at the last three gameweeks
+PLACE_NOTE_MIN = 2       # ... and only mention a climb or a fall of this many places or more
+
+# What the banter says. Each fact has three wordings; banter_wording() picks one from the gameweek, so a
+# fact reads the same all week and differently next week. Names go in already marked for bold (see mark()),
+# and the lines poke at the result or the decision, never at the person. {gw} is a gameweek number, the
+# places ({sp}, {tp}, {old}, {new}) are written out ("4th"), and {exp} is a number of league points.
+BANTER_LINES = {
+    # the whole season so far
+    "unlucky": (   # team, pts, exp
+        "{team} have {pts} league points, but their scores deserved {exp}. "
+        "Robbed by the fixture list, and nobody has even apologised.",
+        "{team} deserve {exp} league points on their scores and have {pts}. "
+        "The fixture list has a favourite, and it isn't them.",
+        "On scores alone {team} would have {exp} league points, not {pts}. "
+        "Take it up with whoever drew the fixtures.",
+    ),
+    "lucky": (   # team, pts, exp
+        "{team} have {pts} league points, but their scores only deserved {exp}. "
+        "Daylight robbery, and they're keeping the points.",
+        "{team} are sitting on {pts} league points when {exp} was fair. "
+        "The fixture list has been very kind. Suspiciously kind.",
+        "On scores alone {team} would have {exp} league points, not {pts}. "
+        "Enjoy it while it lasts. It won't.",
+    ),
+    "luck": (   # team, sp, tp
+        "{team} are {sp} for points scored but only {tp} in the table. The fixture list has it in for them.",
+        "{team} are {sp} for points scored and {tp} in the table. Somewhere a fixture list is laughing.",
+        "Points scored say {sp}, the table says {tp}. "
+        "{team} keep doing the work and the table keeps ignoring it.",
+    ),
+    "harsh": (   # loser, mine, winner, theirs, gw
+        "{loser} scored {mine} in GW{gw} and still lost to {winner} ({theirs}). "
+        "Take that up with whoever drew the fixtures.",
+        "{loser} hit {mine} in GW{gw} and still lost to {winner} ({theirs}). "
+        "That's not bad luck, that's a crime scene.",
+        "{loser} put up {mine} in GW{gw} and went home with nothing, because {winner} ({theirs}) was there. "
+        "Brutal.",
+    ),
+    "streak_win": (   # team, n
+        "{team} have won {n} in a row. Somebody stop them before the rest of you get embarrassed.",
+        "{n} wins on the spin for {team}. The rest of you are now extras in their story.",
+        "{team} have won {n} straight. At this point it's less a run, more a hostile takeover.",
+    ),
+    "streak_loss": (   # team, n
+        "{team} have lost {n} in a row. Has anyone checked they're still setting a lineup?",
+        "{n} losses on the spin for {team}. The lineup page is starting to miss them.",
+        "{team} have now lost {n} in a row. It's less a slump, more a lifestyle.",
+    ),
+    "thrashing": (   # win, lose, top, bottom, gw, diff
+        "Biggest beating so far: {win} {top}-{bottom} {lose} in GW{gw}, a {diff}-point gap. "
+        "{lose} may want to mute the group chat.",
+        "{win} beat {lose} {top}-{bottom} in GW{gw}, the biggest beating of the season ({diff} points). "
+        "{lose} would like that one struck from the records.",
+        "The heaviest defeat of the season is {win} {top}-{bottom} {lose} (GW{gw}, {diff} points). "
+        "{lose}'s defence is still looking for a search party.",
+    ),
+    "closest": (   # win, lose, top, bottom, gw, diff
+        "Closest match so far: {win} edged {lose} {top}-{bottom} in GW{gw}. "
+        "{lose} will be thinking about that one for a while.",
+        "{win} squeezed past {lose} {top}-{bottom} in GW{gw}, the narrowest win of the season. "
+        "{lose} are not sleeping well.",
+        "A {diff}-point margin is as close as it has got: {win} {top}, {lose} {bottom} in GW{gw}. "
+        "One different captain pick and that's a different story.",
+    ),
+    "low": (   # team, pts, gw
+        "Lowest score so far: {team} managed {pts} in GW{gw}. "
+        "Everyone has a bad week. This was a bad month squeezed into one.",
+        "{team} scored {pts} in GW{gw}, the lowest of the season. "
+        "Somebody check they remembered to set a lineup.",
+        "{pts} in GW{gw} is the lowest score of the season and it belongs to {team}. "
+        "Even the autopilot would have done better.",
+    ),
+    "high": (   # team, pts, gw
+        "Best week so far: {team} put up {pts} in GW{gw}. The rest of you can take notes.",
+        "{team} hit {pts} in GW{gw}, the best week anyone has had. Frame it.",
+        "Nobody has scored more than {pts} all season, and {team} did it in GW{gw}. "
+        "Modest as ever, we're sure.",
+    ),
+    # the latest finished gameweek
+    "wk_high": (   # team, pts, gw
+        "Score of GW{gw}: {team} with {pts}. Everyone else was playing for second.",
+        "{team} topped GW{gw} with {pts}. The rest of you were in a different competition.",
+        "{pts} from {team} was the best of GW{gw}. Everyone else can pretend they didn't look.",
+    ),
+    "wk_low": (   # team, pts, gw
+        "Worst score of GW{gw}: {team} with {pts}. A moment of silence, please.",
+        "{team} brought up the rear in GW{gw} with {pts}. The bench would like a word.",
+        "{pts} was all {team} could manage in GW{gw}. The lineup page sends its regards.",
+    ),
+    "wk_win": (   # win, lose, top, bottom, gw, diff
+        "Biggest win of GW{gw}: {win} {top}-{bottom} {lose}, a {diff}-point gap. "
+        "{lose} would like to move on.",
+        "{win} beat {lose} {top}-{bottom} in GW{gw}, the heaviest defeat of the week. "
+        "{lose} are hoping nobody checks the scoreboard.",
+        "{diff} points between {win} ({top}) and {lose} ({bottom}) in GW{gw}. "
+        "Not a match, a public service announcement.",
+    ),
+    "wk_close": (   # win, lose, top, bottom, gw, diff
+        "Closest match of GW{gw}: {win} edged {lose} {top}-{bottom}. {lose} will be replaying that one.",
+        "{win} squeezed past {lose} {top}-{bottom} in GW{gw}, by just {diff}. "
+        "Somebody's captain pick is going to haunt them.",
+        "A {diff}-point margin in GW{gw}: {win} {top}, {lose} {bottom}. "
+        "One different bench decision and it's a different story.",
+    ),
+    "wk_draw": (   # a, b, pts, gw
+        "{a} and {b} drew {pts}-{pts} in GW{gw}. Nobody won and everybody's annoyed.",
+        "GW{gw} gave us a {pts}-{pts} draw between {a} and {b}. A point each and a lot of what-ifs.",
+        "{a} v {b} ended {pts}-{pts} in GW{gw}. They'll both say they were robbed.",
+    ),
+    "wk_climb": (   # team, n, old, new, gw
+        "{team} climbed from {old} to {new} in GW{gw}. Expect them to mention it.",
+        "{team} jumped {n} places in GW{gw}, {old} to {new}. The group chat is about to hear about it.",
+        "Up {n} for {team}: {old} to {new} after GW{gw}. Somebody's lineup finally clicked.",
+    ),
+    "wk_fall": (   # team, n, old, new, gw
+        "{team} dropped from {old} to {new} in GW{gw}. The slope is steep and nobody is holding the rope.",
+        "Down {n} places for {team}, {old} to {new}, after GW{gw}. "
+        "They'd like to blame the fixtures, and might be right.",
+        "{team} slid {n} places in GW{gw}, {old} to {new}. The group chat is being very quiet.",
+    ),
+}
+
+# A line under each match-up card, three wordings each, picked the same way
+CARD_TEASES = {
+    "hot": (
+        "The best-placed pair in the league meet. Whoever loses will pretend it didn't matter.",
+        "Top of the table meets top of the table. Somebody's lead is about to get awkward.",
+        "The league's two heavyweights, one result. No pressure.",
+    ),
+    "third": (
+        "A podium place is up for grabs and nobody is being polite about it.",
+        "Third place is the prize. Fourth place is the lesson.",
+        "The race for the podium. The loser starts drafting excuses.",
+    ),
+    "spoon": (
+        "The wooden spoon is on the line. Nobody wants to be holding it.",
+        "Bottom of the table, and this one decides who's more embarrassed.",
+        "The loser gets the spoon. The winner gets to act like they were never in danger.",
+    ),
+}
+
+
+def banter_wording(options, kind, gw):
+    """
+    One of a fact's wordings, picked from the gameweek: the same fact reads the same all week and
+    differently the next, and different kinds of fact don't all switch at the same time (the kind's
+    letters shift the choice).
+    """
+    return choose(options, gw + sum(ord(c) for c in kind))
 
 
 def ordinal(n):
@@ -1218,15 +1369,19 @@ def league_banter(details):
     hot_match, and the two cards in battles, are three different matches from the next
     gameweek, so no manager is on two cards: hot_match is the best-placed pair, "Battle for
     3rd" the pair closest to 3rd place, and "Wooden spoon watch" the lowest-placed pair.
-    Each card has a short "line" (how far apart they are). Cards are left out when the
-    gameweek has too few matches.
-    facts: up to FACT_COUNT one-sentence facts, best first, each {kind, text}.
+    Each card has a short "line" (how far apart they are) and a "tease" (a line of banter,
+    see CARD_TEASES). Cards are left out when the gameweek has too few matches.
+    facts: up to FACT_COUNT one-sentence facts, best first, each {kind, text}. These are the
+    season's records, so they only change when someone breaks one.
+    week: {gw, facts}, the same kind of facts about the latest finished gameweek only (its best
+    and worst score, biggest win, closest match, biggest climb and fall), which are new every week.
     luck: every manager, luckiest first, with league_points, expected_points (what they'd have
     if they'd played everyone every week, see expected_league_points) and luck (the difference:
     positive means lucky, negative unlucky). The page draws it as a chart.
     awards: the season's titles (see season_awards), [] until a few gameweeks have finished.
     Tone is playful teasing, a notch sharper than mild: it pokes at the result or the decision,
-    never at the person. It's all worked out from the numbers, not written by AI.
+    never at the person. Each fact has three wordings (BANTER_LINES) and the gameweek picks
+    which one shows. It's all worked out from the numbers, not written by AI.
     """
     history = league_history(details)
     if history is None:
@@ -1246,6 +1401,11 @@ def league_banter(details):
 
     def person(entry):
         return {**who[entry], "position": table[entry][0], "league_points": table[entry][1]}
+
+    latest = history["gws"][-1]   # the latest finished gameweek: it picks the wordings, so they change weekly
+
+    def say(kind, **fields):
+        return banter_wording(BANTER_LINES[kind], kind, latest).format(**fields)
 
     played, coming = [], []
     for m in details.get("matches", []):
@@ -1268,25 +1428,26 @@ def league_banter(details):
     def gap_of(m):
         return abs(table[m["a"]][1] - table[m["b"]][1])
 
-    def card(m, **extra):
+    def card(m, kind, **extra):
         gap = gap_of(m)
         apart = f"{gap} {'point' if gap == 1 else 'points'} apart." if gap else "Level on league points."
-        return {**extra, "gw": m["gw"], "a": person(m["a"]), "b": person(m["b"]), "gap": gap, "line": apart}
+        return {**extra, "gw": m["gw"], "a": person(m["a"]), "b": person(m["b"]), "gap": gap, "line": apart,
+                "tease": banter_wording(CARD_TEASES[kind], kind, m["gw"])}
 
     hot, battles = None, []
     week = [m for m in coming if m["gw"] == coming[0]["gw"]] if coming else []
     if week:
         best = min(week, key=lambda m: (place_sum(m), gap_of(m)))
-        hot = card(best)
+        hot = card(best, "hot")
         week.remove(best)
     if week:
         third = min(week, key=lambda m: (abs(table[m["a"]][0] - 3.5) + abs(table[m["b"]][0] - 3.5),
                                          gap_of(m)))
-        battles.append(card(third, title="Battle for 3rd"))
+        battles.append(card(third, "third", title="Battle for 3rd"))
         week.remove(third)
     if week:
         spoon = max(week, key=lambda m: (place_sum(m), -gap_of(m)))
-        battles.append(card(spoon, title="Wooden spoon watch"))
+        battles.append(card(spoon, "spoon", title="Wooden spoon watch"))
 
     facts = []
 
@@ -1299,13 +1460,13 @@ def league_banter(details):
     robbed, kissed = luck[-1], luck[0]
     robbed_entry = robbed["entry_id"] if robbed["luck"] <= -LUCK_FACT_MIN else None   # named below
     if robbed_entry:
-        facts.append({"kind": "unlucky", "text": (
-            f"{mark(robbed['team'])} have {robbed['league_points']} league points, but their scores deserved "
-            f"{robbed['expected_points']:g}. Robbed by the fixture list, and nobody has even apologised.")})
+        facts.append({"kind": "unlucky", "text": say(
+            "unlucky", team=mark(robbed["team"]), pts=robbed["league_points"],
+            exp=f"{robbed['expected_points']:g}")})
     if kissed["luck"] >= LUCK_FACT_MIN:
-        facts.append({"kind": "lucky", "text": (
-            f"{mark(kissed['team'])} have {kissed['league_points']} league points, but their scores only "
-            f"deserved {kissed['expected_points']:g}. Daylight robbery, and they're keeping the points.")})
+        facts.append({"kind": "lucky", "text": say(
+            "lucky", team=mark(kissed["team"]), pts=kissed["league_points"],
+            exp=f"{kissed['expected_points']:g}")})
 
     # luck by table place: who sits furthest below where their points scored say they should be
     # (left out if the "play everyone" fact above already names that team)
@@ -1313,18 +1474,16 @@ def league_banter(details):
     unlucky = max(order, key=lambda e: table[e][0] - (by_scored.index(e) + 1))
     scored_place = by_scored.index(unlucky) + 1
     if table[unlucky][0] - scored_place >= LUCK_MIN_GAP and unlucky != robbed_entry:
-        facts.append({"kind": "luck", "text": (
-            f"{mark(name(unlucky))} are {ordinal(scored_place)} for points scored but only "
-            f"{ordinal(table[unlucky][0])} in the table. The fixture list has it in for them.")})
+        facts.append({"kind": "luck", "text": say(
+            "luck", team=mark(name(unlucky)), sp=ordinal(scored_place), tp=ordinal(table[unlucky][0]))})
 
     # the highest score that still lost
     losses = ([(m["pa"], m["pb"], m["a"], m["b"], m["gw"]) for m in played if m["pa"] < m["pb"]]
               + [(m["pb"], m["pa"], m["b"], m["a"], m["gw"]) for m in played if m["pb"] < m["pa"]])
     if losses:
         mine, theirs, loser, winner, gw = max(losses)
-        facts.append({"kind": "harsh", "text": (
-            f"{mark(name(loser))} scored {mine} in GW{gw} and still lost to "
-            f"{mark(name(winner))} ({theirs}). Brutal. Nobody should lose with that.")})
+        facts.append({"kind": "harsh", "text": say(
+            "harsh", loser=mark(name(loser)), mine=mine, winner=mark(name(winner)), theirs=theirs, gw=gw)})
 
     # the longest winning or losing run that's still going
     runs = []
@@ -1339,45 +1498,75 @@ def league_banter(details):
                 runs.append((n, result, m["entry_id"]))
     if runs:
         n, result, entry = max(runs)
-        team = mark(name(entry))
-        facts.append({"kind": "streak", "text": (
-            f"{team} have won {n} in a row. Somebody stop them before the rest of you get embarrassed."
-            if result == "W" else
-            f"{team} have lost {n} in a row. Has anyone checked they're still setting a lineup?")})
+        facts.append({"kind": "streak", "text": say(
+            "streak_win" if result == "W" else "streak_loss", team=mark(name(entry)), n=n)})
+
+    def outcome(m):
+        """(winner, loser, winning score, losing score)"""
+        return ((m["a"], m["b"], m["pa"], m["pb"]) if m["pa"] > m["pb"]
+                else (m["b"], m["a"], m["pb"], m["pa"]))
+
+    def result_fields(m):
+        """What a line about a decided match needs: the names (marked), the score, the gameweek, the gap."""
+        win, lose, top, bottom = outcome(m)
+        return {"win": mark(name(win)), "lose": mark(name(lose)), "top": top, "bottom": bottom,
+                "gw": m["gw"], "diff": top - bottom}
 
     decided = [m for m in played if m["pa"] != m["pb"]]
     if decided:
-        def outcome(m):
-            """(winner, loser, winning score, losing score)"""
-            return ((m["a"], m["b"], m["pa"], m["pb"]) if m["pa"] > m["pb"]
-                    else (m["b"], m["a"], m["pb"], m["pa"]))
-
-        big = max(decided, key=lambda m: abs(m["pa"] - m["pb"]))
-        win, lose, top, bottom = outcome(big)
-        facts.append({"kind": "thrashing", "text": (
-            f"Biggest beating so far: {mark(name(win))} {top}-{bottom} {mark(name(lose))} in GW{big['gw']}, "
-            f"a {top - bottom}-point gap. {mark(name(lose))} may want to mute the group chat.")})
-        near = min(decided, key=lambda m: abs(m["pa"] - m["pb"]))
-        win, lose, top, bottom = outcome(near)
-        facts.append({"kind": "closest", "text": (
-            f"Closest match so far: {mark(name(win))} edged {mark(name(lose))} {top}-{bottom} "
-            f"in GW{near['gw']}. {mark(name(lose))} will be thinking about that one for a while.")})
+        facts.append({"kind": "thrashing", "text": say(
+            "thrashing", **result_fields(max(decided, key=lambda m: abs(m["pa"] - m["pb"]))))})
+        facts.append({"kind": "closest", "text": say(
+            "closest", **result_fields(min(decided, key=lambda m: abs(m["pa"] - m["pb"]))))})
 
     scores = [(pts, entry, m["gw"]) for m in played
               for pts, entry in ((m["pa"], m["a"]), (m["pb"], m["b"]))]
     if scores:
         pts, entry, gw = min(scores)
-        facts.append({"kind": "low", "text": (
-            f"Lowest score so far: {mark(name(entry))} managed {pts} in GW{gw}. "
-            "Everyone has a bad week. This was a bad month squeezed into one.")})
+        facts.append({"kind": "low", "text": say("low", team=mark(name(entry)), pts=pts, gw=gw)})
         pts, entry, gw = max(scores)
-        facts.append({"kind": "high", "text": (
-            f"Best week so far: {mark(name(entry))} put up {pts} in GW{gw}. "
-            "The rest of you can take notes.")})
+        facts.append({"kind": "high", "text": say("high", team=mark(name(entry)), pts=pts, gw=gw)})
+
+    # the latest finished gameweek on its own: these change every week, where the records above only
+    # change when somebody breaks one. A manager's best and worst score, the biggest win, the closest match
+    # (a draw counts, and it is never the biggest win's match), the biggest climb and the biggest fall
+    this_week = []
+    recent = [m for m in played if m["gw"] == latest]
+    if recent:
+        week_scores = [(pts, entry) for m in recent for pts, entry in ((m["pa"], m["a"]), (m["pb"], m["b"]))]
+        pts, entry = max(week_scores, key=lambda s: (s[0], -table[s[1]][0]))
+        this_week.append({"kind": "wk_high", "text": say(
+            "wk_high", team=mark(name(entry)), pts=pts, gw=latest)})
+        pts, entry = min(week_scores, key=lambda s: (s[0], table[s[1]][0]))
+        this_week.append({"kind": "wk_low", "text": say(
+            "wk_low", team=mark(name(entry)), pts=pts, gw=latest)})
+        won = [m for m in recent if m["pa"] != m["pb"]]
+        biggest = max(won, key=lambda m: abs(m["pa"] - m["pb"])) if won else None
+        if biggest:
+            this_week.append({"kind": "wk_win", "text": say("wk_win", **result_fields(biggest))})
+        nearest = min((m for m in recent if m is not biggest),
+                      key=lambda m: abs(m["pa"] - m["pb"]), default=None)
+        if nearest and nearest["pa"] == nearest["pb"]:
+            this_week.append({"kind": "wk_draw", "text": say(
+                "wk_draw", a=mark(name(nearest["a"])), b=mark(name(nearest["b"])),
+                pts=nearest["pa"], gw=latest)})
+        elif nearest:
+            this_week.append({"kind": "wk_close", "text": say("wk_close", **result_fields(nearest))})
+    if len(history["gws"]) > 1:
+        before = places_at(history, len(history["gws"]) - 2)
+        after = {e: table[e][0] for e in order}
+        climber = max(order, key=lambda e: (before[e] - after[e], -after[e]))
+        faller = max(order, key=lambda e: (after[e] - before[e], after[e]))
+        for kind, entry, moved in (("wk_climb", climber, before[climber] - after[climber]),
+                                   ("wk_fall", faller, after[faller] - before[faller])):
+            if moved >= WEEK_MOVE_MIN:
+                this_week.append({"kind": kind, "text": say(
+                    kind, team=mark(name(entry)), n=moved, old=ordinal(before[entry]),
+                    new=ordinal(after[entry]), gw=latest)})
 
     awards = season_awards(played, {e: name(e) for e in order}, {e: table[e][0] for e in order}, luck)
     return {"gws": history["gws"], "hot_match": hot, "battles": battles, "facts": facts[:FACT_COUNT],
-            "luck": luck, "awards": awards}
+            "week": {"gw": latest, "facts": this_week}, "luck": luck, "awards": awards}
 
 
 def league_people(details):
@@ -1458,6 +1647,44 @@ def league_upcoming(details, strengths=None, snapshots=()):
 
 # ---------------------------------------------------------------- league charts (head-to-head)
 
+def league_places(history, team):
+    """
+    Where every manager has sat in the table after each finished gameweek, for the "Places over time"
+    chart. Worked out from league_history (so no extra requests) the way the real table is: league points,
+    then points scored. team is {team ID: name}. Returns None until two gameweeks have finished (a line
+    needs two points).
+
+    gws: the finished gameweeks. managers: in table order now, each {entry_id, team, places}, where
+    places is their table place after each of those gameweeks (1 = top).
+    notes: up to three sentences for under the chart, names marked for bold (see mark): who has spent
+    the most gameweeks top, and the biggest climb and the biggest fall over the last RECENT_PLACE_WEEKS
+    gameweeks (each only if it is PLACE_NOTE_MIN places or more).
+    """
+    gws = history["gws"]
+    if len(gws) < 2:
+        return None
+    by_week = [places_at(history, i) for i in range(len(gws))]
+    managers = [{"entry_id": m["entry_id"], "team": team[m["entry_id"]],
+                 "places": [week[m["entry_id"]] for week in by_week]} for m in history["managers"]]
+
+    notes = []
+    top = max(managers, key=lambda m: (m["places"].count(1), -m["places"][-1]))
+    weeks_top = top["places"].count(1)
+    if weeks_top:
+        when = "every gameweek" if weeks_top == len(gws) else f"{weeks_top} of {len(gws)} gameweeks"
+        notes.append(f"Most time on top: {mark(top['team'])}, first after {when}.")
+    back = min(RECENT_PLACE_WEEKS, len(gws) - 1)
+    since = f"since GW{gws[-1 - back]}"
+    climber = max(managers, key=lambda m: (m["places"][-1 - back] - m["places"][-1], -m["places"][-1]))
+    faller = max(managers, key=lambda m: (m["places"][-1] - m["places"][-1 - back], m["places"][-1]))
+    for label, m, moved in (("Biggest climb", climber, climber["places"][-1 - back] - climber["places"][-1]),
+                            ("Biggest fall", faller, faller["places"][-1] - faller["places"][-1 - back])):
+        if moved >= PLACE_NOTE_MIN:
+            notes.append(f"{label} {since}: {mark(m['team'])}, "
+                         f"{ordinal(m['places'][-1 - back])} to {ordinal(m['places'][-1])}.")
+    return {"gws": gws, "managers": managers, "notes": notes}
+
+
 def league_charts(details):
     """
     Everything the charts page draws, worked out from the league details (finished matches
@@ -1474,6 +1701,8 @@ def league_charts(details):
     head_to_head: one row per manager (table order), {"entry_id", "vs": [...]}, where each
       opponent they've played has {entry_id, won, drawn, lost, points_for, points_against}.
       Opponents they haven't met yet are left out.
+    places: each manager's table place after every gameweek (see league_places), None until
+      two gameweeks have finished.
     """
     history = league_history(details)
     if history is None:
@@ -1514,7 +1743,8 @@ def league_charts(details):
             "average": round(sum(p for p, _ in played) / len(played), 1) if played else None})
         head_to_head.append({"entry_id": entry,
                              "vs": [opponents[o] for o in order if o in opponents]})
-    return {"history": history, "managers": managers, "head_to_head": head_to_head}
+    return {"history": history, "managers": managers, "head_to_head": head_to_head,
+            "places": league_places(history, {m["entry_id"]: m["team"] for m in managers})}
 
 
 # ---------------------------------------------------------------- saved seasons and rivalries
@@ -2671,6 +2901,7 @@ def load_league(league_id, view="week"):
             "status": el.get("status", "a"),
             "chance": round(availability(el) * 100),  # the real chance for next week, in both views
             "news": el.get("news") or "",
+            "news_added": el.get("news_added"),   # return_date needs it to work out a return date's year
             "fixtures": fixtures[view].get(el["team"], []),
             "breakdown": s["breakdown"],
         })
@@ -2807,6 +3038,42 @@ def load_recap(league_id):
         "written_at": datetime.fromtimestamp(at, timezone.utc).isoformat() if at else None,
         "games": facts["games"], "matches": facts["matches"],
         "stars": facts["stars"], "moves": facts["moves"]}}
+
+
+def load_matchups_live(league_id):
+    """
+    Live scores for the three match-up cards at the top of the league hub (see league_banter), as
+    {"league_id", "live"}. live is None unless the cards' gameweek has started (a game kicked off) and the
+    live points and the managers' picks can be read; otherwise it is {"gw", "scores"} with
+    scores = {team ID: {"points", "left", "playing"}} for the six managers on the cards (see live_scores:
+    the starters' points so far, how many still have a game to finish, how many are in a game right now).
+
+    The same estimate the recap uses, so auto-subs and bonus points aren't in it until the gameweek
+    ends. It asks for the live points once and the picks of just those six managers (cached like the
+    others), and needs no player ratings, so it is much lighter than the recap.
+    """
+    details = fetch(f"{DRAFT}/league/{league_id}/details", LEAGUE_NOT_FOUND)
+    banter = league_banter(details)
+    cards = [] if banter is None else [c for c in [banter["hot_match"], *banter["battles"]] if c]
+    nothing = {"league_id": league_id, "live": None}
+    if not cards:
+        return nothing
+    gw = cards[0]["gw"]
+    boot = fetch(f"{DRAFT}/bootstrap-static", LEAGUE_NOT_FOUND)
+    games = gameweek_games(boot["teams"], gw)
+    if not games or not any(g["started"] for g in games[0]):   # no fixtures to go by, or no kick-off yet
+        return nothing
+    team_ids = [side["entry_id"] for c in cards for side in (c["a"], c["b"])]
+    stats, starters = recap_inputs(gw, team_ids)
+    if not stats or not starters:
+        return nothing
+    players = {el["id"]: {"name": el.get("web_name") or f'Player {el["id"]}', "club": el["team"],
+                          "ppg": num(el.get("points_per_game")), "rating": None}
+               for el in boot["elements"]}
+    scores = live_scores(starters, stats, players, games[1])
+    return {"league_id": league_id, "live": {"gw": gw, "scores": {
+        team: {"points": s["points"], "left": s["left"], "playing": s["playing"]}
+        for team, s in scores.items()}}}
 
 
 # ---------------------------------------------------------------- deals (trades and waiver moves)
@@ -3352,6 +3619,15 @@ def recap(league_id):
     """The weekly recap, written once per stage, with the scores behind it (see load_recap)."""
     try:
         return jsonify(load_recap(league_id))
+    except FplError as e:
+        return jsonify({"error": e.message}), e.status
+
+
+@app.route("/api/league/<int:league_id>/live")
+def live_matchups(league_id):
+    """Live scores for the hub's match-up cards while their gameweek is on (see load_matchups_live)."""
+    try:
+        return jsonify(load_matchups_live(league_id))
     except FplError as e:
         return jsonify({"error": e.message}), e.status
 
