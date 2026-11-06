@@ -4318,7 +4318,7 @@ def test_the_hub_shows_last_gameweeks_facts_above_the_records():
 def test_the_charts_page_draws_places_over_time_under_the_race():
     page = hub_page()
     assert 'id="placesChart"' in page and "function renderPlaces" in page and 'id="placesNotes"' in page
-    assert page.index('id="raceChart"') < page.index('id="placesChart"') < page.index('id="h2hTable"')
+    assert page.index('id="raceChart"') < page.index('id="placesChart"') < page.index('id="spread"')
     charts, places = page.index('id="panel-charts"'), page.index('id="placesChart"')
     assert charts < places < page.index('id="panel-rivalries"')
     assert page.count("renderPlaces()") >= 2          # drawn with the charts, and again when you pick a name
@@ -4795,3 +4795,452 @@ def test_league_hub_has_the_trades_choice_and_the_deals_card_on_the_recap():
     assert 'id="panel-deals"' in page and "function renderDeals" in page and "function fillDealCard" in page
     assert page.index('id="dealsCard"') < page.index('id="recapEmpty"')               # on top of the recap
     assert page.count('"deals"') >= 3 and "deals: null" in page                        # a tab like the others
+
+
+# ---------------------------------------------------------------- match-up card records, and the scoring data
+
+def snapshot(season, *matches):
+    """A saved season for the record tests: each match is (gw, a, b, a_points, b_points)."""
+    return {"season": season, "managers": [],
+            "matches": [{"gw": gw, "a": a, "b": b, "a_points": pa, "b_points": pb}
+                        for gw, a, b, pa, pb in matches]}
+
+
+RECORD_NAMES = {100: "Team 0", 101: "Team 1"}
+
+
+def record_of(snapshots, a=100, b=101):
+    return app.pair_record(snapshots, a, b, RECORD_NAMES)
+
+
+def test_a_pairing_that_has_never_met_says_so():
+    assert record_of([snapshot("2026-27")]) == {
+        "won": 0, "drawn": 0, "lost": 0, "meetings": 0, "line": "First meeting on record."}
+
+
+def test_one_meeting_names_the_winner_the_score_and_the_gameweek():
+    rec = record_of([snapshot("2026-27", (3, 100, 101, 45, 38))])
+    assert rec["line"] == "Met once, in GW3: **Team 0** won 45-38."
+    assert (rec["won"], rec["drawn"], rec["lost"], rec["meetings"]) == (1, 0, 0, 1)
+    flipped = record_of([snapshot("2026-27", (3, 100, 101, 45, 38))], a=101, b=100)  # other way round
+    assert flipped["line"] == "Met once, in GW3: **Team 0** won 45-38."
+    assert (flipped["won"], flipped["lost"]) == (0, 1)
+
+
+def test_a_draw_is_said_to_be_a_draw():
+    rec = record_of([snapshot("2026-27", (3, 100, 101, 40, 40))])
+    assert rec["line"] == "Met once, in GW3: **Team 0** and **Team 1** drew 40-40." and rec["drawn"] == 1
+
+
+def test_several_meetings_give_the_series_and_the_latest_result():
+    old, new = snapshot("2025-26", (38, 100, 101, 50, 40)), snapshot("2026-27", (3, 101, 100, 45, 38))
+    both = record_of([old, new])
+    assert both["line"] == "Met 2 times: All square at 1-1. Last, in GW3: **Team 1** won 45-38."
+    assert (both["won"], both["lost"], both["meetings"]) == (1, 1, 2)
+    meetings = snapshot("2026-27", (3, 100, 101, 45, 38), (14, 100, 101, 60, 60), (20, 100, 101, 70, 30))
+    assert record_of([meetings])["line"] == (
+        "Met 3 times: **Team 0** lead 2-0 (1 drawn). Last, in GW20: **Team 0** won 70-30.")
+
+
+def test_a_meeting_from_an_earlier_season_names_the_season():
+    old = snapshot("2025-26", (38, 100, 101, 50, 40))
+    assert record_of([old, snapshot("2026-27")])["line"] == (
+        "Met once, in GW38 of 2025-26: **Team 0** won 50-40.")
+
+
+def test_cards_carry_the_pairings_record_when_snapshots_are_given():
+    snaps = [snapshot("2026-27", (1, 100, 101, 60, 40))]
+    banter = app.league_banter(banter_league(BANTER_WEEKS), snaps)
+    assert banter["hot_match"]["record"]["line"] == "Met once, in GW1: **Team 0** won 60-40."
+    assert app.league_banter(banter_league(BANTER_WEEKS))["hot_match"]["record"] is None   # nothing to go on
+
+
+def test_banter_route_has_each_cards_record_from_this_seasons_results(fake_api, monkeypatch):
+    fake = app.get_json
+    monkeypatch.setattr(app, "get_json", lambda url: banter_league(BANTER_WEEKS)
+                        if url.endswith("/league/123/details") else fake(url))
+    hot = app.app.test_client().get("/api/league/123/banter").get_json()["banter"]["hot_match"]
+    assert hot["record"]["line"] == "Met once, in GW1: **Team 0** won 60-40."
+    assert hot["record"]["meetings"] == 1
+
+
+def test_banter_has_each_managers_points_for_and_against_in_table_order():
+    scoring = app.league_banter(banter_league(BANTER_WEEKS))["scoring"]
+    assert [m["entry_id"] for m in scoring] == [100, 102, 101, 103, 104]
+    got = {m["entry_id"]: (m["points_for"], m["points_against"], m["league_points"]) for m in scoring}
+    assert got == {100: (130, 109, 6), 102: (159, 120, 3), 101: (90, 80, 3),
+                   103: (50, 90, 0), 104: (20, 50, 0)}
+    assert scoring[0]["team"] == "Team 0"
+
+
+def test_rivalries_route_sends_the_head_to_head_grid_only_with_the_manager_list(fake_api, monkeypatch):
+    fake = app.get_json
+    monkeypatch.setattr(app, "get_json", lambda url: banter_league(BANTER_WEEKS)
+                        if url.endswith("/league/123/details") else fake(url))
+    client = app.app.test_client()
+    grid = client.get("/api/league/123/rivalries").get_json()["grid"]
+    assert [m["team"] for m in grid["managers"]] == ["Team 0", "Team 2", "Team 1", "Team 3", "Team 4"]
+    row = next(r for r in grid["rows"] if r["entry_id"] == 100)
+    assert {o["entry_id"]: (o["won"], o["lost"]) for o in row["vs"]} == {101: (1, 0), 102: (1, 0)}
+    pair = client.get("/api/league/123/rivalries?a=100&b=101").get_json()
+    assert "grid" not in pair and pair["rivalry"]["record"]["a_won"] == 1  # asked for a pair: no grid again
+
+
+def test_the_head_to_head_grid_is_empty_for_a_league_without_matches(fake_api):
+    assert app.app.test_client().get("/api/league/123/rivalries").get_json()["grid"] is None
+
+
+# ---------------------------------------------------------------- season odds
+
+# GW1-3 finished. Team 0 wins all three; Teams 1, 2 and 3 end on 3 points each (Team 2 has scored the most)
+ODDS_WEEKS = [match(1, 10, 60, 11, 40), match(1, 12, 50, 13, 30),
+              match(2, 10, 70, 12, 45), match(2, 13, 55, 11, 35),
+              match(3, 10, 65, 13, 30), match(3, 11, 50, 12, 48)]
+TO_PLAY = [match(4, 10, 0, 11, 0, finished=False), match(4, 12, 0, 13, 0, finished=False),
+           match(5, 10, 0, 12, 0, finished=False), match(5, 11, 0, 13, 0, finished=False),
+           match(6, 10, 0, 13, 0, finished=False), match(6, 11, 0, 12, 0, finished=False)]
+
+
+def test_odds_wait_for_three_finished_gameweeks():
+    assert app.season_odds(recap_league(ODDS_WEEKS[:4] + TO_PLAY), runs=50) is None       # only two so far
+    assert app.season_odds({"league_entries": [{"id": 10, "entry_id": 100}]}) is None      # no matches at all
+
+
+def test_each_managers_odds_and_each_places_odds_add_up_to_one():
+    odds = app.season_odds(recap_league(ODDS_WEEKS + TO_PLAY), runs=400)
+    assert (odds["runs"], odds["gws_played"], odds["gws_left"]) == (400, 3, 3)
+    # level on 3 points, so points scored decides the table: Team 2 (143), Team 1 (125), Team 3 (115)
+    assert [m["entry_id"] for m in odds["managers"]] == [100, 102, 101, 103]
+    for m in odds["managers"]:
+        assert sum(m["odds"]) == pytest.approx(1, abs=0.001)
+        assert m["win"] == m["odds"][0] and m["last"] == m["odds"][-1]
+        assert m["top3"] == pytest.approx(sum(m["odds"][:3]), abs=0.001)
+    for place in range(4):
+        assert sum(m["odds"][place] for m in odds["managers"]) == pytest.approx(1, abs=0.001)
+
+
+def test_a_lead_nobody_can_catch_is_certain():
+    odds = app.season_odds(recap_league(ODDS_WEEKS + TO_PLAY[:2]), runs=300)  # one week left: 9 v at most 6
+    top = odds["managers"][0]
+    assert (top["team"], top["win"], top["odds"][0], odds["gws_left"]) == ("Team 0", 1.0, 1.0, 1)
+    assert odds["lines"][0] == "Title favourite: **Team 0**, 100%."
+    assert odds["lines"][1].startswith("Wooden spoon favourite: **Team")
+
+
+def test_with_no_matches_left_the_odds_are_just_the_table():
+    odds = app.season_odds(recap_league(ODDS_WEEKS), runs=50)
+    assert odds["gws_left"] == 0
+    assert [m["odds"].index(1.0) + 1 for m in odds["managers"]] == [1, 2, 3, 4]
+
+
+def test_the_odds_are_the_same_every_time_for_the_same_results():
+    league = recap_league(ODDS_WEEKS + TO_PLAY)
+    assert app.season_odds(league, runs=200) == app.season_odds(league, runs=200)
+
+
+def test_averages_are_pulled_towards_the_league_average_and_a_stronger_scorer_rates_higher():
+    odds = app.season_odds(recap_league(ODDS_WEEKS + TO_PLAY), runs=1500)
+    by_team = {m["entry_id"]: m for m in odds["managers"]}
+    # Team 0 averaged 65 in three weeks; the league averaged 48.2, and five weeks of that are mixed in:
+    # (195 + 5 x 48.17) / 8 = 54.5
+    assert by_team[100]["average"] == pytest.approx(54.5, abs=0.1)
+    assert by_team[102]["average"] > by_team[101]["average"] > by_team[103]["average"]
+    assert by_team[102]["expected_place"] < by_team[103]["expected_place"]  # level on points, better scorer
+
+
+@pytest.mark.parametrize("p, text", [(0.714, "71%"), (0.004, "under 1%"), (0.005, "under 1%"), (0, "0%"),
+                                     (0.01, "1%"), (1, "100%")])
+def test_a_chance_is_written_as_a_whole_percent(p, text):
+    assert app.percent_text(p) == text
+
+
+def test_the_odds_are_worked_out_once_for_the_same_results(monkeypatch):
+    monkeypatch.setattr(app, "_odds", {})
+    calls = []
+    monkeypatch.setattr(app, "season_odds", lambda details, runs=None: calls.append(1) or {"fake": True})
+    league = recap_league(ODDS_WEEKS + TO_PLAY)
+    assert app.get_odds(123, league) == app.get_odds(123, league) == {"fake": True}
+    assert len(calls) == 1
+    app.get_odds(123, recap_league(ODDS_WEEKS + [match(4, 10, 60, 11, 40)] + TO_PLAY[1:]))    # a new result
+    assert len(calls) == 2
+    app.get_odds(456, league)                                                                # another league
+    assert len(calls) == 3
+
+
+def test_only_the_latest_odds_are_kept(monkeypatch):
+    monkeypatch.setattr(app, "_odds", {})
+    monkeypatch.setattr(app, "ODDS_KEPT", 2)
+    monkeypatch.setattr(app, "season_odds", lambda details, runs=None: None)
+    for league_id in (1, 2, 3):
+        app.get_odds(league_id, recap_league(ODDS_WEEKS))
+    assert [key[0] for key in app._odds] == [2, 3]
+
+
+def test_odds_route_returns_the_odds(fake_api, monkeypatch):
+    monkeypatch.setattr(app, "_odds", {})
+    monkeypatch.setattr(app, "ODDS_RUNS", 200)
+    fake = app.get_json
+    monkeypatch.setattr(app, "get_json", lambda url: recap_league(ODDS_WEEKS + TO_PLAY)
+                        if url.endswith("/league/123/details") else fake(url))
+    data = app.app.test_client().get("/api/league/123/odds").get_json()
+    assert data["league_name"] == "Recap League" and data["odds"]["runs"] == 200
+    assert data["odds"]["managers"][0]["team"] == "Team 0"
+
+
+def test_odds_route_is_empty_for_a_league_without_matches(fake_api, monkeypatch):
+    monkeypatch.setattr(app, "_odds", {})
+    assert app.app.test_client().get("/api/league/123/odds").get_json()["odds"] is None
+
+
+def test_odds_route_gives_a_friendly_error(monkeypatch):
+    def not_found(url):
+        raise requests.HTTPError(response=type("R", (), {"status_code": 404})())
+
+    monkeypatch.setattr(app, "get_json", not_found)
+    res = app.app.test_client().get("/api/league/999/odds")
+    assert res.status_code == 400 and "No Draft league found" in res.get_json()["error"]
+
+
+# ---------------------------------------------------------------- moves (is being active paying off?)
+
+MOVE_TEAMS = {100: {"team": "Team A", "manager": "Sam Lee"}, 101: {"team": "Team B", "manager": "Kim Ray"},
+              102: {"team": "Team C", "manager": "Al Poe"}, 103: {"team": "Team D", "manager": "Jo Fox"}}
+
+
+def league_moves_for(claims=(), trades=(), points=None, finished=(1, 2, 3, 4, 5, 6)):
+    return app.league_moves(list(trades), list(claims), DEAL_NAMES, MOVE_TEAMS, DEAL_DEADLINES,
+                            list(finished), points or {})
+
+
+def manager_row(moves, entry):
+    return next(m for m in moves["managers"] if m["entry_id"] == entry)
+
+
+def test_there_are_no_moves_before_a_gameweek_has_finished():
+    assert league_moves_for(finished=()) is None
+
+
+def test_a_claim_is_judged_on_the_new_player_against_the_dropped_one_from_the_next_gameweek():
+    claim = make_claim(1, got=5, gave=6, after=3)                                   # counts from GW4
+    points = {3: {5: 99, 6: 99}, 4: {5: 10, 6: 2}, 5: {5: 4, 6: 0}, 6: {5: 6, 6: 1}}  # GW3: before the claim
+    moves = league_moves_for([claim], points=points)
+    a = manager_row(moves, 100)
+    assert (a["moves"], a["claims"], a["net"], a["per_move"]) == (1, 1, 17, 17.0)          # 20 against 3
+    assert a["best"]["text"] == "Star5 for Star6" and a["best"]["swing"] == 17
+    assert (moves["claims"], moves["trades"], moves["waiting"], moves["average_claim"]) == (1, 0, 0, 17.0)
+
+
+def test_a_claim_for_a_gameweek_that_has_not_finished_is_only_waiting():
+    moves = league_moves_for([make_claim(1, got=5, gave=6, after=6)], points={6: {5: 9}})
+    assert (moves["claims"], moves["waiting"]) == (0, 1)
+    assert moves["headline"] == "No claims have been judged yet. 1 more is waiting for GW7 to finish."
+    after_the_season = league_moves_for([make_claim(1, got=5, gave=6, after=9)], points={6: {5: 9}})
+    assert (after_the_season["claims"], after_the_season["waiting"]) == (0, 0)  # no gameweek left to count
+
+
+def test_a_player_dropped_again_stops_counting_for_the_claim_that_brought_him():
+    first = make_claim(1, got=5, gave=6, after=2)                 # Star5 counts from GW3...
+    second = make_claim(2, got=7, gave=5, after=4)                # ...until GW5, when he is dropped for Star7
+    points = {3: {5: 8, 6: 1}, 4: {5: 2, 6: 1}, 5: {5: 20, 6: 0, 7: 3}, 6: {5: 20, 6: 0, 7: 3}}
+    a = manager_row(league_moves_for([first, second], points=points), 100)
+    # claim 1: GW3-4, 10 against 2 = +8 (his GW5 and GW6 points are not counted).
+    # claim 2: GW5-6, 6 against 40 = -34
+    assert (a["moves"], a["net"]) == (2, -26)
+    assert (a["best"]["swing"], a["worst"]["swing"]) == (8, -34)
+
+
+def test_a_claim_dropped_before_it_ever_counted_is_not_judged():
+    first = make_claim(1, got=5, gave=6, after=2)
+    later = (DEAL_DEADLINES[2] + timedelta(hours=2)).isoformat()      # the same gameweek, a little afterwards
+    again = {**make_claim(2, got=7, gave=5, after=2), "added": later}
+    points = {3: {5: 8, 6: 1, 7: 4}, 4: {5: 2, 6: 1, 7: 4}}
+    a = manager_row(league_moves_for([first, again], points=points), 100)
+    assert (a["moves"], a["net"]) == (1, -2)     # only the second claim counts: Star7's 8 points v Star5's 10
+
+
+def test_denied_claims_and_other_kinds_of_row_are_ignored():
+    rows = [make_claim(1, got=5, gave=6, after=2, result="do"),
+            make_claim(2, got=5, gave=6, after=2, result="di"),
+            make_claim(3, got=5, gave=6, after=2, kind="x"), make_claim(4, got=5, gave=6, after=2, entry=999)]
+    moves = league_moves_for(rows, points={3: {5: 8}})
+    assert (moves["claims"], moves["waiting"]) == (0, 0)
+
+
+def test_gameweeks_whose_points_could_not_be_read_are_left_out():
+    claim = make_claim(1, got=5, gave=6, after=2)  # GW3-6, but only GW5 was readable
+    assert manager_row(league_moves_for([claim], points={5: {5: 6, 6: 1}}), 100)["net"] == 5
+    assert league_moves_for([claim], points={})["claims"] == 0                 # nothing readable: not judged
+
+
+def test_a_trade_counts_for_each_side_as_a_move():
+    points = {5: {1: 10, 2: 6, 3: 1, 4: 0}, 6: {1: 8, 2: 2, 3: 0, 4: 2}}
+    moves = league_moves_for(trades=[make_trade()], points=points)
+    a, b = manager_row(moves, 100), manager_row(moves, 101)
+    assert (a["trades"], a["claims"], a["net"], a["best"]["text"]) == (1, 0, 23, "trade with Team B")
+    assert (b["net"], b["worst"]["text"]) == (-23, "trade with Team A")
+    assert (moves["trades"], moves["claims"], moves["average_claim"]) == (1, 0, None)
+    waiting = league_moves_for(trades=[make_trade(after=6)], points=points)
+    assert waiting["trades"] == 0 and manager_row(waiting, 100)["moves"] == 0     # not played yet: not judged
+
+
+def test_managers_are_ranked_by_net_points_and_those_with_no_moves_come_last():
+    claims = [make_claim(1, got=5, gave=6, after=2, entry=101),
+              make_claim(2, got=7, gave=8, after=2, entry=100)]
+    points = {3: {5: 9, 6: 0, 7: 2, 8: 1}}
+    moves = league_moves_for(claims, points=points)
+    assert [(m["team"], m["net"]) for m in moves["managers"]] == [
+        ("Team B", 9), ("Team A", 1), ("Team C", 0), ("Team D", 0)]
+    assert [m["per_move"] for m in moves["managers"]] == [9.0, 1.0, None, None]
+    assert moves["managers"][2]["best"] is None
+
+
+def test_the_headline_says_whether_being_active_has_paid():
+    def headline(got_points, gave_points):
+        claim = make_claim(1, got=5, gave=6, after=2)
+        return league_moves_for([claim], points={3: {5: got_points, 6: gave_points}})["headline"]
+
+    assert headline(20, 3) == ("1 claim judged so far. On average a claim has beaten the player dropped "
+                               "for it by 17 points, so being active has paid.")
+    assert "about as well as the player dropped for it (0)" in headline(3, 3)
+    assert "fallen 20 points short of the player dropped for it, so being active hasn't paid" in (
+        headline(0, 20))
+
+
+def test_the_best_and_worst_single_moves_are_listed_and_the_worst_only_if_they_lost_points():
+    claims = [make_claim(n, got=10 + n, gave=20 + n, after=2) for n in (1, 2, 3, 4)]
+    points = {3: {11: 30, 12: 10, 13: 5, 14: 0, 21: 0, 22: 0, 23: 0, 24: 7}}
+    moves = league_moves_for(claims, points=points)
+    assert [m["swing"] for m in moves["best"]] == [30, 10, 5]                 # at most three, biggest first
+    assert [m["swing"] for m in moves["worst"]] == [-7]                      # only a move that lost points
+    assert league_moves_for([make_claim(1, got=5, gave=6, after=2)], points={3: {5: 4, 6: 1}})["worst"] == []
+
+
+def test_the_lines_praise_the_top_move_maker_and_poke_the_idle(first_wording):
+    moves = league_moves_for([make_claim(1, got=5, gave=6, after=2)], points={3: {5: 17, 6: 0}})
+    assert [(line["tone"], line["text"]) for line in moves["lines"]] == [
+        ("praise", "**Team A** lead the waiver wire: 1 move, 17 points ahead of the players they let go. "
+                   "It's basically a second job."),
+        ("roast", "**Team B**, **Team C** and **Team D** haven't touched the waiver wire all season. "
+                  "It's open, you know.")]
+
+
+def busy_league():
+    """Team A: one big claim (the top). B: three good ones (the sharpest). C: four poor ones (the busiest,
+    in the red). D: none. Every claim counts from GW3."""
+    claims = [make_claim(1, got=21, gave=22, entry=100, after=2)]
+    claims += [make_claim(1 + n, got=30 + n, gave=40 + n, entry=101, after=2) for n in (1, 2, 3)]
+    claims += [make_claim(4 + n, got=50 + n, gave=60 + n, entry=102, after=2) for n in (1, 2, 3, 4)]
+    points = {21: 40}
+    points.update({30 + n: 10 for n in (1, 2, 3)})
+    points.update({60 + n: 5 for n in (1, 2, 3, 4)})
+    return league_moves_for(claims, points={3: points}, finished=(1, 2, 3))
+
+
+@pytest.mark.parametrize("index", [0, 1, 2])
+def test_every_wording_of_every_moves_line_fills_in(monkeypatch, index):
+    used = set()
+
+    def pick(options, kind, gw):
+        used.add(kind)
+        return options[index]
+
+    monkeypatch.setattr(app, "banter_wording", pick)
+    moves = busy_league()
+    assert used == set(app.MOVE_LINES)                    # top, sharp, busy, red and idle all appeared
+    assert [line["tone"] for line in moves["lines"]] == ["praise", "praise", "roast", "roast", "roast"]
+    assert not any("{" in line["text"] or "}" in line["text"] for line in moves["lines"])
+
+
+def test_the_busiest_manager_is_only_poked_when_they_have_done_worse_than_the_average_claim():
+    moves = busy_league()
+    assert (manager_row(moves, 102)["moves"], manager_row(moves, 102)["net"]) == (4, -20)
+    assert moves["average_claim"] == 6.2                                         # (40 + 30 - 20) / 8, rounded
+    # Team C had 4 moves at -5 each, so it is both the busiest and the one in the red
+    kinds = [line["text"] for line in moves["lines"]]
+    assert sum("**Team C**" in text for text in kinds) == 2                     # a line for each
+
+
+def test_every_kind_of_moves_line_has_three_wordings_that_only_use_their_fields():
+    fields = {"moves_top": {"t", "moves", "net"}, "moves_sharp": {"t", "moves", "per"},
+              "moves_busy": {"t", "moves", "net"}, "moves_red": {"t", "moves", "net"}, "moves_idle": {"t"}}
+    assert set(app.MOVE_LINES) == set(fields)
+    for kind, options in app.MOVE_LINES.items():
+        assert len(options) == 3 and len(set(options)) == 3
+        for text in options:
+            assert set(re.findall(r"{(\w+)}", text)) <= fields[kind], (kind, text)
+
+
+def test_moves_word_uses_the_right_unit():
+    assert [app.moves_word(n) for n in (0, 1, 7)] == ["0 moves", "1 move", "7 moves"]
+
+
+# the moves route (deals_world has Team A and Team B, GW1-6 finished and one trade counting from GW5)
+
+def get_moves(league=123):
+    return app.app.test_client().get(f"/api/league/{league}/moves").get_json()
+
+
+def live_gameweeks(world):
+    return sorted(url.split("/event/")[1].split("/")[0] for url in world["calls"] if "/live" in url)
+
+
+def test_moves_route_judges_claims_and_the_trade_from_the_live_feeds(deals_world):
+    deals_world["transactions"] = [make_claim(1, got=5, gave=6, after=1)]                  # counts from GW2
+    deals_world["points"].update({2: {5: 7, 6: 1}, 3: {5: 5, 6: 0}, 4: {5: 3, 6: 2}})
+    data = get_moves()
+    assert data["league_name"] == "Deal League"
+    a = manager_row(data["moves"], 100)
+    assert (a["claims"], a["trades"], a["net"]) == (1, 1, 12 + 23)         # claim: 15 against 3; trade: +23
+    assert live_gameweeks(deals_world) == ["2", "3", "4", "5", "6"]       # from the first move on, not GW1
+
+
+def test_moves_route_asks_for_nothing_when_nobody_has_made_a_move(deals_world):
+    deals_world["trades"] = []
+    data = get_moves()
+    assert live_gameweeks(deals_world) == []
+    assert data["moves"]["claims"] == 0 and all(m["moves"] == 0 for m in data["moves"]["managers"])
+
+
+def test_moves_route_is_empty_before_a_gameweek_has_finished(deals_world):
+    deals_world["finished"] = []
+    assert get_moves()["moves"] is None and live_gameweeks(deals_world) == []
+
+
+def test_moves_route_still_judges_the_trade_when_the_claims_feed_is_down(deals_world):
+    deals_world["down"] = {"transactions"}
+    assert manager_row(get_moves()["moves"], 100)["net"] == 23
+
+
+def test_moves_route_gives_a_friendly_error(monkeypatch):
+    def not_found(url):
+        raise requests.HTTPError(response=type("R", (), {"status_code": 404})())
+
+    monkeypatch.setattr(app, "get_json", not_found)
+    res = app.app.test_client().get("/api/league/999/moves")
+    assert res.status_code == 400 and "No Draft league found" in res.get_json()["error"]
+
+
+# ---------------------------------------------------------------- the hub page: where everything went
+
+def test_the_scatter_moved_to_banter_and_the_head_to_head_grid_to_rivalries():
+    page = hub_page()
+    assert page.index('id="panel-banter"') < page.index('id="scatter"') < page.index('id="panel-recap"')
+    assert page.index('id="panel-rivalries"') < page.index('id="h2hTable"') < page.index('id="panel-team"')
+    charts = page[page.index('id="panel-charts"'):page.index('id="panel-rivalries"')]
+    assert 'id="scatter"' not in charts and 'id="h2hTable"' not in charts
+    assert "function renderScatter(ms)" in page and "renderScatter(b.scoring)" in page
+    assert "GRID = data.grid" in page and "function renderHeadToHead" in page
+
+
+def test_the_hub_has_an_odds_choice_and_a_trades_and_moves_choice():
+    page = hub_page()
+    assert 'data-tab="odds"' in page and 'id="panel-odds"' in page and "function renderOdds" in page
+    assert '"deals", "odds", "charts"' in page and "odds: null" in page          # a tab like the others
+    assert "Trades and moves" in page and 'id="activitySection"' in page and "function fillActivity" in page
+    assert page.index('id="activitySection"') < page.index('id="dealsBody"')       # above the trade tracker
+    assert "/moves`" in page and "/odds" not in page.split("function renderOdds")[0].split("<script>")[0]
+
+
+def test_the_match_up_cards_draw_the_pairings_record():
+    page = hub_page()
+    assert "c.record" in page and "c.record.line" in page
