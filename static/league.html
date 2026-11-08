@@ -68,6 +68,45 @@
   table.clubs td.wk { min-width: 2.4em; padding: 5px 3px; }
   table.clubs th.opp.blank span { color: var(--rival); }
   table.clubs th.opp.double span { color: var(--pitch); }
+  /* squad DNA: one bar for each manager, their 15 players split by club */
+  .dna, .wire { display: grid; gap: 6px; background: var(--surface); border: 1px solid var(--line);
+    border-radius: 4px; padding: 12px 14px; }
+  .dnarow { display: grid; grid-template-columns: 9.5rem minmax(0, 1fr) 4.5rem; align-items: center; gap: 10px; }
+  .dnarow .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+  .dnarow.me .nm { color: var(--ink); font-weight: 600; }
+  .dnarow .cn { color: var(--muted); font-size: .85rem; text-align: right; white-space: nowrap; }
+  .dnabar { display: flex; gap: 2px; height: 28px; }
+  .seg { position: relative; display: flex; align-items: center; justify-content: center; min-width: 0;
+    padding: 0; border: 0; border-radius: 3px; font: inherit; font-size: .75rem; cursor: pointer; overflow: hidden; }
+  .dn1 { background: var(--line); color: var(--ink); }
+  .dn2 { background: color-mix(in srgb, var(--pitch) 45%, var(--surface)); color: var(--ink); }
+  .dn3 { background: var(--pitch); color: var(--bg); }
+  .seg.pick { outline: 2px solid var(--amber); outline-offset: 1px; }
+  .seg.blank::after, .seg.double::after { content: ""; position: absolute; top: 3px; right: 3px; width: 6px;
+    height: 6px; border-radius: 50%; box-shadow: 0 0 0 1px var(--surface); }
+  .seg.blank::after { background: var(--rival); }
+  .seg.double::after { background: var(--amber); }
+  .dnakey { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 8px; font-size: .85rem; color: var(--muted); }
+  .dnakey i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; }
+  .dnakey i.own { background: var(--pitch); }
+  .dnakey i.free { background: var(--amber); }
+  /* where the points are: owned points and wire points for each club */
+  .wirerow { display: grid; grid-template-columns: 2.6rem minmax(0, 1fr) 14rem; align-items: center; gap: 10px;
+    font-size: .9rem; }
+  .wirebar { display: flex; gap: 2px; height: 16px; }
+  .wirebar i { display: block; border-radius: 3px; min-width: 0; }
+  .wirebar i.own { background: var(--pitch); }
+  .wirebar i.free { background: var(--amber); }
+  .wirerow .end { color: var(--muted); font-size: .85rem; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; }
+  #pointsMore { margin-top: 10px; }
+  @media (max-width: 520px) {
+    .dnarow { grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; }
+    .dnarow .dnabar { grid-column: 1 / -1; grid-row: 2; }
+    .dn1 span { display: none; }   /* a one-player segment is too narrow for its club code: tap it, or hover for the title */
+    .wirerow { grid-template-columns: 2.6rem minmax(0, 1fr); gap: 2px 10px; }
+    .wirerow .end { grid-column: 2; }
+  }
   /* who's cheering for whom: one row per fixture, with the managers who have players on each side */
   .fixlist { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 8px; }
   .fix { background: var(--surface); border: 1px solid var(--line); border-left: 5px solid var(--line);
@@ -476,8 +515,24 @@
         <h2>Who owns which club</h2>
         <p class="sub" id="clubsSub"></p>
         <ul class="facts" id="clubsLines"></ul>
-        <div class="tablewrap"><table class="weeks h2h clubs" id="clubsTable"></table></div>
+        <div class="controls">
+          <div class="tabs viewtabs" id="clubsView" role="group" aria-label="Show the clubs as">
+            <button type="button" data-clubs="dna" aria-pressed="true">Squad DNA</button>
+            <button type="button" data-clubs="grid" aria-pressed="false">Grid</button>
+          </div>
+        </div>
+        <div class="dna" id="clubsDna"></div>
+        <div class="dnakey" id="dnaKey"><span><i class="dn3"></i>3 or more players</span><span><i class="dn2"></i>2 players</span><span><i class="dn1"></i>1 player</span></div>
+        <div class="tablewrap hidden" id="clubsGrid"><table class="weeks h2h clubs" id="clubsTable"></table></div>
         <div class="picked hidden" id="clubsPicked"></div>
+        <div id="pointsBlock" class="hidden">
+          <h3 class="minihead">Where the points are</h3>
+          <p class="sub" id="pointsSub"></p>
+          <ul class="facts" id="pointsLines"></ul>
+          <div class="wire" id="pointsRows"></div>
+          <div class="dnakey"><span><i class="own"></i>Owned in the league</span><span><i class="free"></i>On the wire</span></div>
+          <button class="btn ghost hidden" id="pointsMore" type="button"></button>
+        </div>
         <div id="marketBlock" class="hidden">
           <h3 class="minihead">The club market</h3>
           <p class="sub" id="marketSub"></p>
@@ -585,6 +640,10 @@ let CLUBS = null;        // which clubs each squad comes from (see club_exposure
 let clubsPick = null;    // the club grid cell whose players are shown: {id, club}
 let BATTLES = null;      // who is cheering for whom this gameweek, and the side battles (see side_battles in app.py)
 let MARKET = null;       // the clubs the league is buying and selling on the waiver wire (see club_market in app.py)
+let WIRE = null;         // each club's points: owned in the league or still on the wire (see club_points in app.py)
+let clubsMode = "dna";   // the club section shows the squad DNA bars or the grid
+let pointsAll = false;   // where the points are shows every club, not just the first few
+const WIRE_SHOWN = 8;    // clubs shown before "Show all"
 let SQ = null;           // the squads the server sent (see league_squads in app.py); this page only draws them
 let squadView = "week";  // which rating the squad chart uses: "week" (next 5) or "season" (until the break)
 let RIV = null;          // the Rivalries data: the managers and seasons (see league_rivalries in app.py)
@@ -658,9 +717,9 @@ function openLeague(id, firstTab) {
   $("dealsCard").classList.add("hidden");
   RIV = null; GRID = null; ODDS = null; ACT = null; picked = null;
   oddsOpen.clear(); movesAsk = null; movesFor = null;
-  OH = null; ohFor = null; CLUBS = null; clubsPick = null; MARKET = null;
+  OH = null; ohFor = null; CLUBS = null; clubsPick = null; MARKET = null; WIRE = null; pointsAll = false;
   $("oddsMoved").classList.add("hidden"); $("clubsSection").classList.add("hidden");
-  $("marketBlock").classList.add("hidden");
+  $("marketBlock").classList.add("hidden"); $("pointsBlock").classList.add("hidden");
   UP = null; showAllMatches = false;
   PEOPLE = []; renderYou();
   SQ = null; squadView = "week";
@@ -1445,14 +1504,43 @@ async function loadClubs() {
   }
 }
 
+// the club section has two views of the same counts: a bar for each manager (squad DNA) and the grid
+function showClubs(mode) {
+  clubsMode = mode;
+  document.querySelectorAll("#clubsView button").forEach(b => b.setAttribute("aria-pressed", b.dataset.clubs === mode));
+  $("clubsDna").classList.toggle("hidden", mode !== "dna");
+  $("dnaKey").classList.toggle("hidden", mode !== "dna");
+  $("clubsGrid").classList.toggle("hidden", mode !== "grid");
+  if (CLUBS) $("clubsSub").textContent = clubsSubText(CLUBS);
+}
+
+function clubsSubText(c) {
+  if (clubsMode === "grid") {
+    return `How many of each manager's players come from each club, with the most all-in squad first. `
+      + (c.known ? `A red club has no game in gameweek ${c.gw} and a green one plays twice. ` : "") + "Select a number to see the players.";
+  }
+  return `Each bar is a manager's squad of 15 split by club, the biggest stack first, with the most all-in squad at the top. `
+    + (c.known ? `A red dot marks a club with no game in gameweek ${c.gw} and an amber dot one that plays twice. ` : "") + "Select a club to see the players.";
+}
+
 function renderClubs() {
   const c = CLUBS;
   $("clubsSection").classList.toggle("hidden", !c || !c.clubs.length);
   if (!c || !c.clubs.length) return;
   // the server counts the players and writes the lines (see club_exposure in app.py); this just draws them
-  $("clubsSub").textContent = `How many of each manager's players come from each club, with the most all-in squad first. `
-    + (c.known ? `A red club has no game in gameweek ${c.gw} and a green one plays twice. ` : "") + "Select a number to see the players.";
+  showClubs(clubsMode);
   $("clubsLines").innerHTML = c.lines.map(l => `<li>${rich(l.text)}</li>`).join("");
+  const flag = Object.fromEntries(c.clubs.map(k => [k.club, k.flag || ""]));
+  $("clubsDna").innerHTML = c.managers.filter(m => m.total).map(m => {
+    const segs = m.stacks.map(st => {
+      const f = flag[st.club] || "";
+      const tip = `${m.team}: ${st.n} ${st.club} player${st.n === 1 ? "" : "s"}`
+        + (f === "blank" ? `, no game in GW${c.gw}` : f === "double" ? `, two games in GW${c.gw}` : "");
+      return `<button type="button" class="seg dn${Math.min(st.n, 3)} ${f}" style="flex:${st.n}" data-id="${m.entry_id}" data-club="${esc(st.club)}" title="${esc(tip)}" aria-label="${esc(tip)}"><span>${esc(st.club)}</span></button>`;
+    }).join("");
+    return `<div class="dnarow ${m.entry_id === myId ? "me" : ""}"><div class="nm">${esc(m.team)}${m.entry_id === myId ? " (you)" : ""}</div>`
+      + `<div class="dnabar">${segs}</div><div class="cn">${m.clubs_n} club${m.clubs_n === 1 ? "" : "s"}</div></div>`;
+  }).join("");
   const why = k => k.flag === "blank" ? `no game in GW${c.gw}` : k.flag === "double" ? `two games in GW${c.gw}` : `${k.owned} owned players`;
   const head = `<tr><th></th>${c.clubs.map(k => `<th class="opp ${k.flag || ""}" title="${esc(k.club)}: ${why(k)}"><span>${esc(k.club)}${k.flag === "blank" ? " ✕" : k.flag === "double" ? " ×2" : ""}</span></th>`).join("")}</tr>`;
   const rows = c.managers.map(m => {
@@ -1464,6 +1552,38 @@ function renderClubs() {
   }).join("");
   $("clubsTable").innerHTML = head + rows;
   renderClubsPicked();
+}
+
+// ---------------------------------------------------------------- where the points are
+
+async function loadWire() {
+  const forLeague = leagueId;
+  try {
+    const data = await getJson(`/api/league/${forLeague}/club-points`);
+    if (forLeague !== leagueId) return;   // they opened another league while this was loading
+    WIRE = data.points;
+  } catch (e) {
+    WIRE = null;   // a problem here never hides the rest of the charts
+  }
+  renderWire();
+}
+
+function renderWire() {
+  const w = WIRE, show = !!(w && w.clubs.length);
+  $("pointsBlock").classList.toggle("hidden", !show);
+  if (!show) return;
+  // the server adds the points up and writes the lines (see club_points in app.py); this just draws them
+  $("pointsSub").textContent = "The season points of each club's players: the green part is from players owned in the league and the amber part from free agents still on the wire, with the most points on the wire first. A player's points include games before he was dropped, so the amber shows what those players have scored, not what they will.";
+  $("pointsLines").innerHTML = w.lines.map(l => `<li>${esc(l.text)}</li>`).join("");
+  const top = Math.max(1, ...w.clubs.map(k => k.owned_points + k.wire_points));
+  $("pointsRows").innerHTML = (pointsAll ? w.clubs : w.clubs.slice(0, WIRE_SHOWN)).map(k => {
+    const best = k.best_wire ? `best: ${esc(k.best_wire.name)} ${k.best_wire.points}` : "no free agent has scored";
+    return `<div class="wirerow" title="${esc(k.club)}: ${k.owned_points} points from ${k.owned} owned players, ${k.wire_points} from free agents"><div>${esc(k.club)}</div>`
+      + `<div class="wirebar"><i class="own" style="width:${k.owned_points / top * 100}%"></i><i class="free" style="width:${k.wire_points / top * 100}%"></i></div>`
+      + `<div class="end">${k.wire_points} on the wire · ${best}</div></div>`;
+  }).join("");
+  $("pointsMore").classList.toggle("hidden", w.clubs.length <= WIRE_SHOWN);
+  $("pointsMore").textContent = pointsAll ? "Show fewer" : `Show all ${w.clubs.length} clubs`;
 }
 
 // ---------------------------------------------------------------- the club market
@@ -1510,11 +1630,12 @@ function renderMarket() {
 }
 
 function renderClubsPicked() {
-  document.querySelectorAll("#clubsTable td.pick").forEach(td => td.classList.remove("pick"));
+  document.querySelectorAll("#clubsTable td.pick, #clubsDna .seg.pick").forEach(el => el.classList.remove("pick"));
   const m = clubsPick && CLUBS.managers.find(x => x.entry_id === clubsPick.id);
   $("clubsPicked").classList.toggle("hidden", !m);
   if (!m) return;
   document.querySelector(`#clubsTable td[data-id="${m.entry_id}"][data-club="${clubsPick.club}"]`)?.classList.add("pick");
+  document.querySelector(`#clubsDna .seg[data-id="${m.entry_id}"][data-club="${clubsPick.club}"]`)?.classList.add("pick");
   $("clubsPicked").innerHTML = `<strong>${esc(m.team)}</strong> own ${m.counts[clubsPick.club]} from ${esc(clubsPick.club)}: `
     + esc(m.players[clubsPick.club].join(", ")) + ".";
 }
@@ -1526,6 +1647,7 @@ function renderCharts(data) {
   loadSquads();   // the squad chart doesn't need a finished gameweek, and loads on its own
   loadClubs();    // so does the club grid
   loadMarket();   // and the club market under it
+  loadWire();     // and where the points are
   $("chartsEmpty").classList.toggle("hidden", !!CH);
   $("charts").classList.toggle("hidden", !CH);
   if (!CH) {
@@ -1986,12 +2108,20 @@ $("movedChart").addEventListener("pointerleave", () => {
   document.querySelectorAll("#movedChart .hot").forEach(x => x.classList.remove("hot"));
   if (OH) $("movedCaption").innerHTML = movedDefaultCaption();
 });
-$("clubsTable").addEventListener("click", e => {
-  const td = e.target.closest("td[data-club]"); if (!td) return;
-  const pick = { id: Number(td.dataset.id), club: td.dataset.club };
-  clubsPick = clubsPick && clubsPick.id === pick.id && clubsPick.club === pick.club ? null : pick;
+function pickClub(id, club) {
+  clubsPick = clubsPick && clubsPick.id === id && clubsPick.club === club ? null : { id, club };
   renderClubsPicked();
+}
+$("clubsTable").addEventListener("click", e => {
+  const td = e.target.closest("td[data-club]"); if (td) pickClub(Number(td.dataset.id), td.dataset.club);
 });
+$("clubsDna").addEventListener("click", e => {
+  const seg = e.target.closest(".seg[data-club]"); if (seg) pickClub(Number(seg.dataset.id), seg.dataset.club);
+});
+$("clubsView").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (b) showClubs(b.dataset.clubs);
+});
+$("pointsMore").addEventListener("click", () => { pointsAll = !pointsAll; renderWire(); });
 $("oddsTable").addEventListener("click", e => {
   const row = e.target.closest("tr.orow"); if (!row) return;
   const id = Number(row.dataset.id), open = !oddsOpen.has(id);

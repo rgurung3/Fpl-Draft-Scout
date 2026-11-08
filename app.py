@@ -4080,8 +4080,11 @@ def club_exposure(players, managers, next_gw):
       owned     how many players are owned in the league
       clubs     every club that has an owner, most owned first: {club, owned, games (None if not known), flag
                 ("blank", "double" or None)}
-      managers  everyone, the most all-in squad first: {entry_id, team, manager, total, counts {club:
-                players}, players {club: [names, best rated first]}, top_club, top (how many players that is)}
+      managers  everyone, the most all-in squad first (the biggest stack, then the fewest clubs, then by
+                name): {entry_id, team, manager, total, counts {club:
+                players}, players {club: [names, best rated first]}, top_club, top (how many players that is),
+                clubs_n (how many different clubs), stacks ([{club, n}], the biggest stack first, ties by
+                club code: the squad's DNA)}
       lines     banter ({text}), blanks and doubles first, then the most all-in squad (or that nobody is all
                 in), then the most owned club; three wordings each (CLUB_LINES), names marked for bold
     """
@@ -4105,8 +4108,11 @@ def club_exposure(players, managers, next_gw):
         top_club, top = max(counts.items(), key=lambda kv: (kv[1], kv[0]), default=(None, 0))
         rows.append({"entry_id": m["entry_id"], "team": m["team_name"], "manager": m["manager"],
                      "total": len(mine), "counts": dict(counts), "top_club": top_club, "top": top,
+                     "clubs_n": len(counts),
+                     "stacks": [{"club": club, "n": n} for club, n in sorted(
+                         counts.items(), key=lambda kv: (-kv[1], kv[0]))],
                      "players": {club: [p["name"] for p in mine if p["team"] == club] for club in counts}})
-    rows.sort(key=lambda r: (-r["top"], r["team"].lower()))
+    rows.sort(key=lambda r: (-r["top"], r["clubs_n"], r["team"].lower()))
 
     def say(kind, **fields):
         return banter_wording(CLUB_LINES[kind], kind, next_gw).format(**fields)
@@ -4320,6 +4326,96 @@ def load_market(league_id):
     name = details.get("league", {}).get("name", f"League {league_id}")
     return {"league_id": league_id, "league_name": name,
             "market": club_market(draft_rows(league_id, "transactions"), club_of, week)}
+
+
+# ---------------------------------------------------------------- where the points are
+
+CLUB_POINTS_MIN_OWNED = 4   # a club needs this many owned players to be named the best or worst to own
+
+# The lines above the club points, three wordings each, picked by the gameweek like BANTER_LINES. {club} is a
+# club's three-letter code, {wire} and {owned} are points, {per} is points per owned player.
+POINTS_LINES = {
+    "points_wire": (   # club, wire, owned
+        "{club} have the most points on the wire: {wire}, against {owned} in squads.",
+        "{wire} points of {club} players are unowned, and only {owned} are in squads.",
+        "Check the wire for {club}: {wire} points sit unowned, {owned} are owned.",
+    ),
+    "points_best": (   # club, per
+        "{club} pay best for the league: {per} points per owned player.",
+        "Owning {club} is paying off: {per} points an owned player.",
+        "The best club to own is {club}, at {per} points a player.",
+    ),
+    "points_worst": (   # club, per
+        "{club} pay worst: only {per} points per owned player.",
+        "Owning {club} is not paying: {per} points an owned player.",
+        "The league's {club} players are the least rewarding, at {per} points a player.",
+    ),
+}
+
+
+def club_points(elements, owner_of, short, week):
+    """
+    Where each club's points are: the season points of its players who are owned in the league, and of those
+    who are still free agents (on the wire). elements are the players from the Draft site's player list
+    (id, team, web_name, total_points), owner_of {player ID: owner} for owned players, short {club ID: the
+    club's three-letter code}. A player's points are his whole season, including games before he was dropped,
+    so the wire figure is what those players have scored, not what they will. week picks the banter's wording.
+
+    Returns {owned, clubs, lines}: owned is the number of owned players; clubs has every club, the most
+    points on the wire first (ties by code), each {club, owned (players), owned_points, wire_points,
+    best_wire ({name, points} of the top scoring free agent, None if none has scored), per_player (owned
+    points over owned players, None if none owned)}; lines are banter ({text}): the club with the most points
+    on the wire, then the best and the worst club to own by points per owned player, among clubs with
+    CLUB_POINTS_MIN_OWNED or more owned players (none if fewer than two clubs qualify).
+    """
+    rows = {}
+    for el in elements:
+        club = short.get(el.get("team"))
+        if not club:
+            continue
+        row = rows.setdefault(club, {"club": club, "owned": 0, "owned_points": 0, "wire_points": 0,
+                                     "best_wire": None})
+        points = int(round(num(el.get("total_points"))))
+        if el.get("id") in owner_of:
+            row["owned"] += 1
+            row["owned_points"] += points
+            continue
+        row["wire_points"] += points
+        name = el.get("web_name") or f'Player {el.get("id")}'
+        best = row["best_wire"]
+        if points > 0 and (best is None or (-points, name) < (-best["points"], best["name"])):
+            row["best_wire"] = {"name": name, "points": points}
+    clubs = sorted(rows.values(), key=lambda r: (-r["wire_points"], r["club"]))
+    for r in clubs:
+        r["per_player"] = round(r["owned_points"] / r["owned"], 1) if r["owned"] else None
+
+    def say(kind, **fields):
+        return banter_wording(POINTS_LINES[kind], kind, week).format(**fields)
+
+    lines = []
+    if clubs and clubs[0]["wire_points"] > 0:
+        lines.append(say("points_wire", club=clubs[0]["club"], wire=clubs[0]["wire_points"],
+                         owned=clubs[0]["owned_points"]))
+    ranked = sorted((r for r in clubs if r["owned"] >= CLUB_POINTS_MIN_OWNED),
+                    key=lambda r: (-r["per_player"], r["club"]))
+    if len(ranked) >= 2:
+        lines.append(say("points_best", club=ranked[0]["club"], per=f'{ranked[0]["per_player"]:.0f}'))
+        lines.append(say("points_worst", club=ranked[-1]["club"], per=f'{ranked[-1]["per_player"]:.0f}'))
+    return {"owned": len(owner_of), "clubs": clubs, "lines": [{"text": text} for text in lines]}
+
+
+def load_club_points(league_id):
+    """
+    Build where the points are for a league: {"league_id", "points"} (see club_points). It reads the Draft
+    site's player list and who owns each player: two requests, no ratings and no league load.
+    """
+    boot = fetch(f"{DRAFT}/bootstrap-static", LEAGUE_NOT_FOUND)
+    status = fetch(f"{DRAFT}/league/{league_id}/element-status", LEAGUE_NOT_FOUND)
+    short = {t["id"]: t["short_name"] for t in boot.get("teams") or []}
+    owner_of = {s["element"]: s["owner"] for s in status.get("element_status", []) if s.get("owner")}
+    week = boot.get("events", {}).get("current") or 1
+    return {"league_id": league_id,
+            "points": club_points(boot.get("elements") or [], owner_of, short, week)}
 
 
 # ---------------------------------------------------------------- routes
@@ -4542,6 +4638,15 @@ def market(league_id):
     """Which clubs the league is buying and selling on the waiver wire (see club_market)."""
     try:
         return jsonify(load_market(league_id))
+    except FplError as e:
+        return jsonify({"error": e.message}), e.status
+
+
+@app.route("/api/league/<int:league_id>/club-points")
+def club_points_route(league_id):
+    """Where each club's points are: owned in the league, or still on the wire (see club_points)."""
+    try:
+        return jsonify(load_club_points(league_id))
     except FplError as e:
         return jsonify({"error": e.message}), e.status
 
