@@ -4315,13 +4315,21 @@ def test_the_hub_shows_last_gameweeks_facts_above_the_records():
     assert page.index('id="weekSection"') < page.index('id="factsSection"')
 
 
-def test_the_charts_page_draws_places_over_time_under_the_race():
+def test_the_league_race_and_places_over_time_are_one_section_with_a_switch():
     page = hub_page()
-    assert 'id="placesChart"' in page and "function renderPlaces" in page and 'id="placesNotes"' in page
-    assert page.index('id="raceChart"') < page.index('id="placesChart"') < page.index('id="spread"')
-    charts, places = page.index('id="panel-charts"'), page.index('id="placesChart"')
-    assert charts < places < page.index('id="panel-rivalries"')
-    assert page.count("renderPlaces()") >= 2          # drawn with the charts, and again when you pick a name
+    assert 'id="placesSection"' not in page                      # no longer its own section...
+    assert "<h2>Places over time</h2>" not in page
+    assert 'data-race="points"' in page and 'data-race="places"' in page and 'id="raceView"' in page
+    race = page.index("<h2>League race</h2>")
+    # both views, then the weekly points grid, are in that one section, before Weekly scores
+    views = (page.index('id="raceChart"'), page.index('id="placesChart"'), page.index('id="weeksTable"'))
+    assert race < views[0] < views[1] < views[2]
+    assert page.index('id="weeksTable"') < page.index('id="spread"') < page.index('id="panel-rivalries"')
+    assert page.index('id="racePoints"') < page.index('id="racePlaces"') < page.index('id="placesNotes"')
+    assert 'id="racePlaces" class="hidden"' in page            # it opens on the points race, as before
+    assert "function renderPlaces" in page and "function showRace" in page
+    assert page.count("renderPlaces()") >= 2       # drawn with the charts, and again when you pick a name
+    assert 'if (!P) { showRace("points"); return; }' in page    # under two gameweeks: only the points race
 
 
 # ---------------------------------------------------------------- team names stand out

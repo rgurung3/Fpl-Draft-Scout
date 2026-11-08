@@ -421,19 +421,26 @@
       <div id="charts">
         <section>
           <h2>League race</h2>
-          <p class="sub">Each manager's league points after every gameweek, climbing from 0 (3 for a win, 1 for a draw). Your line has a dot for each week. Hover or tap a line to see whose it is.</p>
-          <p class="racecap" id="raceCaption" aria-live="polite"></p>
-          <div class="chartwrap"><svg class="race" id="raceChart" role="img"></svg></div>
+          <div class="controls">
+            <div class="tabs viewtabs" id="raceView" role="group" aria-label="Show the race as">
+              <button type="button" data-race="points" aria-pressed="true">Points</button>
+              <button type="button" data-race="places" id="placesTab" aria-pressed="false">Places</button>
+            </div>
+          </div>
+          <div id="racePoints">
+            <p class="sub">Each manager's league points after every gameweek, climbing from 0 (3 for a win, 1 for a draw). It shows how far apart they are. Your line has a dot for each week. Hover or tap a line to see whose it is.</p>
+            <p class="racecap" id="raceCaption" aria-live="polite"></p>
+            <div class="chartwrap"><svg class="race" id="raceChart" role="img"></svg></div>
+          </div>
+          <div id="racePlaces" class="hidden">
+            <p class="sub">Where each manager sat in the table after every gameweek, with 1st at the top. It shows who overtook whom. Your line is amber. Hover or tap a line to see whose it is.</p>
+            <p class="racecap" id="placesCaption" aria-live="polite"></p>
+            <div class="chartwrap scrollx" id="placesWrap"><svg class="race" id="placesChart" role="img"></svg></div>
+            <ul class="moves" id="placesNotes"></ul>
+          </div>
           <h3 class="minihead">Points each gameweek</h3>
           <p class="sub">Shaded against that week's league average: green above, red below. W, D or L is the head-to-head result.</p>
           <div class="tablewrap" id="weeksWrap"><table class="weeks" id="weeksTable"></table></div>
-        </section>
-        <section id="placesSection" class="hidden">
-          <h2>Places over time</h2>
-          <p class="sub">Where each manager sat in the table after every gameweek, with 1st at the top. Your line is amber. Hover or tap a line to see whose it is.</p>
-          <p class="racecap" id="placesCaption" aria-live="polite"></p>
-          <div class="chartwrap scrollx" id="placesWrap"><svg class="race" id="placesChart" role="img"></svg></div>
-          <ul class="moves" id="placesNotes"></ul>
         </section>
         <section>
           <h2>Weekly scores</h2>
@@ -1493,10 +1500,21 @@ function placesDefaultCaption() {
   return m ? placesCaption(m, true) : "Hover or tap a line to see whose it is.";
 }
 
+// the league race is one section with two views of the same results: league points (how far apart they are)
+// and table places (who overtook whom); the switch only shows one of them
+let raceMode = "points";
+function showRace(mode) {
+  raceMode = mode;
+  document.querySelectorAll("#raceView button").forEach(b => b.setAttribute("aria-pressed", b.dataset.race === mode));
+  $("racePoints").classList.toggle("hidden", mode !== "points");
+  $("racePlaces").classList.toggle("hidden", mode !== "places");
+  if (mode === "places") $("placesWrap").scrollLeft = $("placesWrap").scrollWidth;   // on a small screen start at the names and the latest weeks
+}
+
 function renderPlaces() {
   const P = CH.places;
-  $("placesSection").classList.toggle("hidden", !P);
-  if (!P) return;   // fewer than two gameweeks have finished: a line needs two points
+  $("placesTab").classList.toggle("hidden", !P);
+  if (!P) { showRace("points"); return; }   // fewer than two gameweeks have finished: a line needs two points, so only the points race
   const n = P.gws.length, size = P.managers.length;
   const W = 720, L = 36, R = 200, T = 14, B = 30, H = T + B + Math.max(size - 1, 1) * 24;
   const x = i => L + i * (W - L - R) / Math.max(n - 1, 1);
@@ -1532,7 +1550,7 @@ function renderPlaces() {
   chart.innerHTML = svg;
   $("placesCaption").innerHTML = placesDefaultCaption();
   $("placesNotes").innerHTML = P.notes.map(t => `<li>${rich(t)}</li>`).join("");
-  $("placesWrap").scrollLeft = $("placesWrap").scrollWidth;   // on a small screen start at the names and the latest weeks
+  showRace(raceMode);
 }
 
 function renderGrid() {
@@ -1808,6 +1826,9 @@ $("raceChart").addEventListener("pointerover", e => {
 $("raceChart").addEventListener("pointerleave", () => {
   document.querySelectorAll("#raceChart .hot").forEach(x => x.classList.remove("hot"));
   $("raceCaption").innerHTML = raceDefaultCaption();
+});
+$("raceView").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (b && !b.classList.contains("hidden")) showRace(b.dataset.race);
 });
 $("placesChart").addEventListener("pointerover", e => {
   const g = e.target.closest(".line"); if (!g) return;
