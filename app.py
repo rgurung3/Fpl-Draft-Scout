@@ -14,6 +14,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from statistics import NormalDist
 from urllib.parse import urlencode
 
 import anthropic
@@ -1803,9 +1804,15 @@ def league_charts(details):
 ODDS_RUNS = 4000        # how many seasons are played out
 ODDS_MIN_WEEKS = 3      # the odds start once this many gameweeks have finished
 ODDS_PRIOR_WEEKS = 5    # weeks of the league's average score mixed into each manager's own average
+ODDS_HALF_LIFE = 4      # a score counts half as much as the one 4 gameweeks after it (None: all weeks equal)
+ODDS_SQUAD_WEIGHT = 0.2   # the share of a manager's expected weekly score that comes from their squad...
+ODDS_TABLE_WEIGHT = 0.1   # ...and from how their league results have gone (the rest is their scoring so far)
+ODDS_SQUAD_POINTS = 0.3   # points a week one point of squad strength is worth (0.32 in a backtest on GW6-9)
 ODDS_STRENGTH_SD = 4    # points: how far a manager's true weekly average may sit from our estimate of it
 ODDS_MIN_SD = 1.0       # a floor for the week-to-week spread, so identical scores can't make it zero
-ODDS_KEPT = 20          # odds kept in memory (one per league and result)
+ODDS_TREND_WEEKS = 4    # the "why" notes compare this many latest weeks with the ones before them
+ODDS_TREND_GAP = 8      # points a week: a gap this big between the two is called rising or slumping
+ODDS_KEPT = 20          # odds kept in memory (one per league, set of results and day)
 _odds = {}
 _odds_lock = threading.Lock()
 
@@ -1815,37 +1822,29 @@ def percent_text(p):
     return "under 1%" if 0 < p < 0.01 else f"{round(p * 100)}%"
 
 
-def season_odds(details, runs=None):
+def odds_estimates(history, strengths=None):
     """
-    Each manager's chance of every finishing place, from playing the rest of the season out `runs` times
-    (ODDS_RUNS). A guide, not a prediction. Returns None until ODDS_MIN_WEEKS gameweeks have finished or if
-    the league isn't head-to-head, like league_history.
+    What each manager is expected to score in a week from here, for season_odds. It blends three things:
+      form   their scores so far, with recent weeks counting more (a week loses half its weight for every
+             ODDS_HALF_LIFE gameweeks it is old), pulled towards the league average by ODDS_PRIOR_WEEKS
+             weeks' worth, because a few weeks of scores say little
+      squad  their squad's strength rating (strengths: {team ID: strength}) turned into points a week,
+             ODDS_SQUAD_POINTS for each point above or below the league's average squad
+      table  how their league results have gone: the win rate (a draw is half a win, nudged off 0 and 1)
+             turned into the weekly score that would win that often against the league
+    The shares are ODDS_SQUAD_WEIGHT and ODDS_TABLE_WEIGHT, the rest is form. A manager with no squad rating
+    (or every manager, if fewer than two have one) just gets form and table: the squad share goes to form.
+    A backtest on this league (predicting each week from the weeks before it) found recent weeks about as good
+    as all weeks, a squad rating adding nothing measurable on top of scores yet (only four gameweeks saved),
+    and any weight on league points making the guesses slightly worse (they include luck), so the table share
+    is kept small; the point of these is to follow what the page shows, not to be provably better.
 
-    How: each manager's weekly score is a normal curve around their average so far, with the spread the
-    league's managers show week to week (one spread for everybody: a few weeks of scores are too few to
-    measure each manager's own). Their average is pulled towards the league average (ODDS_PRIOR_WEEKS weeks'
-    worth) because early on a hot start says less than it seems to, and in every simulated season each
-    manager's true average is also nudged up or down by about ODDS_STRENGTH_SD points, because the scores so
-    far can't pin down how good a squad is and squads change. Without that nudge the leader looked 93% to
-    win after nine gameweeks. Every match still to play (the fixture list is in the league details) is then
-    decided on that week's two scores, 3 points for a win and 1 for a draw as in the table, on top of the
-    real table; points scored break ties, as in the real table. Nothing else is known to it: squads,
-    injuries and fixtures don't count. The random numbers are seeded from the results, so the same results
-    always give the same odds.
-
-    Returns {runs, gws_played, gws_left, managers, lines}. managers are in table order, each {entry_id, team,
-    manager, place (now), league_points, average (the average the simulation used), odds (the chance of each
-    place, 1st first, adding up to 1), win, top3, last, expected_place}. lines are the headline sentences
-    (names marked for bold): the title favourite and the wooden spoon favourite.
+    Returns {estimates, weights, league_average, sd, squads}: estimates is {team ID: {form, table, squad (None
+    without one), average}}, weights the shares used, sd the week-to-week spread of a manager's score, squads
+    the strengths used.
     """
-    runs = ODDS_RUNS if runs is None else runs
-    history = league_history(details)
-    if history is None or len(history["gws"]) < ODDS_MIN_WEEKS:
-        return None
-    entries = {e["entry_id"]: e for e in details.get("league_entries", []) if e.get("entry_id")}
-    entry_of = {e.get("id"): e["entry_id"] for e in entries.values()}
-    ids = [m["entry_id"] for m in history["managers"]]   # table order
     scores = {m["entry_id"]: [p for p in m["points"] if p is not None] for m in history["managers"]}
+    results = {m["entry_id"]: [r for r in m["results"] if r] for m in history["managers"]}
     every = [p for s in scores.values() for p in s]
     league_average = sum(every) / len(every)
 
@@ -1855,13 +1854,107 @@ def season_odds(details, runs=None):
 
     spreads = [variance(s) for s in scores.values() if len(s) >= 2]
     sd = max(math.sqrt(sum(spreads) / len(spreads)) if spreads else 0, ODDS_MIN_SD)
-    average = {t: (sum(s) + ODDS_PRIOR_WEEKS * league_average) / (len(s) + ODDS_PRIOR_WEEKS)
-               for t, s in scores.items()}
+    squads = {t: s for t, s in (strengths or {}).items() if t in scores and s}
+    if len(squads) < 2:
+        squads = {}
+    mean_strength = sum(squads.values()) / len(squads) if squads else 0
+    normal = NormalDist()
 
-    left = []   # the matches still to play, as (team ID, team ID)
+    estimates = {}
+    for team, values in scores.items():
+        count = len(values)
+        weights = ([0.5 ** ((count - 1 - i) / ODDS_HALF_LIFE) for i in range(count)]
+                   if ODDS_HALF_LIFE else [1.0] * count)
+        form =((sum(w * v for w, v in zip(weights, values)) + ODDS_PRIOR_WEEKS * league_average)
+                / (sum(weights) + ODDS_PRIOR_WEEKS))
+        games = results[team]
+        rate = (sum(1 if r == "W" else 0.5 if r == "D" else 0 for r in games) + 1) / (len(games) + 2)
+        table = league_average + sd * math.sqrt(2) * normal.inv_cdf(rate)
+        squad = (league_average + ODDS_SQUAD_POINTS * (squads[team] - mean_strength)
+                 if team in squads else None)
+        w_squad = ODDS_SQUAD_WEIGHT if squad is not None else 0
+        average = ((1 - w_squad - ODDS_TABLE_WEIGHT) * form + ODDS_TABLE_WEIGHT * table
+                   + (w_squad * squad if squad is not None else 0))
+        estimates[team] = {"form": form, "table": table, "squad": squad, "average": average}
+    shares = ODDS_SQUAD_WEIGHT if squads else 0
+    return {"estimates": estimates, "league_average": league_average, "sd": sd, "squads": squads,
+            "weights": {"form": round(1 - shares - ODDS_TABLE_WEIGHT, 2), "squad": shares,
+                        "table": ODDS_TABLE_WEIGHT}}
+
+
+def odds_why(scores, average, strength, place, count, league_points, deserved, league_average):
+    """
+    A few plain lines on what is behind one manager's odds, for the Odds page: their form (the latest
+    ODDS_TREND_WEEKS weeks against the weeks before, called rising or slumping when they differ by
+    ODDS_TREND_GAP points a week or more), their squad's strength and place (strength None: not known),
+    whether their league points are lucky or unlucky against what their scores deserve (LUCK_FACT_MIN), and
+    the weekly score the odds assume. scores is their weekly scores, oldest first. Returns {lines, trend,
+    recent, before, deserved, luck}; recent and before are None until there are enough weeks to compare.
+    """
+    n = ODDS_TREND_WEEKS
+    recent = before = trend = None
+    if not scores:
+        lines = ["No scores yet."]
+    elif len(scores) - n >= 2:
+        recent, before = sum(scores[-n:]) / n, sum(scores[:-n]) / (len(scores) - n)
+        trend = ("rising" if recent - before >= ODDS_TREND_GAP
+                 else "slumping" if before - recent >= ODDS_TREND_GAP else None)
+        lines = [f"Scoring {recent:.1f} a week over the last {n} weeks, against {before:.1f} in the "
+                 f"{len(scores) - n} before" + (f": {trend}." if trend else ".")]
+    else:
+        lines = [f"Scoring {sum(scores) / len(scores):.1f} a week so far."]
+    if strength is not None:
+        lines.append(f"Squad strength {strength:.0f}, {ordinal(place)} of {count}.")
+    luck = league_points - deserved
+    verdict = (": lucky so far." if luck >= LUCK_FACT_MIN else ": unlucky so far." if luck <= -LUCK_FACT_MIN
+               else ", about what they deserve.")
+    lines.append(f"{league_points} league points; their scores deserve {deserved:.1f}{verdict}")
+    lines.append(f"The odds assume they score {average:.1f} a week from here (the league average is "
+                 f"{league_average:.1f}).")
+    return {"lines": lines, "trend": trend, "recent": None if recent is None else round(recent, 1),
+            "before": None if before is None else round(before, 1), "deserved": round(deserved, 1),
+            "luck": round(luck, 1)}
+
+
+def season_odds(details, strengths=None, runs=None):
+    """
+    Each manager's chance of every finishing place, from playing the rest of the season out `runs` times
+    (ODDS_RUNS). A guide, not a prediction. Returns None until ODDS_MIN_WEEKS gameweeks have finished or if
+    the league isn't head-to-head, like league_history. strengths ({team ID: squad strength}, see
+    squad_strengths) is optional.
+
+    How: each manager's weekly score is a normal curve. Its middle is what odds_estimates expects them to
+    score (their recent scoring, their squad and their league results, blended) and its spread is one number
+    for everybody, the league's typical week-to-week spread (a few weeks of scores are too few to measure each
+    manager's own). In every simulated season each manager's true average is also nudged up or down by about
+    ODDS_STRENGTH_SD points, because the scores so far can't pin down how good a squad is and squads change.
+    Without that nudge the leader looked 93% to win after nine gameweeks. Every match still to play (the
+    fixture list is in the league details) is then decided on that week's two scores, 3 points for a win and
+    1 for a draw as in the table, on top of the real table; points scored break ties, as in the real table.
+    Injuries and fixtures aren't known to it. The random numbers are seeded from the results, so the same
+    results always give the same odds.
+
+    Returns {runs, gws_played, gws_left, weights, managers, lines}. weights are the shares of the expected
+    score (form, squad, table: see odds_estimates). managers are in table order, each {entry_id, team,
+    manager, place (now), league_points, average (the weekly score the simulation used), odds (the chance of
+    each place, 1st first, adding up to 1), win, top3, last, expected_place, why (see odds_why)}. lines are
+    the headline sentences (names marked for bold): the title favourite and the wooden spoon favourite.
+    """
+    runs = ODDS_RUNS if runs is None else runs
+    history = league_history(details)
+    if history is None or len(history["gws"]) < ODDS_MIN_WEEKS:
+        return None
+    entries = {e["entry_id"]: e for e in details.get("league_entries", []) if e.get("entry_id")}
+    entry_of = {e.get("id"): e["entry_id"] for e in entries.values()}
+    ids = [m["entry_id"] for m in history["managers"]]   # table order
+    base = odds_estimates(history, strengths)
+    average = {t: base["estimates"][t]["average"] for t in ids}
+    sd = base["sd"]
+
+    left = []   # the matches still to play, as (gameweek, team ID, team ID)
     for m in details.get("matches", []):
         a, b = entry_of.get(m.get("league_entry_1")), entry_of.get(m.get("league_entry_2"))
-        if not m.get("finished") and m.get("event") and a in scores and b in scores:
+        if not m.get("finished") and m.get("event") and a in average and b in average:
             left.append((m["event"], a, b))
     start_points = {m["entry_id"]: m["league_points"][-1] for m in history["managers"]}
     start_scored = {m["entry_id"]: m["scored"] for m in history["managers"]}
@@ -1884,6 +1977,11 @@ def season_odds(details, runs=None):
         for place, t in enumerate(sorted(ids, key=lambda t: (points[t], scored[t]), reverse=True)):
             count[t][place] += 1
 
+    deserved = expected_league_points(history)
+    squads = base["squads"]
+    squad_place = {t: 1 + sum(s > squads[t] for s in squads.values()) for t in squads}
+    league_average = base["league_average"]
+    points_of = {m["entry_id"]: [p for p in m["points"] if p is not None] for m in history["managers"]}
     managers = []
     for place, t in enumerate(ids, 1):
         odds = [c / runs for c in count[t]]
@@ -1894,23 +1992,45 @@ def season_odds(details, runs=None):
             "place": place, "league_points": start_points[t], "average": round(average[t], 1),
             "odds": [round(p, 4) for p in odds], "win": round(odds[0], 4), "top3": round(sum(odds[:3]), 4),
             "last": round(odds[-1], 4),
-            "expected_place": round(sum((i + 1) * p for i, p in enumerate(odds)), 1)})
+            "expected_place": round(sum((i + 1) * p for i, p in enumerate(odds)), 1),
+            "why": odds_why(points_of[t], average[t], squads.get(t), squad_place.get(t), len(squads),
+                            start_points[t], deserved[t], league_average)})
     favourite = max(managers, key=lambda m: (m["win"], -m["place"]))
     spoon = max(managers, key=lambda m: (m["last"], m["place"]))
     lines = [f"Title favourite: {mark(favourite['team'])}, {percent_text(favourite['win'])}.",
              f"Wooden spoon favourite: {mark(spoon['team'])}, {percent_text(spoon['last'])}."]
     return {"runs": runs, "gws_played": len(history["gws"]), "gws_left": len({gw for gw, _, _ in left}),
-            "managers": managers, "lines": lines}
+            "weights": base["weights"], "managers": managers, "lines": lines}
 
 
-def get_odds(league_id, details):
-    """season_odds, worked out once for each league and set of results, then kept (it takes a second)."""
+def squad_strengths(league_id):
+    """
+    {team ID: squad strength} for the managers who have a best eleven, on the "Until the break" rating (a
+    longer view than Next 5, which suits a whole season), or None if the league can't be loaded: the odds then
+    go without the squad share. It loads the whole league, so it takes a few seconds the first time.
+    """
+    try:
+        managers = load_league(league_id, "season")["managers"]
+    except FplError:
+        return None
+    return {m["entry_id"]: m["strength"] for m in managers if m["best_xi"]}
+
+
+def get_odds(league_id, details, today=None):
+    """
+    season_odds, worked out once for each league, set of results and day (the squads change daily), then kept
+    (the simulation takes a second and the squads a few more). The squads are only loaded once there are
+    enough finished gameweeks for the odds to exist.
+    """
+    today = today or datetime.now(timezone.utc).date()
     matches = details.get("matches", [])
     finished = [m for m in matches if m.get("finished") and m.get("event")]
-    key = (league_id, max((m["event"] for m in finished), default=0), len(finished), len(matches))
+    key = (league_id, max((m["event"] for m in finished), default=0), len(finished), len(matches), today)
     with _odds_lock:
         if key not in _odds:
-            _odds[key] = season_odds(details)
+            history = league_history(details)
+            ready = history is not None and len(history["gws"]) >= ODDS_MIN_WEEKS
+            _odds[key] = season_odds(details, squad_strengths(league_id) if ready else None)
             while len(_odds) > ODDS_KEPT:
                 _odds.pop(next(iter(_odds)))
         return _odds[key]

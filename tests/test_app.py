@@ -6,7 +6,7 @@ Run with:  pytest -v
 """
 import json
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import anthropic
 import pytest
@@ -4938,7 +4938,15 @@ def test_the_odds_are_the_same_every_time_for_the_same_results():
     assert app.season_odds(league, runs=200) == app.season_odds(league, runs=200)
 
 
-def test_averages_are_pulled_towards_the_league_average_and_a_stronger_scorer_rates_higher():
+@pytest.fixture
+def flat_odds(monkeypatch):
+    """The plain model: every week counts the same and only scores count (no squad or table share)."""
+    monkeypatch.setattr(app, "ODDS_HALF_LIFE", None)
+    monkeypatch.setattr(app, "ODDS_SQUAD_WEIGHT", 0)
+    monkeypatch.setattr(app, "ODDS_TABLE_WEIGHT", 0)
+
+
+def test_averages_are_pulled_towards_the_league_average_and_a_stronger_scorer_rates_higher(flat_odds):
     odds = app.season_odds(recap_league(ODDS_WEEKS + TO_PLAY), runs=1500)
     by_team = {m["entry_id"]: m for m in odds["managers"]}
     # Team 0 averaged 65 in three weeks; the league averaged 48.2, and five weeks of that are mixed in:
@@ -4948,47 +4956,242 @@ def test_averages_are_pulled_towards_the_league_average_and_a_stronger_scorer_ra
     assert by_team[102]["expected_place"] < by_team[103]["expected_place"]  # level on points, better scorer
 
 
-@pytest.mark.parametrize("p, text", [(0.714, "71%"), (0.004, "under 1%"), (0.005, "under 1%"), (0, "0%"),
+# four managers, four gameweeks: Team 0 scores 20, 20, 60, 60 and Team 1 scores 60, 60, 20, 20 (the same
+# total, and each wins two matches); Teams 2 and 3 score 30 every week
+SWING_WEEKS = [match(1, 10, 20, 12, 30), match(1, 11, 60, 13, 30),
+               match(2, 10, 20, 13, 30), match(2, 11, 60, 12, 30),
+               match(3, 10, 60, 12, 30), match(3, 11, 20, 13, 30),
+               match(4, 10, 60, 13, 30), match(4, 11, 20, 12, 30)]
+
+
+def estimates_for(matches, strengths=None):
+    return app.odds_estimates(app.league_history(recap_league(list(matches))), strengths)
+
+
+def test_recent_weeks_count_more_than_old_ones(monkeypatch):
+    monkeypatch.setattr(app, "ODDS_SQUAD_WEIGHT", 0)
+    monkeypatch.setattr(app, "ODDS_HALF_LIFE", None)
+    flat = estimates_for(SWING_WEEKS)["estimates"]
+    assert flat[100]["form"] == pytest.approx(flat[101]["form"])           # the same total: no difference
+    monkeypatch.setattr(app, "ODDS_HALF_LIFE", 4)
+    recent = estimates_for(SWING_WEEKS)["estimates"]
+    assert recent[100]["form"] > flat[100]["form"] > recent[101]["form"]   # improving is up, slumping is down
+    assert recent[100]["average"] > recent[101]["average"]
+    # a week 4 gameweeks old counts half as much as the latest: weights 1, 0.84, 0.71, 0.59 for the last four
+    weights = [0.5 ** (k / 4) for k in (3, 2, 1, 0)]
+    mean = sum(w * v for w, v in zip(weights, [20, 20, 60, 60])) / sum(weights)
+    league = (160 + 160 + 120 + 120) / 16
+    assert recent[100]["form"] == pytest.approx((mean * sum(weights) + 5 * league) / (sum(weights) + 5))
+
+
+def test_a_squad_rating_moves_the_expected_score_and_a_missing_one_falls_back():
+    plain = estimates_for(ODDS_WEEKS)
+    assert plain["weights"] == {"form": 0.9, "squad": 0, "table": 0.1}
+    assert all(e["squad"] is None for e in plain["estimates"].values())
+    rated = estimates_for(ODDS_WEEKS, {100: 80, 101: 60, 102: 70, 103: 70})
+    assert rated["weights"] == {"form": 0.7, "squad": 0.2, "table": 0.1}
+    top = rated["estimates"][100]
+    assert top["squad"] == pytest.approx(rated["league_average"] + 0.3 * 10)      # 10 above the average squad
+    assert rated["estimates"][101]["squad"] == pytest.approx(rated["league_average"] - 0.3 * 10)
+    assert top["average"] == pytest.approx(0.7 * top["form"] + 0.2 * top["squad"] + 0.1 * top["table"])
+    # Team 3 scores less than the rest but has the best squad here: the squad share lifts their expected
+    # score, and it pulls down a manager who scores far more than their squad suggests (Team 0) a little
+    best = estimates_for(ODDS_WEEKS, {100: 70, 101: 70, 102: 70, 103: 90})["estimates"][103]
+    expected = plain["estimates"][103]["average"] + 0.2 * (best["squad"] - best["form"])
+    assert best["average"] == pytest.approx(expected)
+    assert best["average"] > plain["estimates"][103]["average"]
+    assert rated["estimates"][100]["average"] < plain["estimates"][100]["average"]
+    # a manager nobody rated gets form and table only, and the squad share goes to their form
+    partial = estimates_for(ODDS_WEEKS, {100: 80, 101: 60, 102: 70})["estimates"][103]
+    assert partial["squad"] is None
+    assert partial["average"] == pytest.approx(0.9 * partial["form"] + 0.1 * partial["table"])
+
+
+def test_a_squad_rating_of_zero_or_a_lone_rating_is_ignored():
+    assert estimates_for(ODDS_WEEKS, {100: 0, 101: 60, 102: 0, 103: 0})["weights"]["squad"] == 0  # one rating
+    assert estimates_for(ODDS_WEEKS, {100: 0, 101: 60, 102: 70, 103: 70})["estimates"][100]["squad"] is None
+    assert estimates_for(ODDS_WEEKS, {999: 70, 998: 60})["weights"]["squad"] == 0     # not in this league
+
+
+# Teams 0 and 1 score 50 every week, so their form is the same; Team 0 faces weak opponents and wins every
+# time, Team 1 faces strong ones and loses every time
+TABLE_WEEKS = [m for gw in (1, 2, 3) for m in (match(gw, 10, 50, 12, 40), match(gw, 11, 50, 13, 60))]
+
+
+def test_league_results_count_a_little_towards_the_expected_score(monkeypatch):
+    got = estimates_for(TABLE_WEEKS)["estimates"]
+    assert got[100]["form"] == pytest.approx(got[101]["form"])
+    assert got[100]["table"] > got[101]["table"]
+    assert got[100]["average"] > got[101]["average"]
+    gap = got[100]["table"] - got[101]["table"]
+    assert got[100]["average"] - got[101]["average"] == pytest.approx(0.1 * gap)
+    monkeypatch.setattr(app, "ODDS_TABLE_WEIGHT", 0)
+    assert estimates_for(TABLE_WEEKS)["estimates"][100]["average"] == pytest.approx(
+        estimates_for(TABLE_WEEKS)["estimates"][101]["average"])
+
+
+def test_a_manager_who_has_won_half_their_matches_is_expected_to_score_the_league_average():
+    weeks = [match(1, 10, 60, 11, 40), match(1, 12, 50, 13, 50),
+             match(2, 10, 30, 11, 70), match(2, 12, 50, 13, 50),
+             match(3, 10, 60, 11, 40), match(3, 12, 50, 13, 50)]
+    got = estimates_for(weeks)
+    # Team 0 won, then lost, then won again; Team 2 and 3 only drew: a win rate of exactly half for the draws
+    assert got["estimates"][102]["table"] == pytest.approx(got["league_average"])
+    assert got["estimates"][100]["table"] > got["league_average"]
+
+
+def test_the_odds_say_which_shares_they_used_and_why_for_every_manager():
+    odds = app.season_odds(recap_league(ODDS_WEEKS + TO_PLAY), {100: 80, 101: 60, 102: 70, 103: 70}, runs=300)
+    assert odds["weights"] == {"form": 0.7, "squad": 0.2, "table": 0.1}
+    by_team = {m["entry_id"]: m for m in odds["managers"]}
+    assert "Squad strength 80, 1st of 4." in by_team[100]["why"]["lines"]
+    assert "Squad strength 60, 4th of 4." in by_team[101]["why"]["lines"]
+    assert all(m["why"]["lines"][-1].startswith("The odds assume they score ") for m in odds["managers"])
+    plain = app.season_odds(recap_league(ODDS_WEEKS + TO_PLAY), runs=300)
+    assert plain["weights"]["squad"] == 0
+    assert not any(line.startswith("Squad strength") for m in plain["managers"] for line in m["why"]["lines"])
+
+
+SLUMP = [48, 40, 38, 40, 42, 19, 18, 24, 25]
+
+
+def why_of(scores, strength=None, place=None, count=0, points=15, deserved=15.0):
+    return app.odds_why(scores, 35.2, strength, place, count, points, deserved, 38.9)
+
+
+def test_the_why_says_when_a_manager_is_slumping_or_rising():
+    slump = why_of(SLUMP)
+    assert slump["trend"] == "slumping" and (slump["recent"], slump["before"]) == (21.5, 41.6)
+    assert slump["lines"][0] == (
+        "Scoring 21.5 a week over the last 4 weeks, against 41.6 in the 5 before: slumping.")
+    rising = why_of(SLUMP[::-1])     # the same weeks reversed: 25, 24, 18, 19, 42, then 40, 38, 40, 48
+    assert rising["trend"] == "rising"
+    assert rising["lines"][0] == (
+        "Scoring 41.5 a week over the last 4 weeks, against 25.6 in the 5 before: rising.")
+
+
+def test_a_small_change_in_form_is_not_called_rising_or_slumping():
+    steady = why_of([40, 42, 38, 40, 41, 43, 39, 40])
+    assert steady["trend"] is None and steady["lines"][0].endswith("in the 4 before.")
+    assert why_of([40, 42, 38, 40, 41])["lines"][0] == "Scoring 40.2 a week so far."  # too few weeks
+    assert why_of([40, 42, 38, 40, 41])["recent"] is None
+    assert why_of([])["lines"][0] == "No scores yet."
+
+
+def test_the_why_compares_league_points_with_what_the_scores_deserve():
+    assert why_of(SLUMP, points=15, deserved=9.8)["lines"][-2] == (
+        "15 league points; their scores deserve 9.8: lucky so far.")
+    assert why_of(SLUMP, points=12, deserved=15.1)["lines"][-2] == (
+        "12 league points; their scores deserve 15.1: unlucky so far.")
+    assert why_of(SLUMP, points=15, deserved=14.2)["lines"][-2] == (
+        "15 league points; their scores deserve 14.2, about what they deserve.")
+    assert why_of(SLUMP, points=15, deserved=9.8)["luck"] == 5.2
+
+
+def test_the_why_names_the_squad_and_what_the_odds_assume():
+    lines = why_of(SLUMP, strength=62.4, place=11, count=12)["lines"]
+    assert lines[1] == "Squad strength 62, 11th of 12."
+    assert lines[-1] == "The odds assume they score 35.2 a week from here (the league average is 38.9)."
+    assert not any(line.startswith("Squad") for line in why_of(SLUMP)["lines"])
+
+
+@pytest.mark.parametrize("p, text", [(0.714, "71%"), (0.004, "under 1%"), (0.009, "under 1%"), (0, "0%"),
                                      (0.01, "1%"), (1, "100%")])
 def test_a_chance_is_written_as_a_whole_percent(p, text):
     assert app.percent_text(p) == text
 
 
-def test_the_odds_are_worked_out_once_for_the_same_results(monkeypatch):
+def test_squad_strengths_are_the_managers_who_have_an_eleven(monkeypatch):
+    seen = []
+
+    def fake_league(league_id, view):
+        seen.append((league_id, view))
+        return {"managers": [{"entry_id": 100, "strength": 70.5, "best_xi": [1, 2]},
+                             {"entry_id": 101, "strength": 0, "best_xi": []}]}
+
+    monkeypatch.setattr(app, "load_league", fake_league)
+    assert app.squad_strengths(123) == {100: 70.5}
+    assert seen == [(123, "season")]                          # the longer "until the break" rating
+
+
+def test_squad_strengths_are_none_when_the_league_cannot_be_loaded(monkeypatch):
+    def down(league_id, view):
+        raise app.FplError("down", 502)
+
+    monkeypatch.setattr(app, "load_league", down)
+    assert app.squad_strengths(123) is None
+
+
+def test_the_odds_are_worked_out_once_for_the_same_results_and_day(monkeypatch):
     monkeypatch.setattr(app, "_odds", {})
-    calls = []
-    monkeypatch.setattr(app, "season_odds", lambda details, runs=None: calls.append(1) or {"fake": True})
-    league = recap_league(ODDS_WEEKS + TO_PLAY)
-    assert app.get_odds(123, league) == app.get_odds(123, league) == {"fake": True}
-    assert len(calls) == 1
-    app.get_odds(123, recap_league(ODDS_WEEKS + [match(4, 10, 60, 11, 40)] + TO_PLAY[1:]))    # a new result
+    loads, calls = [], []
+    monkeypatch.setattr(app, "squad_strengths", lambda league_id: loads.append(league_id) or {100: 70})
+
+    def fake_odds(details, strengths=None, runs=None):
+        calls.append(strengths)
+        return {"x": 1}
+
+    monkeypatch.setattr(app, "season_odds", fake_odds)
+    league, monday, tuesday = recap_league(ODDS_WEEKS + TO_PLAY), date(2026, 11, 9), date(2026, 11, 10)
+    assert app.get_odds(123, league, monday) == app.get_odds(123, league, monday) == {"x": 1}
+    assert calls == [{100: 70}] and loads == [123]                  # the squads went in, and were loaded once
+    app.get_odds(123, league, tuesday)                              # a new day: the squads have changed
     assert len(calls) == 2
-    app.get_odds(456, league)                                                                # another league
+    played = recap_league(ODDS_WEEKS + [match(4, 10, 60, 11, 40)] + TO_PLAY[1:])      # a new result
+    app.get_odds(123, played, tuesday)
     assert len(calls) == 3
+    app.get_odds(456, league, tuesday)                              # another league
+    assert len(calls) == 4
+
+
+def test_the_squads_are_not_loaded_until_there_are_odds_to_work_out(monkeypatch):
+    monkeypatch.setattr(app, "_odds", {})
+    loads = []
+    monkeypatch.setattr(app, "squad_strengths", lambda league_id: loads.append(league_id) or {})
+    monkeypatch.setattr(app, "season_odds", lambda details, strengths=None, runs=None: None)
+    app.get_odds(123, recap_league(ODDS_WEEKS[:4]))                 # two gameweeks: too early
+    app.get_odds(124, {"league_entries": [{"id": 10, "entry_id": 100}]})      # no matches at all
+    assert loads == []
 
 
 def test_only_the_latest_odds_are_kept(monkeypatch):
     monkeypatch.setattr(app, "_odds", {})
     monkeypatch.setattr(app, "ODDS_KEPT", 2)
-    monkeypatch.setattr(app, "season_odds", lambda details, runs=None: None)
+    monkeypatch.setattr(app, "squad_strengths", lambda league_id: None)
+    monkeypatch.setattr(app, "season_odds", lambda details, strengths=None, runs=None: None)
     for league_id in (1, 2, 3):
         app.get_odds(league_id, recap_league(ODDS_WEEKS))
     assert [key[0] for key in app._odds] == [2, 3]
 
 
-def test_odds_route_returns_the_odds(fake_api, monkeypatch):
+def odds_world(monkeypatch, strengths):
+    """The odds route over the ODDS_WEEKS league, with few runs and the given squads (None: can't load)."""
     monkeypatch.setattr(app, "_odds", {})
     monkeypatch.setattr(app, "ODDS_RUNS", 200)
+    monkeypatch.setattr(app, "squad_strengths", lambda league_id: strengths)
     fake = app.get_json
     monkeypatch.setattr(app, "get_json", lambda url: recap_league(ODDS_WEEKS + TO_PLAY)
                         if url.endswith("/league/123/details") else fake(url))
+
+
+def test_odds_route_returns_the_odds_with_the_squads_in_them(fake_api, monkeypatch):
+    odds_world(monkeypatch, {100: 80, 101: 60, 102: 70, 103: 70})
     data = app.app.test_client().get("/api/league/123/odds").get_json()
     assert data["league_name"] == "Recap League" and data["odds"]["runs"] == 200
     assert data["odds"]["managers"][0]["team"] == "Team 0"
+    assert data["odds"]["weights"] == {"form": 0.7, "squad": 0.2, "table": 0.1}
+    assert "why" in data["odds"]["managers"][0]
+
+
+def test_odds_route_still_works_when_the_squads_cannot_be_loaded(fake_api, monkeypatch):
+    odds_world(monkeypatch, None)
+    odds = app.app.test_client().get("/api/league/123/odds").get_json()["odds"]
+    assert odds["weights"] == {"form": 0.9, "squad": 0, "table": 0.1} and len(odds["managers"]) == 4
 
 
 def test_odds_route_is_empty_for_a_league_without_matches(fake_api, monkeypatch):
     monkeypatch.setattr(app, "_odds", {})
+    monkeypatch.setattr(app, "squad_strengths", lambda league_id: {})
     assert app.app.test_client().get("/api/league/123/odds").get_json()["odds"] is None
 
 
@@ -5244,3 +5447,17 @@ def test_the_hub_has_an_odds_choice_and_a_trades_and_moves_choice():
 def test_the_match_up_cards_draw_the_pairings_record():
     page = hub_page()
     assert "c.record" in page and "c.record.line" in page
+
+
+def test_the_odds_page_opens_a_why_under_each_manager_and_adds_their_best_move():
+    page = hub_page()
+    assert 'class="orow' in page and "function oddsWhy" in page and "oddsOpen" in page
+    assert 'id="oddsNote"' in page and "Best move so far" in page
+    assert "const w = o.weights" in page                          # the note says which shares the server used
+    assert page.count("askMoves()") >= 3      # Trades and moves and the odds notes share one request
+    assert 'class="trend up"' in page and 'class="trend down"' in page
+
+
+def test_the_tests_cannot_reach_the_real_site():
+    with pytest.raises(AssertionError, match="real site"):
+        requests.get("https://draft.premierleague.com/api/bootstrap-static")
