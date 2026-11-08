@@ -5935,3 +5935,169 @@ def test_the_charts_page_has_the_club_market_under_the_club_grid():
     assert 'id="marketBlock"' in page and "function renderMarket" in page and "/market`" in page
     assert page.index('id="clubsPicked"') < page.index('id="marketBlock"') < page.index('id="squadsSection"')
     assert "loadMarket();" in page and "MARKET = null" in page
+
+
+# ---------------------------------------------------------------- squad DNA and where the points are
+
+def test_each_squad_has_its_dna_the_biggest_stack_first():
+    a, b, c = app.club_exposure(club_squads(), CLUB_MANAGERS, 11)["managers"]
+    assert (a["stacks"], a["clubs_n"]) == ([{"club": "LIV", "n": 4}, {"club": "ARS", "n": 1}], 2)
+    assert (b["stacks"], b["clubs_n"]) == ([{"club": "MCI", "n": 3}, {"club": "LIV", "n": 1}], 2)
+    assert (c["stacks"], c["clubs_n"]) == ([{"club": "ARS", "n": 2}, {"club": "MCI", "n": 1}], 2)
+    assert all(sum(s["n"] for s in m["stacks"]) == m["total"] for m in (a, b, c))      # the whole squad
+
+
+def test_stacks_of_the_same_size_go_by_club_code_and_an_empty_squad_has_none():
+    squad = [club_player(1, "ZZZ", 100), club_player(2, "ZZZ", 100), club_player(3, "AAA", 100),
+             club_player(4, "AAA", 100), club_player(5, "MMM", 100)]
+    managers = CLUB_MANAGERS[:1] + [{"entry_id": 103, "team_name": "Team D", "manager": "Jo"}]
+    mine, empty = app.club_exposure(squad, managers, 11)["managers"]
+    assert [s["club"] for s in mine["stacks"]] == ["AAA", "ZZZ", "MMM"] and mine["clubs_n"] == 3
+    assert (empty["stacks"], empty["clubs_n"]) == ([], 0)
+
+
+POINTS_SHORT = {1: "ARS", 2: "BHA", 3: "CRY"}
+
+
+def points_player(pid, club, points, name=None):
+    return {"id": pid, "team": club, "web_name": name or f"P{pid}", "total_points": points}
+
+
+def points_world():
+    """
+    ARS: four owned players (50, 40, 30, 20) and two free agents on 10 each. BHA: five owned on 20 each and
+    one free agent on 60. CRY: one owned player on 90 and one free agent who has scored nothing. A player of a
+    club the list doesn't know is ignored.
+    """
+    elements = [points_player(i, 1, p) for i, p in zip(range(1, 5), (50, 40, 30, 20))]
+    elements += [points_player(5, 1, 10, "Fred"), points_player(6, 1, 10, "Abel")]
+    elements += [points_player(i, 2, 20) for i in range(10, 15)] + [points_player(15, 2, 60, "Gem")]
+    elements += [points_player(20, 3, 90), points_player(21, 3, 0, "Dud"), points_player(99, 9, 500)]
+    owner_of = {i: 100 for i in (1, 2, 3, 4, 10, 11, 12, 13, 14, 20)}
+    return elements, owner_of
+
+
+def get_points(elements=None, owner_of=None, week=10):
+    world = points_world()
+    return app.club_points(world[0] if elements is None else elements,
+                           world[1] if owner_of is None else owner_of, POINTS_SHORT, week)
+
+
+def test_each_clubs_points_are_split_into_owned_and_on_the_wire(first_wording):
+    shown = get_points()
+    clubs = {c["club"]: c for c in shown["clubs"]}
+    assert shown["owned"] == 10
+    assert (clubs["ARS"]["owned"], clubs["ARS"]["owned_points"], clubs["ARS"]["wire_points"]) == (4, 140, 20)
+    assert (clubs["BHA"]["owned"], clubs["BHA"]["owned_points"], clubs["BHA"]["wire_points"]) == (5, 100, 60)
+    assert [clubs[c]["per_player"] for c in ("ARS", "BHA", "CRY")] == [35.0, 20.0, 90.0]
+    assert "9" not in clubs and len(clubs) == 3                  # the unknown club's player is ignored
+
+
+def test_the_best_free_agent_is_the_top_scorer_ties_by_name_and_none_if_nobody_scored():
+    clubs = {c["club"]: c for c in get_points()["clubs"]}
+    assert clubs["BHA"]["best_wire"] == {"name": "Gem", "points": 60}
+    assert clubs["ARS"]["best_wire"] == {"name": "Abel", "points": 10}        # tied on 10 with Fred: by name
+    assert clubs["CRY"]["best_wire"] is None                                  # the only free agent scored 0
+
+
+def test_clubs_come_with_the_most_points_on_the_wire_first_and_ties_by_code():
+    assert [c["club"] for c in get_points()["clubs"]] == ["BHA", "ARS", "CRY"]
+    even = [points_player(1, 2, 10), points_player(2, 1, 10), points_player(3, 3, 10)]
+    assert [c["club"] for c in get_points(even, {})["clubs"]] == ["ARS", "BHA", "CRY"]
+
+
+def test_a_club_with_no_owned_players_has_no_points_per_player():
+    only_free = get_points([points_player(1, 1, 25, "Free")], {})
+    assert only_free["clubs"][0]["per_player"] is None and only_free["clubs"][0]["owned"] == 0
+
+
+def test_the_lines_name_the_wire_club_and_the_best_and_worst_to_own(first_wording):
+    texts = [line["text"] for line in get_points()["lines"]]
+    assert texts == ["BHA have the most points on the wire: 60, against 100 in squads.",
+                     "ARS pay best for the league: 35 points per owned player.",
+                     "BHA pay worst: only 20 points per owned player."]    # CRY's 90 is one player: unranked
+
+
+def test_no_best_or_worst_line_without_two_clubs_with_enough_owned_players(first_wording, monkeypatch):
+    monkeypatch.setattr(app, "CLUB_POINTS_MIN_OWNED", 5)           # only BHA has five
+    assert [line["text"] for line in get_points()["lines"]] == [
+        "BHA have the most points on the wire: 60, against 100 in squads."]
+    monkeypatch.setattr(app, "CLUB_POINTS_MIN_OWNED", 1)           # all three count
+    assert [line["text"] for line in get_points()["lines"]][1:] == [
+        "CRY pay best for the league: 90 points per owned player.",
+        "BHA pay worst: only 20 points per owned player."]
+
+
+def test_there_is_no_wire_line_when_nobody_is_on_the_wire_and_nothing_at_all_for_no_players(monkeypatch):
+    owned_all = [points_player(i, 1 + i % 2, 10) for i in range(1, 9)]
+    shown = get_points(owned_all, {p["id"]: 100 for p in owned_all})
+    assert not any("wire" in line["text"] for line in shown["lines"])
+    assert get_points([], {}) == {"owned": 0, "clubs": [], "lines": []}
+
+
+@pytest.mark.parametrize("index", [0, 1, 2])
+def test_every_wording_of_every_points_line_fills_in(monkeypatch, index):
+    used = set()
+
+    def pick(options, kind, gw):
+        used.add(kind)
+        return options[index]
+
+    monkeypatch.setattr(app, "banter_wording", pick)
+    texts = [line["text"] for line in get_points()["lines"]]
+    assert used == set(app.POINTS_LINES) and len(texts) == 3
+    assert not any("{" in t or "}" in t for t in texts)
+
+
+def test_every_kind_of_points_line_has_three_wordings_that_only_use_their_fields():
+    fields = {"points_wire": {"club", "wire", "owned"}, "points_best": {"club", "per"},
+              "points_worst": {"club", "per"}}
+    assert set(app.POINTS_LINES) == set(fields)
+    for kind, options in app.POINTS_LINES.items():
+        assert len(options) == 3 and len(set(options)) == 3
+        assert all(set(re.findall(r"{(\w+)}", text)) <= fields[kind] for text in options)
+
+
+def test_the_club_points_route_adds_up_the_leagues_players_by_club(deals_world):
+    # in the deals world the odd players play for ARS and the even ones for CHE; 1-4 are owned, 5-8 are free
+    # agents, and everyone has 30 points
+    data = app.app.test_client().get("/api/league/123/club-points").get_json()
+    shown = data["points"]
+    assert data["league_id"] == 123 and shown["owned"] == 4
+    assert [(c["club"], c["owned"], c["owned_points"], c["wire_points"]) for c in shown["clubs"]] == [
+        ("ARS", 2, 60, 60), ("CHE", 2, 60, 60)]
+    assert shown["clubs"][0]["best_wire"] == {"name": "Star5", "points": 30}
+    assert shown["lines"][0]["text"].count("60") == 2 and "ARS" in shown["lines"][0]["text"]
+    assert [call for call in deals_world["calls"] if "/live" in call or "/transactions" in call] == []
+
+
+def test_the_club_points_route_gives_an_error_when_the_owners_cannot_be_read(deals_world):
+    deals_world["down"] = {"owners"}
+    res = app.app.test_client().get("/api/league/123/club-points")
+    assert res.status_code >= 400 and "error" in res.get_json()
+
+
+def test_the_club_section_opens_on_squad_dna_with_the_grid_behind_a_switch():
+    page = hub_page()
+    assert 'id="clubsDna"' in page and 'id="clubsView"' in page and "function showClubs" in page
+    assert page.index('id="clubsView"') < page.index('id="clubsDna"') < page.index('id="clubsGrid"')
+    assert page.index('id="clubsGrid"') < page.index('id="clubsPicked"') < page.index('id="pointsBlock"')
+    assert 'data-clubs="dna" aria-pressed="true"' in page            # Squad DNA is the first view
+    assert 'class="tablewrap hidden" id="clubsGrid"' in page         # and the grid starts hidden
+    assert "function pickClub" in page and '$("clubsDna").addEventListener("click"' in page
+
+
+def test_the_charts_page_has_where_the_points_are_between_the_club_picker_and_the_market():
+    page = hub_page()
+    assert 'id="pointsBlock"' in page and "function renderWire" in page and "/club-points`" in page
+    assert page.index('id="clubsPicked"') < page.index('id="pointsBlock"') < page.index('id="marketBlock"')
+    assert "loadWire();" in page and "WIRE = null" in page  # asked for with the grid, reset on switch
+    assert "WIRE_SHOWN" in page and 'id="pointsMore"' in page          # the first clubs, then "Show all"
+
+
+def test_squads_with_the_same_biggest_stack_go_by_fewest_clubs_then_name():
+    wide = [club_player(n, c, 100) for n, c in enumerate(("AAA", "AAA", "BBB", "CCC"), 1)]      # 3 clubs
+    narrow = [club_player(n, c, 101) for n, c in enumerate(("AAA", "AAA", "BBB"), 10)]         # 2 clubs
+    twin = [club_player(n, c, 102) for n, c in enumerate(("DDD", "DDD", "EEE"), 20)]           # 2 clubs
+    shown = app.club_exposure(wide + narrow + twin, CLUB_MANAGERS, 11)
+    assert [m["team"] for m in shown["managers"]] == ["Team B", "Team C", "Team A"]    # all have a stack of 2
