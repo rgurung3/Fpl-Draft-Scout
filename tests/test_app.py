@@ -5700,3 +5700,238 @@ def test_the_charts_page_has_a_club_grid_under_the_weekly_scores():
     assert page.index('id="spread"') < page.index('id="clubsSection"') < page.index('id="squadsSection"')
     assert page.index('id="squadsSection"') < page.index('id="panel-rivalries"')
     assert "loadClubs();" in page  # it loads on its own, like the squad strength
+
+
+# ---------------------------------------------------------------- side battles
+
+BATTLE_TEAMS = {100: "Team A", 101: "Team B", 102: "Team C", 103: "Team D"}
+BATTLE_FIXTURES = [{"home": "ARS", "away": "NEW", "kickoff": "2026-11-14T12:30:00+00:00"},
+                   {"home": "LIV", "away": "MUN", "kickoff": "2026-11-14T15:00:00+00:00"}]
+# Team A has 3 Arsenal and Team B 2 Newcastle: a side battle in ARS v NEW. Liverpool and Man Utd are owned
+# on one side only or one player at a time
+BATTLE_OWNED = {"ARS": {100: ["Saka", "Rice", "Saliba"], 102: ["Gabriel"]},
+                "NEW": {101: ["Isak", "Gordon"], 103: ["Pope"]},
+                "LIV": {100: ["Salah"], 101: ["Alisson"]},
+                "MUN": {102: ["Bruno", "Onana"], 103: ["Dalot", "Mount"]}}
+
+
+def battles_for(pairs, fixtures=BATTLE_FIXTURES, owned=BATTLE_OWNED, gw=11):
+    return app.side_battles(gw, fixtures, owned, pairs, BATTLE_TEAMS)
+
+
+def test_two_managers_on_opposite_sides_of_a_fixture_with_two_players_each_have_a_side_battle(first_wording):
+    shown = battles_for([(100, 101), (102, 103)])
+    first, second = shown["matches"]
+    assert (first["battles"], first["biggest"]) == (1, {
+        "home": "ARS", "away": "NEW", "a_club": "ARS", "a_n": 3, "b_club": "NEW", "b_n": 2})
+    assert first["line"] == "Side battle: **Team A**'s 3 ARS v **Team B**'s 2 NEW in ARS v NEW."
+    # Teams C and D own 1 Arsenal and 1 Newcastle player, and both own Man Utd: no battle
+    assert (second["battles"], second["biggest"], second["line"]) == (0, None, None)
+    assert (first["a_team"], first["b_team"]) == ("Team A", "Team B")
+
+
+def test_the_battle_reads_the_same_whichever_manager_is_first():
+    flipped = battles_for([(101, 100)])["matches"][0]
+    assert flipped["biggest"] == {
+        "home": "ARS", "away": "NEW", "a_club": "NEW", "a_n": 2, "b_club": "ARS", "b_n": 3}
+    assert "**Team B**" in flipped["line"] and "**Team A**" in flipped["line"]
+
+
+def test_a_player_each_is_not_enough_unless_the_bar_is_lowered(monkeypatch):
+    assert battles_for([(102, 103)])["matches"][0]["battles"] == 0              # one Arsenal v one Newcastle
+    monkeypatch.setattr(app, "BATTLE_MIN", 1)
+    assert battles_for([(102, 103)])["matches"][0]["battles"] == 1
+
+
+def test_each_fixture_lists_who_is_on_each_side_and_which_pairs_are_fighting_there():
+    arsenal_newcastle, liverpool_united = battles_for([(100, 101)])["fixtures"]
+    assert [(o["team"], o["n"]) for o in arsenal_newcastle["home_owners"]] == [("Team A", 3), ("Team C", 1)]
+    assert arsenal_newcastle["home_owners"][0]["players"] == ["Saka", "Rice", "Saliba"]
+    assert [(o["team"], o["n"]) for o in arsenal_newcastle["away_owners"]] == [("Team B", 2), ("Team D", 1)]
+    assert arsenal_newcastle["battles"] == [{"a": "Team A", "b": "Team B"}]
+    assert liverpool_united["battles"] == []
+    assert arsenal_newcastle["kickoff"] == "2026-11-14T12:30:00+00:00"  # fixture fields are kept
+
+
+def test_the_biggest_battle_has_the_most_players_and_a_double_gameweek_counts_twice(first_wording):
+    owned = {**BATTLE_OWNED, "LIV": {100: ["Salah", "Jota"], 101: ["Alisson"]},
+             "MUN": {101: ["Bruno", "Dalot"]}}
+    fixtures = BATTLE_FIXTURES + [{"home": "ARS", "away": "NEW", "kickoff": "2026-11-17T19:45:00+00:00"}]
+    match = battles_for([(100, 101)], fixtures, owned)["matches"][0]
+    assert match["battles"] == 3                                  # ARS v NEW twice, and Liverpool v Man Utd
+    assert (match["biggest"]["a_n"], match["biggest"]["b_n"]) == (3, 2)        # not the 2 v 2 at Anfield
+
+
+def test_a_match_with_no_manager_or_no_owners_makes_no_fuss():
+    assert battles_for([])["matches"] == []
+    empty = battles_for([(100, 101)], owned={})
+    assert empty["matches"][0]["battles"] == 0 and empty["fixtures"][0]["home_owners"] == []
+    assert battles_for([(100, 999)])["matches"][0]["b_team"] == "Team 999"  # a manager the names don't know
+
+
+@pytest.mark.parametrize("index", [0, 1, 2])
+def test_every_wording_of_the_side_battle_line_fills_in(monkeypatch, index):
+    monkeypatch.setattr(app, "banter_wording", lambda options, kind, gw: options[index])
+    line = battles_for([(100, 101)])["matches"][0]["line"]
+    assert "**Team A**" in line and "ARS" in line and "NEW" in line and "{" not in line
+
+
+def test_the_battle_wordings_only_use_their_fields():
+    options = app.BATTLE_LINES["battle"]
+    assert len(options) == 3 and len(set(options)) == 3
+    fields = {"a", "na", "ca", "b", "nb", "cb", "home", "away"}
+    assert all(set(re.findall(r"{(\w+)}", text)) <= fields for text in options)
+
+
+# the battles route over the recap world: GW3 is the first with unfinished matches (Team 0 v Team 1 and
+# Team 2 v Team 3), ARS v CHE and LIV v MCI are the fixtures, and each team starts two players (one at each
+# of two clubs)
+
+def get_battles(league=123):
+    return app.app.test_client().get(f"/api/league/{league}/battles").get_json()
+
+
+def test_the_battles_route_reads_the_gameweek_the_cards_are_for(recap_world):
+    shown = get_battles()["battles"]
+    assert shown["gw"] == 3
+    assert [(f["home"], f["away"]) for f in shown["fixtures"]] == [
+        ("ARS", "CHE"), ("LIV", "MCI")]                                                        # by kickoff
+    first = shown["fixtures"][0]
+    assert [(o["team"], o["players"]) for o in first["home_owners"]] == [
+        ("Team 0", ["Saka"]), ("Team 2", ["Player5"])]
+    assert [(m["a_team"], m["b_team"], m["battles"]) for m in shown["matches"]] == [
+        ("Team 0", "Team 1", 0), ("Team 2", "Team 3", 0)]          # one player each: not enough
+
+
+def test_the_battles_route_finds_side_battles_when_the_bar_is_one_player(recap_world, monkeypatch):
+    monkeypatch.setattr(app, "BATTLE_MIN", 1)
+    first, second = get_battles()["battles"]["matches"]
+    assert first["battles"] == 2 and second["battles"] == 2          # ARS v CHE and LIV v MCI, for both pairs
+    assert first["line"].startswith("Side battle: **Team 0**") or "**Team 0**" in first["line"]
+
+
+def test_the_battles_route_has_nothing_when_every_match_is_finished_or_the_fixtures_are_down(recap_world):
+    recap_world["fixtures"] = None
+    assert get_battles()["battles"] is None
+    recap_world["fixtures"] = [{"event": 3, "team_h": 1, "team_a": 2, "kickoff_time": "2026-10-10T11:30:00Z",
+                                "started": False, "finished": False}]
+    recap_world["matches"] = RECAP_WEEKS[:4]                         # nothing left to play
+    assert get_battles()["battles"] is None
+
+
+def test_the_battles_route_gives_an_error_when_the_owners_cannot_be_read(recap_world):
+    recap_world["owners"] = False
+    res = app.app.test_client().get("/api/league/123/battles")
+    assert res.status_code >= 400 and "error" in res.get_json()
+
+
+# ---------------------------------------------------------------- the club market
+
+MARKET_CLUBS = {1: "BHA", 2: "BHA", 3: "ARS", 4: "ARS", 5: "MUN", 6: "LIV"}
+
+
+def claim_row(got, gave, kind="w", result="a"):
+    return {"kind": kind, "result": result, "element_in": got, "element_out": gave}
+
+
+def test_the_market_counts_players_claimed_and_dropped_for_each_club(first_wording):
+    rows = [claim_row(1, 3), claim_row(2, 4), claim_row(1, 3), claim_row(5, 3, kind="f")]
+    market = app.club_market(rows, MARKET_CLUBS, 10)
+    assert market["claims"] == 4
+    assert market["clubs"] == [{"club": "BHA", "bought": 3, "sold": 0, "net": 3},
+                               {"club": "MUN", "bought": 1, "sold": 0, "net": 1},
+                               {"club": "ARS", "bought": 0, "sold": 4, "net": -4}]       # most bought first
+    assert [line["text"] for line in market["lines"]] == [
+        "The league is buying BHA: 3 claimed and 0 dropped.",
+        "The league is dumping ARS: 4 dropped and only 0 claimed."]
+
+
+def test_denied_claims_trades_and_unknown_players_are_not_counted(first_wording):
+    rows = [claim_row(1, 3, result="do"), claim_row(1, 3, result="di"), claim_row(1, 3, kind="t"),
+            claim_row(99, 98), claim_row(6, 5)]
+    market = app.club_market(rows, MARKET_CLUBS, 10)
+    assert market["claims"] == 2                  # the unknown players' claim still counts as a claim...
+    assert market["clubs"] == [{"club": "LIV", "bought": 1, "sold": 0, "net": 1},
+                               {"club": "MUN", "bought": 0, "sold": 1, "net": -1}]     # ...but moves no club
+    assert [line["text"] for line in market["lines"]][0].startswith("No club has moved by more than 1")
+
+
+def test_clubs_with_the_same_net_are_ordered_by_buying_then_name():
+    rows = [claim_row(1, 5), claim_row(3, 5), claim_row(6, 6)]  # BHA +1, ARS +1, LIV 0, MUN -2
+    clubs = app.club_market(rows, MARKET_CLUBS, 10)["clubs"]
+    assert [c["club"] for c in clubs] == ["ARS", "BHA", "LIV", "MUN"]
+
+
+def test_no_claims_means_no_market():
+    market = app.club_market([], MARKET_CLUBS, 10)
+    assert market == {"claims": 0, "clubs": [], "lines": []}
+
+
+@pytest.mark.parametrize("index", [0, 1, 2])
+def test_every_wording_of_every_market_line_fills_in(monkeypatch, index):
+    used = set()
+
+    def pick(options, kind, gw):
+        used.add(kind)
+        return options[index]
+
+    monkeypatch.setattr(app, "banter_wording", pick)
+    busy = [claim_row(1, 3), claim_row(2, 4), claim_row(1, 3), claim_row(2, 4)]
+    quiet = [claim_row(1, 3)]
+    texts = [line["text"] for rows in (busy, quiet)
+             for line in app.club_market(rows, MARKET_CLUBS, 10)["lines"]]
+    assert used == set(app.MARKET_LINES) and texts and not any("{" in t for t in texts)
+
+
+def test_every_kind_of_market_line_has_three_wordings_that_only_use_their_fields():
+    fields = {"market_buy": {"club", "bought", "sold"}, "market_sell": {"club", "bought", "sold"},
+              "market_quiet": {"n"}}
+    assert set(app.MARKET_LINES) == set(fields)
+    for kind, options in app.MARKET_LINES.items():
+        assert len(options) == 3 and len(set(options)) == 3
+        assert all(set(re.findall(r"{(\w+)}", text)) <= fields[kind] for text in options)
+
+
+def test_the_market_route_counts_the_leagues_claims_by_club(deals_world):
+    # in the deals world the odd players play for ARS and the even ones for CHE
+    deals_world["transactions"] = [make_claim(1, got=5, gave=6, after=1),
+                                   make_claim(2, got=7, gave=8, after=1)]
+    data = app.app.test_client().get("/api/league/123/market").get_json()
+    assert data["league_name"] == "Deal League"
+    assert data["market"]["claims"] == 2
+    assert {c["club"]: (c["bought"], c["sold"]) for c in data["market"]["clubs"]} == {
+        "ARS": (2, 0), "CHE": (0, 2)}
+    assert [call for call in deals_world["calls"] if "/live" in call] == []        # it asks for no points
+
+
+def test_the_market_route_gives_an_error_when_the_claims_cannot_be_read(deals_world):
+    deals_world["down"] = {"transactions"}
+    res = app.app.test_client().get("/api/league/123/market")
+    assert res.status_code >= 400 and "error" in res.get_json()
+
+
+# ---------------------------------------------------------------- the pages for them
+
+def test_banter_has_a_whos_cheering_for_whom_section_with_the_side_battles():
+    page = hub_page()
+    assert 'id="battlesSection"' in page and "function renderBattles" in page and "/battles`" in page
+    banter = page[page.index('id="panel-banter"'):page.index('id="panel-charts"')]
+    assert 'id="battlesSection"' in banter and 'id="fixtureList"' in banter
+    assert "refreshBattles()" in page                       # asked for with the cards, as a bonus
+    assert "BATTLES = null" in page                         # forgotten when another league is opened
+    # your own team is marked "me", not "mine": .mine is the style of the Your matches card
+    assert '.fxsides .own.me' in page and '"mine" : ""}" title=' not in page
+
+
+def test_side_battles_show_on_the_pinned_cards_and_in_the_next_up_card():
+    page = hub_page()
+    assert "function battleFor" in page and "battleLine(c)" in page
+    assert "battleFor(myId, next.opponent, next.gw)" in page
+    assert page.count("clash?.line") == 1                   # drawn under the record in Your matches
+
+
+def test_the_charts_page_has_the_club_market_under_the_club_grid():
+    page = hub_page()
+    assert 'id="marketBlock"' in page and "function renderMarket" in page and "/market`" in page
+    assert page.index('id="clubsPicked"') < page.index('id="marketBlock"') < page.index('id="squadsSection"')
+    assert "loadMarket();" in page and "MARKET = null" in page
