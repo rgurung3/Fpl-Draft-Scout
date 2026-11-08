@@ -4129,6 +4129,199 @@ def club_exposure(players, managers, next_gw):
             "lines": [{"text": text} for text in lines]}
 
 
+# ---------------------------------------------------------------- side battles and the club market
+
+BATTLE_MIN = 2           # each of two managers needs this many players on their side for a side battle
+MARKET_MIN_NET = 3       # a club is "being bought" or "being dumped" from this many more claims than drops
+
+# Banter about them, three wordings each, picked by the gameweek like BANTER_LINES. {a} and {b} are team names
+# (marked), {na} and {nb} their numbers of players, {ca} and {cb} the clubs they are cheering for, {home} and
+# {away} the fixture; {club} is a club's code and {bought} and {sold} are counts of players.
+BATTLE_LINES = {
+    "battle": (   # a, na, ca, b, nb, cb, home, away
+        "Side battle: {a}'s {na} {ca} v {b}'s {nb} {cb} in {home} v {away}.",
+        "{a} are cheering for {ca} ({na}) and {b} for {cb} ({nb}) in {home} v {away}. "
+        "Somebody goes home unhappy.",
+        "{home} v {away} is a second match for them: {a}'s {na} {ca} against {b}'s {nb} {cb}.",
+    ),
+}
+MARKET_LINES = {
+    "market_buy": (   # club, bought, sold
+        "The league is buying {club}: {bought} claimed and {sold} dropped.",
+        "{club} are the hot ticket on the wire: {bought} in, {sold} out.",
+        "Everyone wants a {club} player: {bought} claims in, only {sold} dropped.",
+    ),
+    "market_sell": (   # club, bought, sold
+        "The league is dumping {club}: {sold} dropped and only {bought} claimed.",
+        "Nobody wants {club} any more: {sold} out, {bought} in.",
+        "{club} are being shown the door: {sold} players dropped, {bought} claimed.",
+    ),
+    "market_quiet": (   # n
+        "No club has moved by more than {n} claims either way. A quiet market.",
+        "The wire is calm: the biggest swing for any club is {n}.",
+        "Nobody is stampeding anywhere: {n} is the most any club has gained or lost on the wire.",
+    ),
+}
+
+
+def side_battles(gw, fixtures, owned, matches, teams):
+    """
+    Who is cheering for whom in a gameweek's Premier League fixtures, and where two managers who play each
+    other are on opposite sides of one: a side battle. A side battle needs BATTLE_MIN or more players from
+    each manager. fixtures is [{"home", "away", "kickoff"}] (club codes), owned {club code: {team ID: [player
+    names, best first]}}, matches the league's [(team ID, team ID)] for that gameweek, teams {team ID: name}.
+
+    Returns {gw, min (BATTLE_MIN), fixtures, matches}:
+      fixtures  each fixture with home_owners and away_owners (every manager who has a player in that club:
+                {entry_id, team, n, players}, the biggest stake first) and battles ({a, b}: the team names
+                of a pair fighting it out there)
+      matches   each league match {a, b (team IDs), a_team, b_team, battles (how many), biggest ({home,
+                away, a_club, a_n, b_club, b_n}, or None) and line (a sentence about the biggest, names
+                marked for bold, or None)}
+    """
+    def name(t):
+        return teams.get(t, f"Team {t}")
+
+    def side(club):
+        return sorted(({"entry_id": t, "team": name(t), "n": len(players), "players": players}
+                       for t, players in owned.get(club, {}).items()),
+                      key=lambda r: (-r["n"], r["team"].lower()))
+
+    rows = [{**fx, "home_owners": side(fx["home"]), "away_owners": side(fx["away"]), "battles": []}
+            for fx in fixtures]
+    out = []
+    for a, b in matches:
+        found = []
+        for fx in rows:
+            for x, y in ((a, b), (b, a)):   # x cheers for the home side and y for the away side
+                nx = len(owned.get(fx["home"], {}).get(x, []))
+                ny = len(owned.get(fx["away"], {}).get(y, []))
+                if nx >= BATTLE_MIN and ny >= BATTLE_MIN:
+                    fx["battles"].append({"a": name(a), "b": name(b)})
+                    a_home = x == a
+                    found.append({"home": fx["home"], "away": fx["away"],
+                                  "a_club": fx["home"] if a_home else fx["away"], "a_n": nx if a_home else ny,
+                                  "b_club": fx["away"] if a_home else fx["home"],
+                                  "b_n": ny if a_home else nx})
+        biggest = max(found, default=None, key=lambda f: (
+            min(f["a_n"], f["b_n"]), f["a_n"] * f["b_n"], f["home"], f["away"]))
+        line = None
+        if biggest:
+            line = banter_wording(BATTLE_LINES["battle"], "battle", gw).format(
+                a=mark(name(a)), na=biggest["a_n"], ca=biggest["a_club"],
+                b=mark(name(b)), nb=biggest["b_n"], cb=biggest["b_club"],
+                home=biggest["home"], away=biggest["away"])
+        out.append({"a": a, "b": b, "a_team": name(a), "b_team": name(b), "battles": len(found),
+                    "biggest": biggest, "line": line})
+    return {"gw": gw, "min": BATTLE_MIN, "fixtures": rows, "matches": out}
+
+
+def load_battles(league_id):
+    """
+    Build the side battles for a league: {"league_id", "league_name", "battles"} (see side_battles). They are
+    for the first gameweek that still has unfinished matches, the same one the match-up cards at the top of
+    the hub are for (which can be the one being played, not the Draft site's "next"), so the fixtures come
+    from the classic fixtures feed (see gameweek_games) rather than from the players, whose fixtures start at
+    the next one. It also needs who owns each player (one request) and no ratings, so it is light. battles
+    is None if every match is finished or the fixtures feed can't be read.
+    """
+    details = fetch(f"{DRAFT}/league/{league_id}/details", LEAGUE_NOT_FOUND)
+    name = details.get("league", {}).get("name", f"League {league_id}")
+    nothing = {"league_id": league_id, "league_name": name, "battles": None}
+    matches = details.get("matches", [])
+    left = sorted({m["event"] for m in matches if not m.get("finished") and m.get("event")})
+    if not left:
+        return nothing
+    gw = left[0]
+    boot = fetch(f"{DRAFT}/bootstrap-static", LEAGUE_NOT_FOUND)
+    games = gameweek_games(boot["teams"], gw)
+    if not games:
+        return nothing
+    short = {t["id"]: t["short_name"] for t in boot["teams"]}
+    seen = set()
+    fixtures = []
+    for team_id, played in games[1].items():
+        for g in played:
+            key = (short.get(team_id), g.get("opp"), g["kickoff"])
+            if g["home"] and g.get("opp") and short.get(team_id) and key not in seen:
+                seen.add(key)
+                fixtures.append({"home": key[0], "away": key[1],
+                                 "kickoff": g["kickoff"].isoformat() if g["kickoff"] else None})
+    fixtures.sort(key=lambda f: (f["kickoff"] or "9999", f["home"]))
+
+    status = fetch(f"{DRAFT}/league/{league_id}/element-status", LEAGUE_NOT_FOUND)
+    owner_of = {s["element"]: s.get("owner") for s in status.get("element_status", []) if s.get("owner")}
+    elements = sorted((el for el in boot["elements"] if el["id"] in owner_of),
+                      key=lambda el: -num(el.get("total_points")))
+    owned = {}
+    for el in elements:
+        owned.setdefault(short.get(el["team"]), {}).setdefault(owner_of[el["id"]], []).append(
+            el.get("web_name") or f'Player {el["id"]}')
+    entries = {e["entry_id"]: clean_name(e.get("entry_name")) or f'Team {e["entry_id"]}'
+               for e in details.get("league_entries", []) if e.get("entry_id")}
+    entry_of = {e.get("id"): e["entry_id"] for e in details.get("league_entries", []) if e.get("entry_id")}
+    pairs = [(entry_of[m["league_entry_1"]], entry_of[m["league_entry_2"]]) for m in matches
+             if m.get("event") == gw and m.get("league_entry_1") in entry_of
+             and m.get("league_entry_2") in entry_of]
+    return {"league_id": league_id, "league_name": name,
+            "battles": side_battles(gw, fixtures, owned, pairs, entries)}
+
+
+def club_market(transactions, club_of, week):
+    """
+    Which clubs the league is buying and selling on the waiver wire: every accepted waiver or free-agent
+    claim adds a player to the club he plays for ("bought") and takes one away from the club of the player
+    dropped for him ("sold"). club_of is {player ID: club code}; a player it doesn't know is skipped. Trades
+    don't count: they only move a player between two managers. week picks the banter's wording.
+
+    Returns {claims, clubs, lines}: clubs are those that have had any claim, the most bought (bought minus
+    sold) first, each {club, bought, sold, net}; lines are banter ({text}): the club bought the most and the
+    one sold the most when they are at least MARKET_MIN_NET apart, otherwise that it's a quiet market.
+    """
+    flow = {}
+    claims = 0
+    for t in transactions:
+        if t.get("kind") not in ("w", "f") or t.get("result") != "a":
+            continue
+        claims += 1
+        for key, field in (("bought", "element_in"), ("sold", "element_out")):
+            club = club_of.get(t.get(field))
+            if club:
+                flow.setdefault(club, {"bought": 0, "sold": 0})[key] += 1
+    clubs = sorted(({"club": c, "bought": v["bought"], "sold": v["sold"], "net": v["bought"] - v["sold"]}
+                    for c, v in flow.items()), key=lambda r: (-r["net"], -r["bought"], r["club"]))
+
+    def say(kind, row):
+        return banter_wording(MARKET_LINES[kind], kind, week).format(
+            club=row["club"], bought=row["bought"], sold=row["sold"])
+
+    lines = []
+    if clubs and clubs[0]["net"] >= MARKET_MIN_NET:
+        lines.append(say("market_buy", clubs[0]))
+    if clubs and clubs[-1]["net"] <= -MARKET_MIN_NET:
+        lines.append(say("market_sell", clubs[-1]))
+    if clubs and not lines:
+        lines.append(banter_wording(MARKET_LINES["market_quiet"], "market_quiet", week).format(
+            n=max(abs(r["net"]) for r in clubs)))
+    return {"claims": claims, "clubs": clubs, "lines": [{"text": text} for text in lines]}
+
+
+def load_market(league_id):
+    """
+    Build the club market for a league: {"league_id", "league_name", "market"} (see club_market). It reads
+    the Draft site's claims and the player list (to tell which club each player is at): two requests, no
+    points.
+    """
+    boot = fetch(f"{DRAFT}/bootstrap-static", LEAGUE_NOT_FOUND)
+    details = fetch(f"{DRAFT}/league/{league_id}/details", LEAGUE_NOT_FOUND)
+    short = {t["id"]: t["short_name"] for t in boot.get("teams") or []}
+    club_of = {el["id"]: short.get(el["team"]) for el in boot.get("elements") or []}
+    week = boot.get("events", {}).get("current") or 1
+    name = details.get("league", {}).get("name", f"League {league_id}")
+    return {"league_id": league_id, "league_name": name,
+            "market": club_market(draft_rows(league_id, "transactions"), club_of, week)}
+
+
 # ---------------------------------------------------------------- routes
 
 @app.route("/")
@@ -4333,6 +4526,24 @@ def club_ownership(league_id):
         return jsonify({"error": e.message}), e.status
     return jsonify({"league_id": league_id, "league_name": league["league_name"],
                     "clubs": club_exposure(league["players"], league["managers"], league["next_gw"])})
+
+
+@app.route("/api/league/<int:league_id>/battles")
+def battles(league_id):
+    """Who is cheering for whom in the gameweek's fixtures, and the side battles in the league's matches."""
+    try:
+        return jsonify(load_battles(league_id))
+    except FplError as e:
+        return jsonify({"error": e.message}), e.status
+
+
+@app.route("/api/league/<int:league_id>/market")
+def market(league_id):
+    """Which clubs the league is buying and selling on the waiver wire (see club_market)."""
+    try:
+        return jsonify(load_market(league_id))
+    except FplError as e:
+        return jsonify({"error": e.message}), e.status
 
 
 @app.route("/api/league/<int:league_id>/moves")

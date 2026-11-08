@@ -68,6 +68,24 @@
   table.clubs td.wk { min-width: 2.4em; padding: 5px 3px; }
   table.clubs th.opp.blank span { color: var(--rival); }
   table.clubs th.opp.double span { color: var(--pitch); }
+  /* who's cheering for whom: one row per fixture, with the managers who have players on each side */
+  .fixlist { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 8px; }
+  .fix { background: var(--surface); border: 1px solid var(--line); border-left: 5px solid var(--line);
+    border-radius: 4px; padding: 10px 14px; display: grid; gap: 6px; }
+  .fix.hasbattle { border-left-color: var(--amber); }
+  .fxhead { font-family: var(--display); font-weight: 600; font-size: 1.2rem; }
+  .fxhead .when { font-family: var(--body); font-weight: 400; font-size: .85rem; color: var(--muted); margin-left: 8px; }
+  .fxsides { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 0; }
+  .fxsides > div { min-width: 0; padding-right: 12px; }
+  .fxsides > div + div { border-left: 1px solid var(--line); padding: 0 0 0 16px; }
+  .fxsides .own { display: inline-block; margin: 1px 12px 1px 0; font-size: .93rem; cursor: default; }
+  .fxsides .own.me { font-weight: 600; }
+  .fxsides .none { color: var(--muted); font-size: .9rem; }
+  .fxbattle { font-size: .92rem; }
+  @media (max-width: 520px) {
+    .fxsides { grid-template-columns: 1fr; }
+    .fxsides > div + div { border-left: 0; border-top: 1px solid var(--line); padding: 6px 0 0; }
+  }
   table.odds tr.orow { cursor: pointer; }
   table.odds tr.orow:hover td.team { color: var(--ink); }
   table.odds .trend { font-size: .7rem; margin-left: 3px; }
@@ -326,6 +344,12 @@
         <p class="sub">What happened in the latest finished gameweek. This part is new every week.</p>
         <ul class="facts" id="weekFacts"></ul>
       </section>
+      <section id="battlesSection" class="hidden">
+        <h2 id="battlesTitle">Who's cheering for whom</h2>
+        <p class="sub" id="battlesSub"></p>
+        <ul class="facts" id="battlesLines"></ul>
+        <ul class="fixlist" id="fixtureList"></ul>
+      </section>
       <section id="awardsSection" class="hidden">
         <h2>Season awards</h2>
         <p class="sub">Handed out from this season's results so far.</p>
@@ -454,6 +478,12 @@
         <ul class="facts" id="clubsLines"></ul>
         <div class="tablewrap"><table class="weeks h2h clubs" id="clubsTable"></table></div>
         <div class="picked hidden" id="clubsPicked"></div>
+        <div id="marketBlock" class="hidden">
+          <h3 class="minihead">The club market</h3>
+          <p class="sub" id="marketSub"></p>
+          <ul class="facts" id="marketLines"></ul>
+          <div class="chartwrap"><svg class="plot" id="marketChart" role="img"></svg></div>
+        </div>
       </section>
       <section id="squadsSection">
         <h2>Squad strength</h2>
@@ -553,6 +583,8 @@ let OH = null, ohFor = null;   // how the odds moved (see odds_history in app.py
 let movedMetric = "win";       // which chance that chart draws: win (title), top3 or last (wooden spoon)
 let CLUBS = null;        // which clubs each squad comes from (see club_exposure in app.py)
 let clubsPick = null;    // the club grid cell whose players are shown: {id, club}
+let BATTLES = null;      // who is cheering for whom this gameweek, and the side battles (see side_battles in app.py)
+let MARKET = null;       // the clubs the league is buying and selling on the waiver wire (see club_market in app.py)
 let SQ = null;           // the squads the server sent (see league_squads in app.py); this page only draws them
 let squadView = "week";  // which rating the squad chart uses: "week" (next 5) or "season" (until the break)
 let RIV = null;          // the Rivalries data: the managers and seasons (see league_rivalries in app.py)
@@ -620,13 +652,15 @@ async function openTab(name) {
 function openLeague(id, firstTab) {
   leagueId = id;
   loaded.upcoming = loaded.recap = loaded.deals = loaded.odds = loaded.charts = loaded.rivalries = null;
-  BANTER = null; LIVE = null; banterPending = null; banterAt = 0;
+  BANTER = null; LIVE = null; banterPending = null; banterAt = 0; BATTLES = null;
+  $("battlesSection").classList.add("hidden");
   renderMatchups();   // hides the match-ups until this league's arrive
   $("dealsCard").classList.add("hidden");
   RIV = null; GRID = null; ODDS = null; ACT = null; picked = null;
   oddsOpen.clear(); movesAsk = null; movesFor = null;
-  OH = null; ohFor = null; CLUBS = null; clubsPick = null;
+  OH = null; ohFor = null; CLUBS = null; clubsPick = null; MARKET = null;
   $("oddsMoved").classList.add("hidden"); $("clubsSection").classList.add("hidden");
+  $("marketBlock").classList.add("hidden");
   UP = null; showAllMatches = false;
   PEOPLE = []; renderYou();
   SQ = null; squadView = "week";
@@ -659,7 +693,7 @@ function matchCard(cls, title, c) {
   return `<div class="card ${cls}"><div class="tag">${esc(title)}${on ? ' <span class="chip liveon">Live</span>' : ""}</div>
     <div class="versus">${side(c.a)}<span class="v ${on ? "score" : ""}">${on ? `${a.points} – ${b.points}` : "v"}</span>${side(c.b)}</div>
     <div class="line">${esc(line)}</div>${c.record ? `<div class="line rec">${rich(c.record.line)}</div>` : ""}`
-    + `${c.tease ? `<div class="tease">${esc(c.tease)}</div>` : ""}</div>`;
+    + `${battleLine(c)}${c.tease ? `<div class="tease">${esc(c.tease)}</div>` : ""}</div>`;
 }
 
 function renderMatchups() {
@@ -715,7 +749,51 @@ async function loadMatchups() {
   matchAt = Date.now();
   try { await refreshBanter(); }
   catch (e) { BANTER = null; renderMatchups(); return; }   // no cards; opening Banter shows the reason
-  await refreshLive();
+  await Promise.all([refreshLive(), refreshBattles()]);
+}
+
+// the side battle between two managers who play each other this gameweek, if they have one
+function battleFor(a, b, gw) {
+  return BATTLES && BATTLES.gw === gw ? BATTLES.matches.find(m => (m.a === a && m.b === b) || (m.a === b && m.b === a)) : null;
+}
+
+function battleLine(c) {
+  const m = battleFor(c.a.entry_id, c.b.entry_id, c.gw);
+  return m?.line ? `<div class="line rec">⚔ ${rich(m.line)}</div>` : "";
+}
+
+async function refreshBattles() {
+  const forLeague = leagueId;
+  try {
+    const data = await getJson(`/api/league/${forLeague}/battles`);
+    if (forLeague !== leagueId) return;   // they opened another league while this was loading
+    BATTLES = data.battles;
+  } catch (e) {
+    BATTLES = null;   // a bonus: the cards and the rest of Banter work without it
+  }
+  renderMatchups();
+  renderBattles();
+  if (loaded.upcoming === leagueId) drawMyMatches();
+}
+
+// who is cheering for whom: every fixture of the gameweek, with the managers who own players on each side
+function renderBattles() {
+  const b = BATTLES, show = !!(b && b.fixtures.length);
+  $("battlesSection").classList.toggle("hidden", !show);
+  if (!show) return;
+  const fought = b.matches.filter(m => m.line);
+  $("battlesTitle").textContent = `Who's cheering for whom: GW${b.gw}`;
+  $("battlesSub").textContent = `Each fixture shows the managers who own players on each side (hover a name for the players). A side battle is two managers who play each other, each with ${b.min} or more players on opposite sides of one fixture. `
+    + (fought.length ? `${fought.length} of this week's ${b.matches.length} league matches have one.` : "None of this week's league matches has one.");
+  $("battlesLines").innerHTML = fought.map(m => `<li>${rich(m.line)}</li>`).join("");
+  const owners = list => list.length
+    ? list.map(o => `<span class="own ${o.entry_id === myId ? "me" : ""}" title="${esc(o.players.join(", "))}">${esc(o.team)} ${o.n}</span>`).join("")
+    : `<span class="none">nobody</span>`;
+  const when = k => k ? new Date(k).toLocaleString("en-GB", { weekday: "short", hour: "2-digit", minute: "2-digit" }) : "";
+  $("fixtureList").innerHTML = b.fixtures.map(f => `<li class="fix ${f.battles.length ? "hasbattle" : ""}">
+      <div class="fxhead">${esc(f.home)} v ${esc(f.away)}<span class="when">${esc(when(f.kickoff))}</span></div>
+      <div class="fxsides"><div>${owners(f.home_owners)}</div><div>${owners(f.away_owners)}</div></div>
+      ${f.battles.map(x => `<div class="fxbattle">⚔ ${esc(x.a)} v ${esc(x.b)}</div>`).join("")}</li>`).join("");
 }
 
 function renderBanter() {
@@ -842,6 +920,7 @@ function drawMyMatches() {
   const strength = mine.strength != null && opp.strength != null
     ? `Squad strength now: ${mine.strength.toFixed(0)} v ${opp.strength.toFixed(0)}. ${EDGE_WORDS[next.edge] || ""}` : "";
   const shown = showAllMatches ? rest : rest.slice(0, MATCHES_SHOWN);
+  const clash = battleFor(myId, next.opponent, next.gw);
   const row = g => {
     const o = byId[g.opponent];
     const where = [place(o.position), o.strength != null ? `strength ${o.strength.toFixed(0)}` : ""].filter(Boolean).join(" · ");
@@ -854,6 +933,7 @@ function drawMyMatches() {
       <div class="note">Recent results, latest on the right: you ${formChips(mine.form)}, them ${formChips(opp.form)}</div>
       ${strength ? `<div class="note">${esc(strength)}</div>` : ""}
       ${record ? `<div class="note">${esc(record)}</div>` : ""}
+      ${clash?.line ? `<div class="note">⚔ ${rich(clash.line)}</div>` : ""}
       ${rest.length ? `<h3>After that</h3><ul class="coming">${shown.map(row).join("")}</ul>` : ""}
       ${rest.length > MATCHES_SHOWN ? `<button class="btn ghost" id="moreMatches" type="button">${showAllMatches ? `Show the next ${MATCHES_SHOWN} only` : `Show all ${rest.length} more`}</button>` : ""}
     </div>`;
@@ -874,6 +954,8 @@ function youChanged() {
   if (ODDS) renderOdds(ODDS);
   if (OH) renderMoved();
   if (CLUBS) renderClubs();
+  if (BATTLES) renderBattles();
+  if (MARKET) renderMarket();
   if (ACT) renderActivity(ACT);
   if (SQ) renderSquads();
   if (loaded.upcoming === leagueId) drawMyMatches();
@@ -1384,6 +1466,49 @@ function renderClubs() {
   renderClubsPicked();
 }
 
+// ---------------------------------------------------------------- the club market
+
+async function loadMarket() {
+  const forLeague = leagueId;
+  try {
+    const data = await getJson(`/api/league/${forLeague}/market`);
+    if (forLeague !== leagueId) return;   // they opened another league while this was loading
+    MARKET = data.market;
+  } catch (e) {
+    MARKET = null;
+  }
+  renderMarket();
+}
+
+function renderMarket() {
+  const m = MARKET, show = !!(m && m.clubs.length);
+  $("marketBlock").classList.toggle("hidden", !show);
+  if (!show) return;
+  // the server counts the claims and writes the lines (see club_market in app.py); this just draws them
+  $("marketSub").textContent = `Players claimed and dropped on the waiver wire this season (${m.claims} claims), by club. A green bar is a club the league has claimed more players from than it has dropped; a red bar is the other way round. Trades don't count.`;
+  $("marketLines").innerHTML = m.lines.map(l => `<li>${esc(l.text)}</li>`).join("");
+  const cs = m.clubs, W = 720, rowH = 24, L = 52, R = 150, T = 8, B = 28, H = T + B + cs.length * rowH;
+  const reach = Math.max(2, ...cs.map(c => Math.abs(c.net)));
+  const step = reach <= 6 ? 1 : reach <= 12 ? 2 : 5, edge = Math.ceil(reach / step) * step;
+  const x = v => L + (v + edge) * (W - L - R) / (2 * edge);
+  let svg = "";
+  for (let v = -edge; v <= edge; v += step) {
+    svg += `<line class="grid" x1="${x(v)}" x2="${x(v)}" y1="${T}" y2="${H - B}"/><text x="${x(v)}" y="${H - B + 16}" text-anchor="middle">${v > 0 ? "+" + v : v}</text>`;
+  }
+  svg += `<line x1="${x(0)}" x2="${x(0)}" y1="${T}" y2="${H - B}" stroke="var(--ink)" stroke-opacity=".6"/>`;
+  cs.forEach((c, i) => {
+    const cy = T + i * rowH + rowH / 2, x0 = x(0), x1 = x(c.net);
+    svg += `<g><title>${esc(c.club)}: ${c.bought} claimed, ${c.sold} dropped</title>`
+      + `<text class="lbl" x="${L - 8}" y="${cy + 4}" text-anchor="end">${esc(c.club)}</text>`
+      + (c.net ? `<rect x="${Math.min(x0, x1)}" y="${cy - 7}" width="${Math.abs(x1 - x0)}" height="14" rx="2" style="fill:var(${c.net > 0 ? "--pitch" : "--rival"});fill-opacity:.85"/>` : "")
+      + `<text x="${W - R + 12}" y="${cy + 4}">${c.net > 0 ? "+" : c.net < 0 ? "−" : ""}${Math.abs(c.net)} (${c.bought} in, ${c.sold} out)</text></g>`;
+  });
+  const chart = $("marketChart");
+  chart.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  chart.setAttribute("aria-label", `Bar chart of players claimed minus players dropped on the waiver wire, for ${cs.length} clubs.`);
+  chart.innerHTML = svg;
+}
+
 function renderClubsPicked() {
   document.querySelectorAll("#clubsTable td.pick").forEach(td => td.classList.remove("pick"));
   const m = clubsPick && CLUBS.managers.find(x => x.entry_id === clubsPick.id);
@@ -1400,6 +1525,7 @@ function renderCharts(data) {
   CH = data.charts;
   loadSquads();   // the squad chart doesn't need a finished gameweek, and loads on its own
   loadClubs();    // so does the club grid
+  loadMarket();   // and the club market under it
   $("chartsEmpty").classList.toggle("hidden", !!CH);
   $("charts").classList.toggle("hidden", !CH);
   if (!CH) {
