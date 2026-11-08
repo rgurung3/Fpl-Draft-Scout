@@ -63,6 +63,16 @@
   table.odds td.big { font-weight: 600; min-width: 3.8em; }
   table.odds td.wk { min-width: 2.7em; padding: 5px 3px; }
   #gridSection { margin-bottom: 32px; }
+  table.odds tr.orow { cursor: pointer; }
+  table.odds tr.orow:hover td.team { color: var(--ink); }
+  table.odds .trend { font-size: .7rem; margin-left: 3px; }
+  table.odds .trend.up { color: var(--pitch); }
+  table.odds .trend.down { color: var(--rival); }
+  table.odds tr.why td { padding: 6px 4px 10px; white-space: normal; cursor: default; }
+  /* on a phone the table scrolls sideways, so the explanation stays at the left edge instead of scrolling away */
+  .whybox { position: sticky; left: 8px; width: min(84vw, 36rem); margin: 0; padding: 8px 12px 8px 26px;
+    background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--amber); border-radius: 4px;
+    font-size: .92rem; display: grid; gap: 3px; }
   /* the match-ups: pinned above the choices, so they are there whichever one is open. Compact, three across */
   .matchups { margin: 0 0 24px; }
   .matchups h2 { margin-bottom: 2px; }
@@ -384,7 +394,7 @@
         <p class="sub" id="oddsSub"></p>
         <ul class="facts" id="oddsLines"></ul>
         <div class="tablewrap"><table class="weeks odds" id="oddsTable"></table></div>
-        <p class="sub" style="margin-top:12px">A guide, not a prediction. It uses each manager's scoring so far (pulled towards the league average, because it's early) and the fixtures still to play. It knows nothing about squads, injuries or fixtures, and every simulated season nudges each manager's strength up or down a little, because a few weeks of scores can't say how good a squad really is. Title, Top 3 and Spoon are the chances of finishing 1st, in the top three and last. Each row adds up to 100%.</p>
+        <p class="sub" id="oddsNote" style="margin-top:12px"></p>
       </section>
     </div>
 
@@ -578,6 +588,7 @@ function openLeague(id, firstTab) {
   renderMatchups();   // hides the match-ups until this league's arrive
   $("dealsCard").classList.add("hidden");
   RIV = null; GRID = null; ODDS = null; ACT = null; picked = null;
+  oddsOpen.clear(); movesAsk = null; movesFor = null;
   UP = null; showAllMatches = false;
   PEOPLE = []; renderYou();
   SQ = null; squadView = "week";
@@ -1100,12 +1111,26 @@ function renderDeals(data) {
 
 // ---------------------------------------------------------------- is being active paying off?
 
+// the moves are asked for once per league and shared by Trades and moves and the notes on the Odds page
+let movesAsk = null, movesFor = null;
+function askMoves() {
+  const forLeague = leagueId;
+  if (movesFor !== forLeague) { movesAsk = null; movesFor = forLeague; }
+  if (!movesAsk) {
+    movesAsk = getJson(`/api/league/${forLeague}/moves`).then(data => data.moves).catch(e => {
+      if (movesFor === forLeague) movesAsk = null;   // try again next time
+      throw e;
+    });
+  }
+  return movesAsk;
+}
+
 async function fillActivity() {
   const forLeague = leagueId;
   try {
-    const data = await getJson(`/api/league/${forLeague}/moves`);
+    const moves = await askMoves();
     if (forLeague !== leagueId) return;   // they opened another league while this was loading
-    ACT = data.moves;
+    ACT = moves;
     renderActivity(ACT);
   } catch (e) {
     ACT = null;
@@ -1162,6 +1187,16 @@ function drawActivity(ms) {
 const pctCell = p => p === 0 ? "–" : p < 0.01 ? "<1%" : Math.round(p * 100) + "%";
 const pctWord = p => p === 0 ? "0%" : p < 0.01 ? "under 1%" : Math.round(p * 100) + "%";
 
+const oddsOpen = new Set();   // the managers whose "why" is open, kept when the table is drawn again
+
+// what is behind a manager's odds: the server's lines, plus their best move so far once the moves have arrived
+function oddsWhy(m) {
+  const best = ACT?.managers?.find(x => x.entry_id === m.entry_id)?.best;
+  const lines = m.why.lines.map(t => `<li>${esc(t)}</li>`);
+  if (best) lines.push(`<li>Best move so far: ${esc(best.text)} (${swingText(best.swing)} points).</li>`);
+  return `<ul class="whybox">${lines.join("")}</ul>`;
+}
+
 function renderOdds(data) {
   ODDS = data;
   const o = data.odds;
@@ -1173,21 +1208,33 @@ function renderOdds(data) {
   }
   // the server plays the rest of the season out (see season_odds in app.py); this just draws the chances
   $("oddsSub").textContent = o.gws_left
-    ? `The ${o.gws_left} gameweek${o.gws_left === 1 ? "" : "s"} still to play, played out ${o.runs.toLocaleString("en-GB")} times. Darker means likelier.`
+    ? `The ${o.gws_left} gameweek${o.gws_left === 1 ? "" : "s"} still to play, played out ${o.runs.toLocaleString("en-GB")} times. Darker means likelier. Select a manager to see what is behind their odds.`
     : "The season is over, so this is the final table.";
   $("oddsLines").innerHTML = o.lines.map(t => `<li>${rich(t)}</li>`).join("");
+  const w = o.weights, share = x => Math.round(x * 100) + "%";
+  $("oddsNote").textContent = `A guide, not a prediction. How many points a manager is expected to score in a week from here is ${share(w.form)} their scoring so far (recent weeks count more, and it is pulled towards the league average because it's early)`
+    + (w.squad ? `, ${share(w.squad)} their squad's strength` : " (the squad ratings couldn't be loaded, so they are left out this time)")
+    + ` and ${share(w.table)} how their league results have gone. Each simulated season also nudges every manager's strength up or down a little, because a few weeks of scores can't say how good a squad really is. Injuries and fixtures aren't known to it. Title, Top 3 and Spoon are the chances of finishing 1st, in the top three and last, and each row adds up to 100%.`;
   const n = o.managers.length;
   const head = `<tr><th></th><th class="num">Pts</th><th class="num">Title</th><th class="num">Top 3</th><th class="num">Spoon</th>`
     + Array.from({ length: n }, (_, i) => `<th>${place(i + 1)}</th>`).join("") + `</tr>`;
   const rows = o.managers.map(m => {
-    const mine = m.entry_id === myId;
+    const mine = m.entry_id === myId, open = oddsOpen.has(m.entry_id);
     const cells = m.odds.map((p, i) => `<td class="wk" style="${p ? "background:" + tint(true, Math.min(p, 1) * 70) : ""}" `
       + `title="${esc(m.team)} finishes ${place(i + 1)} in ${pctWord(p)} of the simulated seasons">${p === 0 ? "" : p < 0.01 ? "<1" : Math.round(p * 100)}</td>`).join("");
     const big = (p, good) => `<td class="wk num big" style="${p ? "background:" + tint(good, Math.min(p, 1) * 70) : ""}">${pctCell(p)}</td>`;
-    return `<tr class="${mine ? "me" : ""}"><td class="team">${esc(m.team)}${mine ? " (you)" : ""}</td><td class="num">${m.league_points}</td>`
-      + big(m.win, true) + big(m.top3, true) + big(m.last, false) + cells + `</tr>`;
+    const trend = m.why.trend === "rising" ? ` <span class="trend up" title="Scoring well above their earlier weeks">▲</span>`
+      : m.why.trend === "slumping" ? ` <span class="trend down" title="Scoring well below their earlier weeks">▼</span>` : "";
+    return `<tr class="orow ${mine ? "me" : ""}" data-id="${m.entry_id}" aria-expanded="${open}"><td class="team">${esc(m.team)}${mine ? " (you)" : ""}${trend}</td>`
+      + `<td class="num">${m.league_points}</td>` + big(m.win, true) + big(m.top3, true) + big(m.last, false) + cells + `</tr>`
+      + `<tr class="why ${open ? "" : "hidden"}" data-why="${m.entry_id}"><td colspan="${5 + n}">${oddsWhy(m)}</td></tr>`;
   }).join("");
   $("oddsTable").innerHTML = head + rows;
+  // the best moves come from the moves feed, which is slower: ask for it once the table is up and draw the notes again
+  const forLeague = leagueId;
+  if (!ACT) askMoves().then(moves => {
+    if (forLeague === leagueId && moves) { ACT = moves; if (ODDS) renderOdds(ODDS); }
+  }).catch(() => { /* the notes just have no best move */ });
 }
 
 // ---------------------------------------------------------------- charts
@@ -1622,6 +1669,13 @@ $("placesChart").addEventListener("pointerover", e => {
 $("placesChart").addEventListener("pointerleave", () => {
   document.querySelectorAll("#placesChart .hot").forEach(x => x.classList.remove("hot"));
   if (CH?.places) $("placesCaption").innerHTML = placesDefaultCaption();
+});
+$("oddsTable").addEventListener("click", e => {
+  const row = e.target.closest("tr.orow"); if (!row) return;
+  const id = Number(row.dataset.id), open = !oddsOpen.has(id);
+  if (open) oddsOpen.add(id); else oddsOpen.delete(id);
+  row.setAttribute("aria-expanded", open);
+  $("oddsTable").querySelector(`tr.why[data-why="${id}"]`).classList.toggle("hidden", !open);
 });
 $("h2hTable").addEventListener("click", e => {
   const row = e.target.closest("tr[data-id]"); if (!row) return;
