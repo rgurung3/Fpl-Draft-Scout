@@ -2036,6 +2036,60 @@ def get_odds(league_id, details, today=None):
         return _odds[key]
 
 
+ODDS_HISTORY_RUNS = 1000   # seasons played out for each past gameweek (fewer than the grid: there are many)
+ODDS_PAST_KEPT = 400       # past gameweeks' odds kept in memory (one per league and gameweek)
+_odds_past = {}
+_odds_past_lock = threading.Lock()
+
+
+def odds_as_of(details, gw, runs):
+    """
+    season_odds as they stood after gameweek `gw`: only the results up to there count, and every later
+    match is still to play. Scores and league results only, with no squads: their ratings weren't kept for
+    the early gameweeks, so the same model is used for every gameweek.
+    """
+    matches = [m if not m.get("finished") or (m.get("event") or 0) <= gw else {**m, "finished": False}
+               for m in details.get("matches", [])]
+    return season_odds({**details, "matches": matches}, None, runs)
+
+
+def odds_history(league_id, details, runs=None):
+    """
+    How every manager's chance of winning the league, finishing in the top three and finishing last moved:
+    the odds as they stood after each finished gameweek from ODDS_MIN_WEEKS on (see odds_as_of), for the "How
+    the odds have moved" chart. Each past gameweek is simulated once with `runs` seasons (ODDS_HISTORY_RUNS)
+    and kept, as its results can't change, so after the first call only a new gameweek costs anything (a
+    second or less each). None until ODDS_MIN_WEEKS gameweeks have finished or for a league without matches.
+
+    Returns {runs, gws, managers}: gws are the gameweeks, and managers (in table order now) are {entry_id,
+    team, win, top3, last}, each a list with a chance (0 to 1) for each of those gameweeks. The later points
+    differ a little from the grid, which also has squad ratings, and every point is its own simulation, so
+    lines wiggle a point or two.
+    """
+    history = league_history(details)
+    if history is None or len(history["gws"]) < ODDS_MIN_WEEKS:
+        return None
+    runs = ODDS_HISTORY_RUNS if runs is None else runs
+    gws = history["gws"][ODDS_MIN_WEEKS - 1:]
+    entries = {e["entry_id"]: e for e in details.get("league_entries", []) if e.get("entry_id")}
+    by_week = {}
+    with _odds_past_lock:
+        for gw in gws:
+            key = (league_id, gw, runs)
+            if key not in _odds_past:
+                odds = odds_as_of(details, gw, runs)
+                _odds_past[key] = {m["entry_id"]: (m["win"], m["top3"], m["last"]) for m in odds["managers"]}
+                while len(_odds_past) > ODDS_PAST_KEPT:
+                    _odds_past.pop(next(iter(_odds_past)))
+            by_week[gw] = _odds_past[key]
+    managers = [{"entry_id": m["entry_id"],
+                 "team": entries.get(m["entry_id"], {}).get("entry_name") or f"Team {m['entry_id']}",
+                 "win": [by_week[gw][m["entry_id"]][0] for gw in gws],
+                 "top3": [by_week[gw][m["entry_id"]][1] for gw in gws],
+                 "last": [by_week[gw][m["entry_id"]][2] for gw in gws]} for m in history["managers"]]
+    return {"runs": runs, "gws": gws, "managers": managers}
+
+
 # ---------------------------------------------------------------- saved seasons and rivalries
 
 def season_label(today=None):
@@ -3977,6 +4031,104 @@ def load_moves(league_id):
             "moves": league_moves(trades, transactions, names, teams, deadlines, finished, points)}
 
 
+# ---------------------------------------------------------------- who owns which club
+
+CLUB_ALL_IN_MIN = 4      # this many players from one club in a squad is "all in" (the banter says so)
+CLUB_LINES_SHOWN = 3     # at most this many clubs get a blank or double line
+
+# The lines above the club grid, three wordings each, picked by the gameweek like BANTER_LINES. {t} is a team
+# name (marked), {club} a club's three-letter code, {n} a number of players, {who} the managers affected with
+# their numbers ("**A** (3), **B** (1)") and {gw} the next gameweek.
+CLUB_LINES = {
+    "clubs_all_in": (   # t, n, club
+        "{t} have {n} {club} players. If {club} have a bad week, so do they.",
+        "{n} of {t}'s 15 are from {club}. Diversifying is free, you know.",
+        "{t} are all-in on {club} with {n} players. Bold, or just brand loyal.",
+    ),
+    "clubs_spread": (   # n
+        "Nobody has more than {n} players from one club. A very sensible league.",
+        "The most anyone holds from a single club is {n}. Nobody's betting the house.",
+        "No all-in squads here: {n} is as many as anyone has from one club.",
+    ),
+    "clubs_most": (   # club, n, total
+        "{club} are the league's favourite club: {n} of the {total} owned players.",
+        "{n} of the {total} owned players play for {club}. Everyone wants a piece.",
+        "{club} rule the draft with {n} of the {total} owned players.",
+    ),
+    "clubs_blank": (   # club, gw, who
+        "{club} don't play in GW{gw}: {who} have players with nowhere to go.",
+        "No game for {club} in GW{gw}. {who} will be checking their bench.",
+        "{club} are off in GW{gw}, which is bad news for {who}.",
+    ),
+    "clubs_double": (   # club, gw, who
+        "{club} play twice in GW{gw}: good news for {who}.",
+        "A double for {club} in GW{gw}. {who} are laughing.",
+        "Two games for {club} in GW{gw}, and {who} have the players for it.",
+    ),
+}
+
+
+def club_exposure(players, managers, next_gw):
+    """
+    Which Premier League clubs each manager's squad comes from, and who is hit when a club has no game (a
+    blank) or two (a double) in the next gameweek. players are load_league's players (id, name, team: the
+    club's three-letter code, owner, score and fixtures), managers its managers (entry_id, team_name,
+    manager). Free agents don't count.
+
+    Returns {gw, known, owned, clubs, managers, lines}:
+      known     whether the fixture data covers next_gw at all (if it doesn't, no club is called blank)
+      owned     how many players are owned in the league
+      clubs     every club that has an owner, most owned first: {club, owned, games (None if not known), flag
+                ("blank", "double" or None)}
+      managers  everyone, the most all-in squad first: {entry_id, team, manager, total, counts {club:
+                players}, players {club: [names, best rated first]}, top_club, top (how many players that is)}
+      lines     banter ({text}), blanks and doubles first, then the most all-in squad (or that nobody is all
+                in), then the most owned club; three wordings each (CLUB_LINES), names marked for bold
+    """
+    owned = [p for p in players if p["owner"] is not None]
+    known = any(f["gw"] == next_gw for p in players for f in p.get("fixtures", []))
+    games = {}
+    for p in players:
+        played = sum(1 for f in p.get("fixtures", []) if f["gw"] == next_gw)
+        games[p["team"]] = max(games.get(p["team"], 0), played)
+    count = Counter(p["team"] for p in owned)
+    clubs = [{"club": club, "owned": n, "games": games.get(club, 0) if known else None,
+              "flag": ("blank" if known and games.get(club, 0) == 0
+                       else "double" if known and games.get(club, 0) >= 2 else None)}
+             for club, n in sorted(count.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+    rows = []
+    for m in managers:
+        mine = sorted((p for p in owned if p["owner"] == m["entry_id"]),
+                      key=lambda p: (-p["score"], p["name"]))
+        counts = Counter(p["team"] for p in mine)
+        top_club, top = max(counts.items(), key=lambda kv: (kv[1], kv[0]), default=(None, 0))
+        rows.append({"entry_id": m["entry_id"], "team": m["team_name"], "manager": m["manager"],
+                     "total": len(mine), "counts": dict(counts), "top_club": top_club, "top": top,
+                     "players": {club: [p["name"] for p in mine if p["team"] == club] for club in counts}})
+    rows.sort(key=lambda r: (-r["top"], r["team"].lower()))
+
+    def say(kind, **fields):
+        return banter_wording(CLUB_LINES[kind], kind, next_gw).format(**fields)
+
+    lines = []
+    for c in [c for c in clubs if c["flag"]][:CLUB_LINES_SHOWN]:
+        who = sorted(((r["counts"][c["club"]], r["team"]) for r in rows if r["counts"].get(c["club"])),
+                     key=lambda x: (-x[0], x[1]))
+        if who:
+            kind = "clubs_blank" if c["flag"] == "blank" else "clubs_double"
+            lines.append(say(kind, club=c["club"], gw=next_gw,
+                             who=", ".join(f"{mark(team)} ({n})" for n, team in who)))
+    if rows and rows[0]["top"] >= CLUB_ALL_IN_MIN:
+        lines.append(say("clubs_all_in", t=mark(rows[0]["team"]), n=rows[0]["top"], club=rows[0]["top_club"]))
+    elif rows and rows[0]["top"]:
+        lines.append(say("clubs_spread", n=rows[0]["top"]))
+    if clubs:
+        lines.append(say("clubs_most", club=clubs[0]["club"], n=clubs[0]["owned"], total=len(owned)))
+    return {"gw": next_gw, "known": known, "owned": len(owned), "clubs": clubs, "managers": rows,
+            "lines": [{"text": text} for text in lines]}
+
+
 # ---------------------------------------------------------------- routes
 
 @app.route("/")
@@ -4158,6 +4310,29 @@ def odds(league_id):
     return jsonify({"league_id": league_id,
                     "league_name": details.get("league", {}).get("name", f"League {league_id}"),
                     "odds": get_odds(league_id, details)})
+
+
+@app.route("/api/league/<int:league_id>/odds-history")
+def odds_over_time(league_id):
+    """How each manager's title, top 3 and spoon chances moved after each gameweek (see odds_history)."""
+    try:
+        details = fetch(f"{DRAFT}/league/{league_id}/details", LEAGUE_NOT_FOUND)
+    except FplError as e:
+        return jsonify({"error": e.message}), e.status
+    return jsonify({"league_id": league_id,
+                    "league_name": details.get("league", {}).get("name", f"League {league_id}"),
+                    "history": odds_history(league_id, details)})
+
+
+@app.route("/api/league/<int:league_id>/clubs")
+def club_ownership(league_id):
+    """Which clubs each manager's squad comes from, and who a blank or double hits (see club_exposure)."""
+    try:
+        league = load_league(league_id, "week")
+    except FplError as e:
+        return jsonify({"error": e.message}), e.status
+    return jsonify({"league_id": league_id, "league_name": league["league_name"],
+                    "clubs": club_exposure(league["players"], league["managers"], league["next_gw"])})
 
 
 @app.route("/api/league/<int:league_id>/moves")

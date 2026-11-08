@@ -5461,3 +5461,234 @@ def test_the_odds_page_opens_a_why_under_each_manager_and_adds_their_best_move()
 def test_the_tests_cannot_reach_the_real_site():
     with pytest.raises(AssertionError, match="real site"):
         requests.get("https://draft.premierleague.com/api/bootstrap-static")
+
+
+# ---------------------------------------------------------------- odds over time
+
+# ODDS_WEEKS plus GW4 finished (Team 0 beats 1, Team 2 beats 3); GW5 and GW6 still to play
+FOUR_WEEKS = ODDS_WEEKS + [match(4, 10, 60, 11, 40), match(4, 12, 70, 13, 20)] + TO_PLAY[2:]
+# ... and the same with GW5 played too (only GW6 to go)
+FIVE_WEEKS = (ODDS_WEEKS + [match(4, 10, 60, 11, 40), match(4, 12, 70, 13, 20),
+                            match(5, 10, 55, 12, 40), match(5, 11, 45, 13, 44)] + TO_PLAY[4:])
+
+
+def test_odds_as_of_a_gameweek_ignore_the_later_results():
+    league = recap_league(FOUR_WEEKS)
+    then = app.odds_as_of(league, 3, 200)
+    assert (then["gws_played"], then["gws_left"]) == (3, 3)  # GW4, GW5 and GW6 still to play
+    assert {m["entry_id"]: m["league_points"] for m in then["managers"]} == {100: 9, 101: 3, 102: 3, 103: 3}
+    now = app.odds_as_of(league, 4, 200)
+    assert (now["gws_played"], now["gws_left"]) == (4, 2)
+    assert {m["entry_id"]: m["league_points"] for m in now["managers"]} == {100: 12, 101: 3, 102: 6, 103: 3}
+    assert all(m["finished"] for m in league["matches"][:8])  # the real details are not changed
+    assert then["weights"]["squad"] == 0  # no squads: they weren't kept
+
+
+def test_the_history_has_the_odds_after_each_gameweek_from_the_third(monkeypatch):
+    monkeypatch.setattr(app, "_odds_past", {})
+    assert app.odds_history(123, recap_league(ODDS_WEEKS[:4] + TO_PLAY), 100) is None      # two gameweeks
+    history = app.odds_history(123, recap_league(FOUR_WEEKS), 300)
+    assert (history["runs"], history["gws"]) == (300, [3, 4])
+    assert [m["entry_id"] for m in history["managers"]] == [100, 102, 101, 103]  # table order now
+    assert history["managers"][0]["team"] == "Team 0"
+    for i in range(2):  # every gameweek's chances add up across the league
+        assert sum(m["win"][i] for m in history["managers"]) == pytest.approx(1, abs=0.002)
+        assert sum(m["top3"][i] for m in history["managers"]) == pytest.approx(3, abs=0.002)
+        assert sum(m["last"][i] for m in history["managers"]) == pytest.approx(1, abs=0.002)
+    assert all(len(m[k]) == 2 for m in history["managers"] for k in ("win", "top3", "last"))
+
+
+def test_past_gameweeks_are_only_simulated_once(monkeypatch):
+    monkeypatch.setattr(app, "_odds_past", {})
+    real, calls = app.odds_as_of, []
+
+    def counted(details, gw, runs):
+        calls.append(gw)
+        return real(details, gw, runs)
+
+    monkeypatch.setattr(app, "odds_as_of", counted)
+    first = app.odds_history(123, recap_league(FOUR_WEEKS), 100)
+    assert calls == [3, 4]
+    assert app.odds_history(123, recap_league(FOUR_WEEKS), 100) == first and calls == [3, 4]  # nothing again
+    app.odds_history(123, recap_league(FIVE_WEEKS), 100)  # a new gameweek
+    assert calls == [3, 4, 5]
+    app.odds_history(456, recap_league(FOUR_WEEKS), 100)  # another league
+    assert calls == [3, 4, 5, 3, 4]
+
+
+def test_the_history_is_the_same_every_time(monkeypatch):
+    monkeypatch.setattr(app, "_odds_past", {})
+    first = app.odds_history(123, recap_league(FOUR_WEEKS), 100)
+    monkeypatch.setattr(app, "_odds_past", {})
+    assert app.odds_history(123, recap_league(FOUR_WEEKS), 100) == first
+
+
+def test_only_the_latest_past_gameweeks_are_kept(monkeypatch):
+    monkeypatch.setattr(app, "_odds_past", {})
+    monkeypatch.setattr(app, "ODDS_PAST_KEPT", 1)
+    app.odds_history(123, recap_league(FOUR_WEEKS), 50)
+    assert list(app._odds_past) == [(123, 4, 50)]
+
+
+def test_odds_history_route_returns_the_history(fake_api, monkeypatch):
+    monkeypatch.setattr(app, "_odds_past", {})
+    monkeypatch.setattr(app, "ODDS_HISTORY_RUNS", 100)
+    fake = app.get_json
+    monkeypatch.setattr(app, "get_json", lambda url: recap_league(FOUR_WEEKS)
+                        if url.endswith("/league/123/details") else fake(url))
+    data = app.app.test_client().get("/api/league/123/odds-history").get_json()
+    assert data["league_name"] == "Recap League" and data["history"]["gws"] == [3, 4]
+    assert data["history"]["runs"] == 100 and len(data["history"]["managers"]) == 4
+
+
+def test_odds_history_route_is_empty_without_enough_results_and_gives_a_friendly_error(fake_api, monkeypatch):
+    assert app.app.test_client().get("/api/league/123/odds-history").get_json()["history"] is None
+    def not_found(url):
+        raise requests.HTTPError(response=type("R", (), {"status_code": 404})())
+
+    monkeypatch.setattr(app, "get_json", not_found)
+    res = app.app.test_client().get("/api/league/999/odds-history")
+    assert res.status_code == 400 and "No Draft league found" in res.get_json()["error"]
+
+
+# ---------------------------------------------------------------- who owns which club
+
+def club_player(pid, club, owner, name=None, score=50, games=()):
+    """A player for the club tests: `games` are the gameweeks his club plays."""
+    return {"id": pid, "name": name or f"P{pid}", "team": club, "owner": owner, "score": score,
+            "fixtures": [{"gw": gw, "opp": "XXX", "home": True, "difficulty": 3} for gw in games]}
+
+
+CLUB_MANAGERS = [{"entry_id": 100, "team_name": "Team A", "manager": "Sam"},
+                 {"entry_id": 101, "team_name": "Team B", "manager": "Kim"},
+                 {"entry_id": 102, "team_name": "Team C", "manager": "Al"}]
+
+
+def club_squads(a_liverpool=4):
+    """Liverpool have no game in GW11, Man City play twice and Arsenal once. Team A hold most Liverpool."""
+    liv, mci, ars = [12], [11, 11], [11]
+    players = [club_player(1, "LIV", 100, "Salah", 90, liv), club_player(2, "LIV", 100, "Robertson", 80, liv),
+               club_player(3, "LIV", 100, "Gakpo", 70, liv), club_player(4, "LIV", 100, "Jota", 60, liv),
+               club_player(5, "LIV", 101, "Alisson", 55, liv), club_player(6, "LIV", None, "Free", 40, liv),
+               club_player(7, "MCI", 101, "Haaland", 95, mci), club_player(8, "MCI", 101, "Foden", 85, mci),
+               club_player(9, "MCI", 101, "Rodri", 75, mci), club_player(10, "MCI", 102, "Dias", 65, mci),
+               club_player(11, "ARS", 100, "Saka", 88, ars), club_player(12, "ARS", 102, "Rice", 78, ars),
+               club_player(13, "ARS", 102, "Saliba", 68, ars)]
+    for p in players[a_liverpool:4]:          # take some of Team A's Liverpool players away
+        p["owner"] = None
+    return players
+
+
+def test_each_squads_clubs_are_counted_and_the_most_all_in_squad_comes_first():
+    shown = app.club_exposure(club_squads(), CLUB_MANAGERS, 11)
+    assert shown["owned"] == 12  # the free agent isn't counted
+    assert [c["club"] for c in shown["clubs"]] == ["LIV", "MCI", "ARS"]            # most owned first
+    assert [c["owned"] for c in shown["clubs"]] == [5, 4, 3]
+    assert [m["team"] for m in shown["managers"]] == ["Team A", "Team B", "Team C"]  # 4, 3, 2 from one club
+    a, b = shown["managers"][0], shown["managers"][1]
+    assert (a["total"], a["counts"], a["top_club"], a["top"]) == (5, {"LIV": 4, "ARS": 1}, "LIV", 4)
+    assert a["players"]["LIV"] == ["Salah", "Robertson", "Gakpo", "Jota"]           # best rated first
+    assert (b["counts"], b["top_club"], b["top"]) == ({"LIV": 1, "MCI": 3}, "MCI", 3)
+
+
+def test_a_club_with_no_game_or_two_games_next_gameweek_is_flagged():
+    clubs = {c["club"]: c for c in app.club_exposure(club_squads(), CLUB_MANAGERS, 11)["clubs"]}
+    assert (clubs["LIV"]["games"], clubs["LIV"]["flag"]) == (0, "blank")
+    assert (clubs["MCI"]["games"], clubs["MCI"]["flag"]) == (2, "double")
+    assert (clubs["ARS"]["games"], clubs["ARS"]["flag"]) == (1, None)
+
+
+def test_no_club_is_called_blank_when_the_fixtures_are_not_known():
+    players = [club_player(1, "LIV", 100), club_player(2, "ARS", 101)]            # nobody has any fixtures
+    shown = app.club_exposure(players, CLUB_MANAGERS, 11)
+    assert shown["known"] is False
+    assert all(c["flag"] is None and c["games"] is None for c in shown["clubs"])
+    assert shown["lines"] and not any("GW" in line["text"] for line in shown["lines"])  # no blank/double line
+
+
+def test_the_lines_say_who_a_blank_or_double_hits_and_who_is_all_in(first_wording):
+    texts = [line["text"] for line in app.club_exposure(club_squads(), CLUB_MANAGERS, 11)["lines"]]
+    assert texts == [
+        "LIV don't play in GW11: **Team A** (4), **Team B** (1) have players with nowhere to go.",
+        "MCI play twice in GW11: good news for **Team B** (3), **Team C** (1).",
+        "**Team A** have 4 LIV players. If LIV have a bad week, so do they.",
+        "LIV are the league's favourite club: 5 of the 12 owned players."]
+
+
+def test_when_nobody_is_all_in_the_banter_says_so(first_wording):
+    texts = [line["text"] for line in app.club_exposure(club_squads(3), CLUB_MANAGERS, 11)["lines"]]
+    assert "Nobody has more than 3 players from one club. A very sensible league." in texts
+    assert not any("all-in" in t for t in texts)
+
+
+@pytest.mark.parametrize("index", [0, 1, 2])
+def test_every_wording_of_every_club_line_fills_in(monkeypatch, index):
+    used = set()
+
+    def pick(options, kind, gw):
+        used.add(kind)
+        return options[index]
+
+    monkeypatch.setattr(app, "banter_wording", pick)
+    texts = [line["text"] for squads in (club_squads(), club_squads(3))
+             for line in app.club_exposure(squads, CLUB_MANAGERS, 11)["lines"]]
+    assert used == set(app.CLUB_LINES) and texts
+    assert not any("{" in t or "}" in t for t in texts)
+
+
+def test_every_kind_of_club_line_has_three_wordings_that_only_use_their_fields():
+    fields = {"clubs_all_in": {"t", "n", "club"}, "clubs_spread": {"n"}, "clubs_most": {"club", "n", "total"},
+              "clubs_blank": {"club", "gw", "who"}, "clubs_double": {"club", "gw", "who"}}
+    assert set(app.CLUB_LINES) == set(fields)
+    for kind, options in app.CLUB_LINES.items():
+        assert len(options) == 3 and len(set(options)) == 3
+        for text in options:
+            assert set(re.findall(r"{(\w+)}", text)) <= fields[kind], (kind, text)
+
+
+def test_a_manager_with_no_players_is_listed_last_and_does_not_break_it():
+    managers = CLUB_MANAGERS + [{"entry_id": 103, "team_name": "Team D", "manager": "Jo"}]
+    shown = app.club_exposure(club_squads(), managers, 11)
+    empty = shown["managers"][-1]
+    assert (empty["team"], empty["total"], empty["counts"], empty["top"], empty["top_club"]) == (
+        "Team D", 0, {}, 0, None)
+    assert app.club_exposure([], [], 11)["lines"] == []                    # nothing at all: nothing to say
+
+
+def test_clubs_route_returns_the_exposure_from_the_week_view(monkeypatch):
+    seen = []
+
+    def fake_league(league_id, view):
+        seen.append((league_id, view))
+        return {"league_name": "Club League", "next_gw": 11, "managers": CLUB_MANAGERS,
+                "players": club_squads()}
+
+    monkeypatch.setattr(app, "load_league", fake_league)
+    data = app.app.test_client().get("/api/league/123/clubs").get_json()
+    assert data["league_name"] == "Club League" and data["clubs"]["gw"] == 11 and seen == [(123, "week")]
+    assert data["clubs"]["managers"][0]["players"]["LIV"][0] == "Salah"
+
+
+def test_clubs_route_gives_a_friendly_error(monkeypatch):
+    def down(league_id, view):
+        raise app.FplError("The Draft site is having a moment.", 502)
+
+    monkeypatch.setattr(app, "load_league", down)
+    res = app.app.test_client().get("/api/league/123/clubs")
+    assert res.status_code == 502 and "having a moment" in res.get_json()["error"]
+
+
+def test_the_odds_page_draws_how_the_odds_moved_under_the_grid():
+    page = hub_page()
+    assert 'id="oddsMoved"' in page and "function renderMoved" in page and "/odds-history`" in page
+    assert page.index('id="oddsTable"') < page.index('id="oddsMoved"') < page.index('id="panel-charts"')
+    assert all(f'data-metric="{metric}"' in page for metric in ("win", "top3", "last"))  # the three chances
+    assert "if (ohFor !== leagueId) loadMoved();" in page          # asked for once, after the grid
+
+
+def test_the_charts_page_has_a_club_grid_under_the_weekly_scores():
+    page = hub_page()
+    assert 'id="clubsTable"' in page and "function renderClubs" in page and "/clubs`" in page
+    assert page.index('id="spread"') < page.index('id="clubsSection"') < page.index('id="squadsSection"')
+    assert page.index('id="squadsSection"') < page.index('id="panel-rivalries"')
+    assert "loadClubs();" in page  # it loads on its own, like the squad strength

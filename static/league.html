@@ -63,6 +63,11 @@
   table.odds td.big { font-weight: 600; min-width: 3.8em; }
   table.odds td.wk { min-width: 2.7em; padding: 5px 3px; }
   #gridSection { margin-bottom: 32px; }
+  #oddsMoved { margin-top: 36px; }
+  /* who owns which club: the same grid as the head to head, with narrower cells and flagged club headers */
+  table.clubs td.wk { min-width: 2.4em; padding: 5px 3px; }
+  table.clubs th.opp.blank span { color: var(--rival); }
+  table.clubs th.opp.double span { color: var(--pitch); }
   table.odds tr.orow { cursor: pointer; }
   table.odds tr.orow:hover td.team { color: var(--ink); }
   table.odds .trend { font-size: .7rem; margin-left: 3px; }
@@ -396,6 +401,19 @@
         <div class="tablewrap"><table class="weeks odds" id="oddsTable"></table></div>
         <p class="sub" id="oddsNote" style="margin-top:12px"></p>
       </section>
+      <section id="oddsMoved" class="hidden">
+        <h2>How the odds have moved</h2>
+        <p class="sub" id="movedSub"></p>
+        <div class="controls">
+          <div class="tabs viewtabs" id="movedView" role="group" aria-label="Which chance">
+            <button type="button" data-metric="win" aria-pressed="true">Title</button>
+            <button type="button" data-metric="top3" aria-pressed="false">Top 3</button>
+            <button type="button" data-metric="last" aria-pressed="false">Wooden spoon</button>
+          </div>
+        </div>
+        <p class="racecap" id="movedCaption" aria-live="polite"></p>
+        <div class="chartwrap scrollx"><svg class="race" id="movedChart" role="img"></svg></div>
+      </section>
     </div>
 
     <div id="panel-charts" class="hidden">
@@ -423,6 +441,13 @@
           <div class="chartwrap"><svg class="plot" id="spread" role="img"></svg></div>
         </section>
       </div>
+      <section id="clubsSection" class="hidden">
+        <h2>Who owns which club</h2>
+        <p class="sub" id="clubsSub"></p>
+        <ul class="facts" id="clubsLines"></ul>
+        <div class="tablewrap"><table class="weeks h2h clubs" id="clubsTable"></table></div>
+        <div class="picked hidden" id="clubsPicked"></div>
+      </section>
       <section id="squadsSection">
         <h2>Squad strength</h2>
         <p class="sub">The average rating of each manager's best eleven, using Draft Scout's 0-100 player ratings. Select a row to see their eleven and bench.</p>
@@ -517,6 +542,10 @@ let picked = null;       // the manager whose head-to-head record is open
 let GRID = null;         // the head-to-head grid the server sent with the Rivalries data (see the rivalries route in app.py)
 let ODDS = null;         // the season odds the server sent (see season_odds in app.py); this page only draws them
 let ACT = null;          // the moves the server sent (see league_moves in app.py)
+let OH = null, ohFor = null;   // how the odds moved (see odds_history in app.py), and the league it was asked for
+let movedMetric = "win";       // which chance that chart draws: win (title), top3 or last (wooden spoon)
+let CLUBS = null;        // which clubs each squad comes from (see club_exposure in app.py)
+let clubsPick = null;    // the club grid cell whose players are shown: {id, club}
 let SQ = null;           // the squads the server sent (see league_squads in app.py); this page only draws them
 let squadView = "week";  // which rating the squad chart uses: "week" (next 5) or "season" (until the break)
 let RIV = null;          // the Rivalries data: the managers and seasons (see league_rivalries in app.py)
@@ -589,6 +618,8 @@ function openLeague(id, firstTab) {
   $("dealsCard").classList.add("hidden");
   RIV = null; GRID = null; ODDS = null; ACT = null; picked = null;
   oddsOpen.clear(); movesAsk = null; movesFor = null;
+  OH = null; ohFor = null; CLUBS = null; clubsPick = null;
+  $("oddsMoved").classList.add("hidden"); $("clubsSection").classList.add("hidden");
   UP = null; showAllMatches = false;
   PEOPLE = []; renderYou();
   SQ = null; squadView = "week";
@@ -834,6 +865,8 @@ function youChanged() {
   if (CH) { renderRace(); renderPlaces(); renderGrid(); renderSpread(); }
   if (GRID) { picked = null; renderHeadToHead(); }
   if (ODDS) renderOdds(ODDS);
+  if (OH) renderMoved();
+  if (CLUBS) renderClubs();
   if (ACT) renderActivity(ACT);
   if (SQ) renderSquads();
   if (loaded.upcoming === leagueId) drawMyMatches();
@@ -1230,6 +1263,7 @@ function renderOdds(data) {
       + `<tr class="why ${open ? "" : "hidden"}" data-why="${m.entry_id}"><td colspan="${5 + n}">${oddsWhy(m)}</td></tr>`;
   }).join("");
   $("oddsTable").innerHTML = head + rows;
+  if (ohFor !== leagueId) loadMoved();   // how the odds moved loads on its own, after the grid
   // the best moves come from the moves feed, which is slower: ask for it once the table is up and draw the notes again
   const forLeague = leagueId;
   if (!ACT) askMoves().then(moves => {
@@ -1237,11 +1271,128 @@ function renderOdds(data) {
   }).catch(() => { /* the notes just have no best move */ });
 }
 
+// ---------------------------------------------------------------- how the odds have moved
+
+const MOVED_LABELS = { win: "Title", top3: "Top 3", last: "Wooden spoon" };
+
+async function loadMoved() {
+  const forLeague = leagueId;
+  ohFor = forLeague;   // asked once per league: if it fails the chart just isn't shown
+  try {
+    const data = await getJson(`/api/league/${forLeague}/odds-history`);
+    if (forLeague !== leagueId) return;   // they opened another league while this was loading
+    OH = data.history;
+  } catch (e) {
+    OH = null;
+  }
+  renderMoved();
+}
+
+// the line a hovered or tapped manager has drawn: where it started, where it is now and its peak
+function movedCaption(m, you) {
+  const v = m[movedMetric], gws = OH.gws, top = Math.max(...v);
+  const name = you ? "<strong>You</strong>" : `<strong>${esc(m.team)}</strong>`;
+  return `${name}: ${pctWord(v[0])} after GW${gws[0]}, ${pctWord(v.at(-1))} after GW${gws.at(-1)}, `
+    + `highest ${pctWord(top)} (after GW${gws[v.indexOf(top)]}).`;
+}
+
+function movedDefaultCaption() {
+  const m = OH.managers.find(x => x.entry_id === myId);
+  return m ? movedCaption(m, true) : "Hover or tap a line to see whose it is.";
+}
+
+function renderMoved() {
+  $("oddsMoved").classList.toggle("hidden", !OH);
+  if (!OH) return;
+  const key = movedMetric, ms = OH.managers, n = OH.gws.length;
+  $("movedSub").textContent = `The chance of each manager's ${MOVED_LABELS[key].toLowerCase()} after every finished gameweek, worked out with only the results up to then: scores and league results, with no squad ratings (they weren't saved before GW6), so the latest point can differ a few points from the grid above. Each point is its own simulation of ${OH.runs.toLocaleString("en-GB")} seasons, so lines wiggle a point or two.`;
+  const W = 720, L = 44, R = 170, T = 14, B = 30, H = 280;
+  const peak = Math.max(...ms.flatMap(m => m[key])) * 100;
+  const step = peak > 60 ? 20 : peak > 30 ? 10 : 5, top = Math.max(Math.ceil(peak / step) * step, step);
+  const x = i => L + (n === 1 ? 0 : i * (W - L - R) / (n - 1));
+  const y = v => T + (top - v * 100) * (H - T - B) / top;
+  let svg = "";
+  for (let p = 0; p <= top; p += step) {
+    svg += `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(p / 100)}" y2="${y(p / 100)}"/><text x="${L - 8}" y="${y(p / 100) + 4}" text-anchor="end">${p}%</text>`;
+  }
+  const every = Math.ceil(n / 10);
+  OH.gws.forEach((gw, i) => { if (i % every === 0 || i === n - 1) svg += `<text x="${x(i)}" y="${H - 8}" text-anchor="middle">GW${gw}</text>`; });
+  // other managers first, so yours is drawn on top
+  [...ms].sort((a, b) => (a.entry_id === myId) - (b.entry_id === myId)).forEach(m => {
+    const v = m[key], pts = v.map((p, i) => `${x(i).toFixed(1)},${y(p).toFixed(1)}`).join(" ");
+    const dots = v.map((p, i) => `<circle class="wkdot" cx="${x(i).toFixed(1)}" cy="${y(p).toFixed(1)}" r="3.5"><title>${esc(m.team)}, after GW${OH.gws[i]}: ${pctWord(p)}</title></circle>`).join("");
+    svg += `<g class="line ${m.entry_id === myId ? "me" : ""}" data-id="${m.entry_id}"><title>${esc(m.team)}</title>`
+      + `<polyline class="ink" points="${pts}"/><polyline class="hit" points="${pts}"/>${dots}`
+      + `<circle class="dot" cx="${x(n - 1).toFixed(1)}" cy="${y(v.at(-1)).toFixed(1)}" r="${m.entry_id === myId ? 5 : 3}"/></g>`;
+  });
+  // names at the end of the line for whoever is ahead on this chance, and for you (nudged apart if they'd overlap)
+  const lead = ms.reduce((a, b) => b[key].at(-1) > a[key].at(-1) ? b : a), mine = ms.find(m => m.entry_id === myId);
+  const endX = x(n - 1) + 12, leadY = y(lead[key].at(-1));
+  if (lead !== mine) svg += `<text class="lbl" x="${endX}" y="${leadY + 4}">${esc(short(lead.team, 22))}, ${pctWord(lead[key].at(-1))}</text>`;
+  if (mine) {
+    let myY = y(mine[key].at(-1));
+    if (lead !== mine && Math.abs(myY - leadY) < 16) myY = leadY + 16;
+    svg += `<text class="lbl" x="${endX}" y="${myY + 4}">You, ${pctWord(mine[key].at(-1))}</text>`;
+  }
+  const chart = $("movedChart");
+  chart.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  chart.setAttribute("aria-label", `Line chart of each manager's ${MOVED_LABELS[key].toLowerCase()} chance after gameweeks ${OH.gws[0]} to ${OH.gws.at(-1)}.`);
+  chart.innerHTML = svg;
+  $("movedCaption").innerHTML = movedDefaultCaption();
+}
+
+// ---------------------------------------------------------------- who owns which club
+
+async function loadClubs() {
+  const forLeague = leagueId;
+  try {
+    const data = await getJson(`/api/league/${forLeague}/clubs`);
+    if (forLeague !== leagueId) return;   // they opened another league while this was loading
+    CLUBS = data.clubs;
+    renderClubs();
+  } catch (e) {
+    CLUBS = null;
+    $("clubsSection").classList.add("hidden");   // a problem here never hides the rest of the charts
+  }
+}
+
+function renderClubs() {
+  const c = CLUBS;
+  $("clubsSection").classList.toggle("hidden", !c || !c.clubs.length);
+  if (!c || !c.clubs.length) return;
+  // the server counts the players and writes the lines (see club_exposure in app.py); this just draws them
+  $("clubsSub").textContent = `How many of each manager's players come from each club, with the most all-in squad first. `
+    + (c.known ? `A red club has no game in gameweek ${c.gw} and a green one plays twice. ` : "") + "Select a number to see the players.";
+  $("clubsLines").innerHTML = c.lines.map(l => `<li>${rich(l.text)}</li>`).join("");
+  const why = k => k.flag === "blank" ? `no game in GW${c.gw}` : k.flag === "double" ? `two games in GW${c.gw}` : `${k.owned} owned players`;
+  const head = `<tr><th></th>${c.clubs.map(k => `<th class="opp ${k.flag || ""}" title="${esc(k.club)}: ${why(k)}"><span>${esc(k.club)}${k.flag === "blank" ? " ✕" : k.flag === "double" ? " ×2" : ""}</span></th>`).join("")}</tr>`;
+  const rows = c.managers.map(m => {
+    const cells = c.clubs.map(k => {
+      const n = m.counts[k.club] || 0;
+      return n ? `<td class="wk" data-id="${m.entry_id}" data-club="${esc(k.club)}" style="background:${tint(true, Math.min(n / 5, 1) * 60)}" title="${esc(m.team)}: ${n} ${esc(k.club)} player${n === 1 ? "" : "s"}">${n}</td>` : `<td class="wk"></td>`;
+    }).join("");
+    return `<tr class="${m.entry_id === myId ? "me" : ""}"><td class="team">${esc(m.team)}${m.entry_id === myId ? " (you)" : ""}</td>${cells}</tr>`;
+  }).join("");
+  $("clubsTable").innerHTML = head + rows;
+  renderClubsPicked();
+}
+
+function renderClubsPicked() {
+  document.querySelectorAll("#clubsTable td.pick").forEach(td => td.classList.remove("pick"));
+  const m = clubsPick && CLUBS.managers.find(x => x.entry_id === clubsPick.id);
+  $("clubsPicked").classList.toggle("hidden", !m);
+  if (!m) return;
+  document.querySelector(`#clubsTable td[data-id="${m.entry_id}"][data-club="${clubsPick.club}"]`)?.classList.add("pick");
+  $("clubsPicked").innerHTML = `<strong>${esc(m.team)}</strong> own ${m.counts[clubsPick.club]} from ${esc(clubsPick.club)}: `
+    + esc(m.players[clubsPick.club].join(", ")) + ".";
+}
+
 // ---------------------------------------------------------------- charts
 
 function renderCharts(data) {
   CH = data.charts;
   loadSquads();   // the squad chart doesn't need a finished gameweek, and loads on its own
+  loadClubs();    // so does the club grid
   $("chartsEmpty").classList.toggle("hidden", !!CH);
   $("charts").classList.toggle("hidden", !CH);
   if (!CH) {
@@ -1669,6 +1820,30 @@ $("placesChart").addEventListener("pointerover", e => {
 $("placesChart").addEventListener("pointerleave", () => {
   document.querySelectorAll("#placesChart .hot").forEach(x => x.classList.remove("hot"));
   if (CH?.places) $("placesCaption").innerHTML = placesDefaultCaption();
+});
+$("movedView").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b || b.dataset.metric === movedMetric) return;
+  movedMetric = b.dataset.metric;
+  document.querySelectorAll("#movedView button").forEach(x => x.setAttribute("aria-pressed", x.dataset.metric === movedMetric));
+  if (OH) renderMoved();
+});
+$("movedChart").addEventListener("pointerover", e => {
+  const g = e.target.closest(".line"); if (!g) return;
+  document.querySelectorAll("#movedChart .hot").forEach(x => x.classList.remove("hot"));
+  g.classList.add("hot");
+  $("movedChart").appendChild(g);   // bring it to the front
+  const id = Number(g.dataset.id);
+  $("movedCaption").innerHTML = movedCaption(OH.managers.find(m => m.entry_id === id), id === myId);
+});
+$("movedChart").addEventListener("pointerleave", () => {
+  document.querySelectorAll("#movedChart .hot").forEach(x => x.classList.remove("hot"));
+  if (OH) $("movedCaption").innerHTML = movedDefaultCaption();
+});
+$("clubsTable").addEventListener("click", e => {
+  const td = e.target.closest("td[data-club]"); if (!td) return;
+  const pick = { id: Number(td.dataset.id), club: td.dataset.club };
+  clubsPick = clubsPick && clubsPick.id === pick.id && clubsPick.club === pick.club ? null : pick;
+  renderClubsPicked();
 });
 $("oddsTable").addEventListener("click", e => {
   const row = e.target.closest("tr.orow"); if (!row) return;
