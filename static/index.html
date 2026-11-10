@@ -61,6 +61,19 @@
     .swap .gain { grid-column: 2; grid-row: 2 / span 2; }
   }
 
+  /* back in play: players on their way back, with a rating for when they're fit. The groups and rows
+     reuse the look of "players by club" below (details.club, .cplayer) */
+  #returning { margin-bottom: 32px; }
+  #returning .code { white-space: nowrap; }   /* "Back now" stays on one line on a phone; the hint wraps */
+  .rplayer .rates { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .rplayer .rates .now { font-family: var(--display); font-weight: 600; font-size: 1.2rem; }
+  .rplayer .rates .score { color: var(--pitch); }
+  .rplayer .rline { grid-column: 1 / -1; color: var(--muted); font-size: .9rem; }
+  .rplayer .rline strong { color: var(--ink); }
+  .rtag { padding: 0 8px; border: 1px solid var(--muted); border-radius: 999px; font-size: .8rem;
+    font-weight: 600; white-space: nowrap; }
+  .rmore { margin: 8px 0; }
+
   /* your team this week: two pitches side by side (stacked on a phone) */
   #lineups { margin-bottom: 32px; }
   .lineups { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; align-items: start; }
@@ -233,6 +246,12 @@
       <div class="swaps" id="swaps"></div>
     </section>
 
+    <section id="returning" class="hidden">
+      <h2>Back in play</h2>
+      <p class="sub">Players coming back from an injury or a ban. Someone who has been out has no recent points, so his rating stays low for weeks after he's fit. Each one here also gets a rating for <strong>when he's fit</strong>: the same formula, with his points per game in place of his missing recent form, or last season's numbers if he has barely played this season. It's an estimate, and it assumes he walks straight back in at his old level.</p>
+      <div id="returningBody" aria-live="polite"></div>
+    </section>
+
     <section id="lineups" class="hidden">
       <h2>Your team this week</h2>
       <p class="sub" id="lineupSub"></p>
@@ -395,7 +414,7 @@ function render() {
       : "Switch to Until the break to look further ahead, with less weight on recent form. ")
     + "Each stat is measured against the top 5% of regular players, so one standout week doesn't skew everyone else. It's a guide, not a prediction.";
 
-  renderSwaps(); renderLineups(); renderTable(); renderStrength(); loadClubs();
+  renderSwaps(); renderLineups(); renderTable(); renderStrength(); loadReturning(); loadClubs();
 }
 
 const player = id => DATA.players.find(p => p.id === id);
@@ -746,6 +765,105 @@ $("clubSort").addEventListener("click", e => {
 $("clubsBody").addEventListener("toggle", e => {
   const club = e.target.dataset?.club; if (!club) return;
   if (e.target.open) openClubs.add(club); else openClubs.delete(club);
+}, true);
+
+// ---- back in play. The server finds the players on their way back and rates each one when fit
+// (see load_returning in app.py); this just draws them.
+let RETURNING = null;             // /returning: the groups (back now, back soon, out for now) and their players
+let returningRequest = 0;         // so a slow answer for the old view can't overwrite the new one
+const returnOpen = { back: true, soon: true, out: false };   // which groups are open, kept across re-draws
+const returnAll = new Set();      // groups where "Show all" was pressed
+
+async function loadReturning() {
+  // needs a drafted squad of mine, the same rule as the swaps above
+  const ready = DATA.managers.some(m => m.entry_id === state.me) && DATA.players.some(p => p.owner === state.me);
+  $("returning").classList.toggle("hidden", !ready);
+  if (!ready) return;
+  const request = ++returningRequest;
+  $("returningBody").innerHTML = `<p class="sub">Looking for players on their way back…</p>`;
+  const params = new URLSearchParams({ league: DATA.league_id, view: DATA.view });
+  if (DATA.keep.length) params.set("keep", DATA.keep.join(","));
+  try {
+    let r;
+    try { r = await fetch(`/api/team/${state.team}/returning?${params}`); }
+    catch (e) { throw new Error("Can't reach Draft Scout. Check your connection and try again."); }
+    let j = null;
+    try { j = await r.json(); } catch (e) { /* not JSON, e.g. a crash page */ }
+    if (!r.ok || !j) throw new Error(j?.error || "Draft Scout hit an unexpected error while looking for returning players.");
+    if (request !== returningRequest) return;
+    RETURNING = j;
+    renderReturning();
+  } catch (e) {
+    if (request !== returningRequest) return;
+    $("returningBody").innerHTML = `<div class="error" role="alert">${esc(e.message)}</div>`;
+  }
+}
+
+// what I could do about him: claim a free agent (worked out on his rating when fit), or open the trade page
+function returnActionHtml(p) {
+  if (p.mine) return `<div class="none">Already in your squad.</div>`;
+  if (p.owner === null) {
+    if (!p.claim) return `<div class="none">Wouldn't lift your best eleven, even when fit.</div>`;
+    return `
+      <div class="idea">
+        <span>Claim, drop <strong>${esc(p.claim.drop_name)}</strong> <span class="pos">rated ${p.claim.drop_score.toFixed(0)}</span></span>
+        <span class="shift up">You ${signed(p.claim.me)} when he's fit</span>
+      </div>`;
+  }
+  return `
+    <div class="idea">
+      <a class="btn ghost" href="${esc(pageLink("/trade") + "&with=" + p.owner)}">Build a trade</a>
+      <span class="pos">The trade page judges him on his rating now, not when fit.</span>
+    </div>`;
+}
+
+function returnRowHtml(p) {
+  const owner = p.mine ? `<span class="owner you">You</span>`
+    : p.owner === null ? `<span class="owner free">Free agent</span>`
+    : `<span class="owner">${esc(p.owner_name ?? `Team ${p.owner}`)}</span>`;
+  const now = p.now.toFixed(0), fit = p.fit.toFixed(0);
+  const small = p.small_sample
+    ? ` <span class="rtag" title="Under 300 minutes this season, so his numbers could change quickly">Small sample</span>` : "";
+  return `
+    <div class="cplayer rplayer">
+      <span class="pname">${esc(p.name)} <span class="pos">${esc(p.pos)}, ${esc(p.club)}</span></span>
+      ${owner}
+      <span class="rates" aria-hidden="true"><span class="now">${now}</span> → <span class="score">${fit}</span></span>
+      <div class="rline">${esc(p.status)}</div>
+      <div class="rline"><strong>Rated ${now} now, about ${fit} when fit.</strong> ${esc(p.proof)}${small}</div>
+      ${returnActionHtml(p)}
+    </div>`;
+}
+
+function returnGroupHtml(g) {
+  const all = returnAll.has(g.key) || g.players.length <= RETURNING.shown;
+  const rows = all ? g.players : g.players.slice(0, RETURNING.shown);
+  const more = all ? ""
+    : `<p class="rmore"><button class="btn ghost" type="button" data-all="${esc(g.key)}">Show all ${g.players.length}</button></p>`;
+  return `
+    <details class="club" data-group="${esc(g.key)}" ${returnOpen[g.key] ? "open" : ""}>
+      <summary><span class="code">${esc(g.title)}</span>
+        <span class="bests"><span>${esc(g.hint)}</span><span>${g.players.length} ${g.players.length === 1 ? "player" : "players"}</span></span></summary>
+      <div class="csquad">${rows.map(returnRowHtml).join("")}${more}</div>
+    </details>`;
+}
+
+function renderReturning() {
+  if (!RETURNING) return;
+  const groups = RETURNING.groups.filter(g => g.players.length);
+  $("returningBody").innerHTML = groups.length
+    ? `<div class="clubs">${groups.map(returnGroupHtml).join("")}</div>`
+    : `<div class="empty">Nobody of note is on his way back right now.</div>`;
+}
+
+$("returningBody").addEventListener("click", e => {
+  const b = e.target.closest("[data-all]"); if (!b) return;
+  returnAll.add(b.dataset.all);
+  renderReturning();
+});
+// remember which groups are open (the toggle event doesn't bubble, so listen while it travels down)
+$("returningBody").addEventListener("toggle", e => {
+  const key = e.target.dataset?.group; if (key) returnOpen[key] = e.target.open;
 }, true);
 
 // Keep / stop keeping: remember it, then ask the server for new swaps
