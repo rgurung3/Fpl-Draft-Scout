@@ -307,13 +307,11 @@ def per90(total, mins):
     return total / mins * 90 * trust(mins) if mins > 0 else 0.0
 
 
-def score_players(elements, fixtures_by_team, current_gw, view="week", window_deadlines=None):
+def raw_stats(elements, fixtures_by_team, current_gw):
     """
-    Rate every player 0-100 for one view ("week" or "season", see VIEWS).
-    fixtures_by_team should cover that view's fixture window, and window_deadlines
-    is the deadlines of that window's gameweeks (used for return dates).
+    The numbers the rating is built from, for every player, before they are measured against the
+    other players: (a list of {stat: value}, a list of minutes played), both in the order of `elements`.
     """
-    settings = VIEWS[view]
     raw, minutes = [], []
     games_so_far = max(current_gw, 1)
     for el in elements:
@@ -330,10 +328,29 @@ def score_players(elements, fixtures_by_team, current_gw, view="week", window_de
             "dc90": per90(num(el.get("defensive_contribution")), mins),
             "crea90": per90(num(el.get("creativity")), mins),
         })
+    return raw, minutes
+
+
+def rating_scale(elements, fixtures_by_team, current_gw):
+    """The yardstick these players' ratings are measured with: what each stat is divided by (stat_scales)."""
+    return stat_scales(*raw_stats(elements, fixtures_by_team, current_gw))
+
+
+def score_players(elements, fixtures_by_team, current_gw, view="week", window_deadlines=None, scale=None):
+    """
+    Rate every player 0-100 for one view ("week" or "season", see VIEWS).
+    fixtures_by_team should cover that view's fixture window, and window_deadlines
+    is the deadlines of that window's gameweeks (used for return dates).
+    `scale` is the yardstick (see rating_scale). It is worked out from `elements` unless one is
+    given: the "when fit" ratings pass in the real players' yardstick, so a made-up line of numbers
+    is measured the same way as everyone's real rating.
+    """
+    settings = VIEWS[view]
+    raw, minutes = raw_stats(elements, fixtures_by_team, current_gw)
 
     # measure each stat against the 95th percentile of regular players, capped at 1.0,
     # so one outlier (a hat-trick, a double gameweek) can't squash everyone else
-    scale = stat_scales(raw, minutes)
+    scale = scale or stat_scales(raw, minutes)
 
     scores = {}
     for el, r in zip(elements, raw):
@@ -383,6 +400,16 @@ HOLD_DOUBT_MAX = 50
 HOLD_SHORT_GWS = 4
 HOLD_LONG_GWS = 10
 NEW_SETTLED_MINUTES = 80     # a new signing who played this many minutes last gameweek has settled in
+# "Back in play": players coming back from an injury or a ban whose rating hasn't caught up with them yet.
+# Each gets a "when fit" rating (see as_if_fit) next to his rating now.
+RETURN_MIN_FIT = 60          # he has to rate at least this when fit to be worth a heads-up...
+RETURN_MIN_GAP = 10          # ...and that has to be at least this far above his rating now
+RETURN_SOON_GWS = 3          # "back soon": his return date costs this many gameweeks or fewer
+RETURN_PROOF_MINUTES = 900   # a past season needs this many minutes to stand in for a thin season so far
+RETURN_RANK_PER_MANAGER = 15  # past seasons are only looked up for players ranked inside (managers x this)
+#                               before the season: a squad is 15, so that is everyone who'd have been drafted
+RETURN_MAX_LOOKUPS = 30      # at most this many past-season lookups (one request each), best ranked first
+RETURN_SHOWN = 5             # players shown in each group before "Show all"
 
 
 def by_score(players):
@@ -499,13 +526,14 @@ def recent_minutes(ids, current_gw):
     return {"gws": gws, "minutes": {pid: mins for pid, mins in found.items() if mins is not None}}
 
 
-def past_seasons(players):
+def classic_history(players, read=None):
     """
-    Each player's earlier seasons, from the classic site (the Draft site keeps none):
-    {player id: [{"season": "2025/26", "points": 168, "minutes": 2674}, ...]}, oldest first.
+    Each player's earlier seasons, from the classic site (the Draft site keeps none): {player id:
+    [a row for each season, oldest first]}. A row is what `read` makes of the classic site's own row
+    (every season total it has: points, minutes, starts, expected goals...), or that row as it is.
     The two sites number players differently, so they're matched by `code`, which is the same
     on both. A new player has an empty list. A player the classic site doesn't know, or whose
-    history can't be fetched, is left out (so nothing is said about him). One request each.
+    history can't be fetched or read, is left out (so nothing is said about him). One request each.
     """
     try:
         classic_id = {e["code"]: e["id"] for e in get_json(f"{CLASSIC}/bootstrap-static/")["elements"]}
@@ -518,14 +546,23 @@ def past_seasons(players):
             return p["id"], None
         try:
             rows = get_json(f"{CLASSIC}/element-summary/{classic}/")["history_past"]
-            return p["id"], [{"season": r["season_name"], "points": int(num(r.get("total_points"))),
-                              "minutes": int(num(r.get("minutes")))} for r in rows]
+            return p["id"], [read(r) if read else r for r in rows]
         except (requests.RequestException, KeyError, TypeError, ValueError):
             return p["id"], None
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         found = dict(pool.map(one, players))
     return {pid: rows for pid, rows in found.items() if rows is not None}
+
+
+def past_seasons(players):
+    """
+    Each player's earlier seasons in short: {player id: [{"season": "2025/26", "points": 168,
+    "minutes": 2674}, ...]}, oldest first (see classic_history for who is left out).
+    """
+    return classic_history(players, lambda r: {"season": r["season_name"],
+                                               "points": int(num(r.get("total_points"))),
+                                               "minutes": int(num(r.get("minutes")))})
 
 
 def recent_season_names(today=None):
@@ -1042,6 +1079,167 @@ def trade_ideas(players, me, managers, keep=()):
         out.append({"club": club, "best_gain": max(gains) if gains else None,
                     "best_claim": max(claims) if claims else None, "players": rows})
     return {"me": me, "clubs": out}
+
+
+# ---------------------------------------------------------------- back in play (returning players)
+
+# A player who has been out has no recent points and few minutes, so his rating stays low for weeks
+# after he is fit again. This section finds the players on their way back and rates each one "when
+# fit", so a good one shows up before he has played his way back up the list.
+
+# the season totals the rating uses besides points and minutes (the classic site's past seasons have all four)
+FIT_SEASON_STATS = ("expected_goal_involvements", "expected_goals_conceded", "defensive_contribution",
+                    "creativity")
+RETURN_GROUPS = (   # key, title, and a few words on who is in the group
+    ("back", "Back now", "Fit again, with no points in the last 30 days"),
+    ("soon", "Back soon", f"Back within {RETURN_SOON_GWS} gameweeks, or only a doubt"),
+    ("out", "Out for now", "No return date yet, or a longer wait"),
+)
+
+
+def return_status(p, deadlines, next_gw, today=None):
+    """
+    Where a player is on his way back, as {"group", "text", "gws_out"}, or None if he isn't coming
+    back from anything:
+      "back"  fit enough to claim (MIN_CHANCE_FOR_WAIVERS), flagged injured or banned at some point
+              this season, and no points in the last 30 days (form 0): available, but yet to show it
+      "soon"  out with a return date that costs RETURN_SOON_GWS gameweeks or fewer, or only a doubt
+      "out"   out for longer than that, or with no return date
+    gws_out is how many gameweeks he misses (None when there's no way to tell). None for a player who
+    has left his club (status "u"), one who isn't due back before the season ends, a fit player with
+    points lately, and a fit player who was never flagged (he's just not being picked).
+    """
+    if p.get("status") == "u":
+        return None
+    today = today or datetime.now(timezone.utc)
+    chance = p.get("chance", 100)
+    if chance >= MIN_CHANCE_FOR_WAIVERS:
+        flagged = parse_time(p.get("news_added"))
+        season_start = datetime(int(season_label(today)[:4]), SEASON_STARTS_IN, 1, tzinfo=timezone.utc)
+        if p.get("form", 0) > 0 or not flagged or flagged < season_start:
+            return None
+        lead = "Fit again" if chance >= 100 else f"Nearly back ({chance}% to play)"
+        return {"group": "back", "gws_out": 0,
+                "text": f"{lead}: flagged on {flagged.day} {flagged:%b}, and no points in the last 30 days."}
+
+    news = (p.get("news") or "").rstrip(". ") or "Out"
+    back = return_date(p)
+    away = gameweeks_out(back, deadlines, next_gw)
+    if away is None:      # no return date (or no deadlines to count with): a doubt may be back any week
+        group = "soon" if chance > 0 and back is None else "out"
+        return {"group": group, "gws_out": None, "text": f"{news}."}
+    missed, left = away
+    if left == 0:
+        return None
+    if missed:
+        text = f"{news}, so he misses {missed} gameweek{'s' if missed != 1 else ''}."
+    elif back < today:
+        text = f"{news}. That date has passed and he's still flagged."
+    else:
+        text = f"{news}, in time for GW{next_gw}."
+    return {"group": "soon" if missed <= RETURN_SOON_GWS else "out", "gws_out": missed, "text": text}
+
+
+def proven_season(rows, today=None):
+    """
+    The past season that can stand in for a player with too little to go on this season: the latest
+    of the last HOLD_SEASONS finished seasons in which he played RETURN_PROOF_MINUTES or more, as the
+    classic site's own row (see classic_history). None if he has no such season.
+    """
+    for name in recent_season_names(today):
+        for row in rows:
+            if row.get("season_name") == name and num(row.get("minutes")) >= RETURN_PROOF_MINUTES:
+                return row
+    return None
+
+
+def as_if_fit(el, last=None, games_so_far=1):
+    """
+    A player's line in the Draft feed as it would read if he were fit and playing, so he can be rated
+    "when fit": fully available, and his recent form (empty, because he has been away) set to his
+    points per game. `last` is one of his past seasons (see proven_season), given when this season is
+    too thin to go on: his numbers are then that season's, cut down to the games played so far, so he
+    rates as if he had played this season the way he played that one. The feed has no count of the
+    games he played in, so his points per game there are per start (or per 90 minutes, for a player
+    who mostly came off the bench). His club, and so his fixtures, are today's. `el` is not changed.
+    """
+    fit = {**el, "status": "a", "chance_of_playing_next_round": 100, "news": "", "news_return": None}
+    if last:
+        share = max(games_so_far, 1) / LAST_GW
+        games = max(num(last.get("starts")), num(last.get("minutes")) / 90)
+        fit["minutes"] = num(last.get("minutes")) * share
+        fit["points_per_game"] = num(last.get("total_points")) / games if games else 0
+        for stat in FIT_SEASON_STATS:
+            fit[stat] = num(last.get(stat)) * share
+    fit["form"] = max(num(fit.get("form")), num(fit.get("points_per_game")))
+    return fit
+
+
+def fit_ratings(elements, lines, fixtures_by_team, current_gw, view="week", window_deadlines=None):
+    """
+    "When fit" ratings, {player id: rating}, for the made-up lines in `lines` (see as_if_fit). They are
+    measured with the yardstick of the real players in `elements`, the one the real ratings use, so a
+    rating when fit can be set beside a rating now.
+    """
+    scale = rating_scale(elements, fixtures_by_team, current_gw)
+    scores = score_players(lines, fixtures_by_team, current_gw, view, window_deadlines, scale=scale)
+    return {pid: s["score"] for pid, s in scores.items()}
+
+
+def return_proof(p, last, today=None):
+    """One sentence on what a player's rating when fit rests on: this season's numbers, or a past season's."""
+    if not last:
+        starts = p.get("starts", 0)
+        return (f"{p['ppg']:.1f} points a game this season "
+                f"({p['minutes']} minutes, {starts} start{'s' if starts != 1 else ''}).")
+    season = last.get("season_name")
+    when = "last season" if season == recent_season_names(today)[0] else f"in {season}"
+    now = f"Only {p['minutes']} minutes this season." if p["minutes"] else "No minutes yet this season."
+    return (f"{int(num(last.get('total_points')))} points {when} "
+            f"({int(num(last.get('minutes'))):,} minutes). {now}")
+
+
+def returning_players(players, me, managers, statuses, fits, lasts, keep=(), today=None):
+    """
+    The "Back in play" list for one manager: a group for each of RETURN_GROUPS, [{"key", "title",
+    "hint", "players"}], players best when fit first. `statuses` is {player id: return_status}, `fits` is
+    {player id: rating when fit} and `lasts` is {player id: the past season he is rated on, or None}.
+    A player is listed if he is on his way back, rates at least RETURN_MIN_FIT when fit, and that is
+    at least RETURN_MIN_GAP above his rating now (otherwise the normal rating already has him right).
+
+    Each player is {id, name, club, pos, owner, owner_name, mine, group, status, gws_out, now, fit,
+    basis, proof, small_sample, claim}: status and proof are sentences, basis is "this" or "last" (the
+    season his rating when fit rests on), and small_sample marks a "this" with under
+    SMALL_SAMPLE_MINUTES. For a free agent, claim is what claiming him would do once he is fit:
+    {drop, drop_name, drop_score, me} worked out like any other claim (see claim_idea) but on his
+    rating when fit, or None if he still wouldn't lift my best eleven. Players in `keep` are never the drop.
+    """
+    names = {m["entry_id"]: m["team_name"] for m in managers}
+    mine = sorted((p for p in players if p["owner"] == me), key=lambda p: p["id"])
+    before = squad_strength(players, me)["strength"]
+
+    rows = []
+    for p in players:
+        status, fit = statuses.get(p["id"]), fits.get(p["id"])
+        if not status or fit is None or fit < RETURN_MIN_FIT or fit - p["score"] < RETURN_MIN_GAP:
+            continue
+        claim = None
+        if p["owner"] is None:
+            fit_players = [{**q, "score": fit} if q["id"] == p["id"] else q for q in players]
+            claim = claim_idea(fit_players, me, {**p, "score": fit}, mine, before, keep)
+            if claim:
+                claim["drop_score"] = next(q["score"] for q in mine if q["id"] == claim["drop"])
+        last = lasts.get(p["id"])
+        rows.append({"id": p["id"], "name": p["name"], "club": p["team"], "pos": p["pos"],
+                     "owner": p["owner"], "owner_name": names.get(p["owner"]), "mine": p["owner"] == me,
+                     "group": status["group"], "status": status["text"], "gws_out": status["gws_out"],
+                     "now": p["score"], "fit": fit, "basis": "last" if last else "this",
+                     "proof": return_proof(p, last, today),
+                     "small_sample": not last and p["minutes"] < SMALL_SAMPLE_MINUTES,
+                     "claim": claim})
+    rows.sort(key=lambda r: (-r["fit"], r["name"]))
+    return [{"key": key, "title": title, "hint": hint, "players": [r for r in rows if r["group"] == key]}
+            for key, title, hint in RETURN_GROUPS]
 
 
 # ---------------------------------------------------------------- league history (head-to-head)
@@ -4418,6 +4616,51 @@ def load_club_points(league_id):
             "points": club_points(boot.get("elements") or [], owner_of, short, week)}
 
 
+def load_returning(data, me, keep=(), today=None):
+    """
+    Build "Back in play" for one manager from the league data load_league made for the chosen view:
+    {"league_id", "view", "me", "next_gw", "shown", "groups"} (see returning_players). The Draft
+    site's player list is read again to rate the players on their way back when fit; load_league has
+    just fetched it, so that comes from the cache. The only new requests go to the classic site: one
+    for each well-ranked player with too little this season to go on (a pre-season draft rank inside
+    managers x RETURN_RANK_PER_MANAGER, at most RETURN_MAX_LOOKUPS of them), a few at a time. A
+    player whose past seasons can't be fetched, or who has no proven one, is left off the list.
+    """
+    view = data["view"]
+    boot = fetch(f"{DRAFT}/bootstrap-static", LEAGUE_NOT_FOUND)
+    elements = {el["id"]: el for el in boot["elements"]}
+    events = boot.get("events", {})
+    current_gw, next_gw = data["current_gw"], data["next_gw"]
+    deadlines = gameweek_deadlines(events)
+
+    statuses = {}
+    for p in data["players"]:
+        status = return_status(p, deadlines, next_gw, today)
+        if status and p["id"] in elements:
+            statuses[p["id"]] = status
+    coming = [p for p in data["players"] if p["id"] in statuses]
+
+    def rank(p):
+        return num(elements[p["id"]].get("draft_rank"), math.inf)
+
+    rank_max = len(data["managers"]) * RETURN_RANK_PER_MANAGER
+    thin = sorted((p for p in coming if p["minutes"] < MIN_MINUTES and rank(p) <= rank_max), key=rank)
+    history = classic_history(thin[:RETURN_MAX_LOOKUPS])
+    lasts = {pid: proven_season(rows, today) for pid, rows in history.items()}
+
+    # a line "as if fit" for everyone there is something to rate on: this season's numbers, or a past season's
+    lines = [as_if_fit(elements[p["id"]], lasts.get(p["id"]), current_gw) for p in coming
+             if p["minutes"] >= MIN_MINUTES or lasts.get(p["id"])]
+    windows = view_windows(events, next_gw)
+    fixtures = upcoming_fixtures(boot["teams"], next_gw, windows[view])
+    window_deadlines = [deadlines[gw] for gw in range(next_gw, next_gw + windows[view]) if gw in deadlines]
+    fits = fit_ratings(boot["elements"], lines, fixtures, current_gw, view, window_deadlines)
+    return {"league_id": data["league_id"], "view": view, "me": me, "next_gw": next_gw,
+            "shown": RETURN_SHOWN,
+            "groups": returning_players(data["players"], me, data["managers"], statuses, fits, lasts,
+                                        keep, today)}
+
+
 # ---------------------------------------------------------------- routes
 
 @app.route("/")
@@ -4740,6 +4983,21 @@ def trade_ideas_data(entry_id):
     keep = kept_ids(request.args.get("keep"))
     return jsonify({"league_id": data["league_id"], "view": data["view"],
                     **trade_ideas(data["players"], entry_id, data["managers"], keep)})
+
+
+@app.route("/api/team/<int:entry_id>/returning")
+def returning(entry_id):
+    """
+    Back in play: the players coming back from an injury or a ban, each with his rating now and
+    when fit, e.g. /api/team/276914/returning?league=52607&view=season (see load_returning).
+    ?keep=12,34 protects those players from being the drop in a claim, like on the main page.
+    """
+    try:
+        data, _leagues = league_for_team(entry_id, request.args.get("league", type=int),
+                                         request.args.get("view", "week"))
+        return jsonify(load_returning(data, entry_id, kept_ids(request.args.get("keep"))))
+    except FplError as e:
+        return jsonify({"error": e.message}), e.status
 
 
 if __name__ == "__main__":

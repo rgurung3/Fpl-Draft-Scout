@@ -4,6 +4,7 @@ A small helper app for FPL Draft leagues. Enter your team ID and it finds your
 league, rates every player, and shows you:
 
 - **Waiver targets**: free agents who rate higher than your weakest player in the same position, each with a one-line reason (for example "easier fixtures +14, better form +12. But Porro has more attacking threat −6"). Each swap also says if the player you'd drop starts for you, what it does to your best eleven, how many minutes both players have played lately, and warns when a player has few minutes so far. Swaps that would lift your best eleven by a real amount (at least 0.5 strength) are labelled **Worth doing**, at most two, the biggest lifts first and listed first; the rest are **Small upgrades**, and when none is worth doing the page says **No move needed this week**. A "Keep" button protects a player from being suggested as a drop (it's saved in your link). Players with a 75% chance of playing are included, with a warning and a fully fit backup. If the player you'd drop is a proven scorer (a big points season in the last two) who is out or in a slump, a note says so, with last season's points. For an injured player it also says how long he's out, from his return date: **Worth holding** if it's 4 gameweeks or fewer, **Fine to let go** if it's 10 or more, **Your call** in between or when there's no return date, along with how many gameweeks are left after he's back. A player who is new to the Premier League and getting more minutes gets a **New signing** line instead. They're notes only: the swap is still suggested
+- **Back in play** (on the main page, under the waiver targets): players coming back from an injury or a ban, before their rating has caught up with them. Someone who has been out has no recent points, so he rates low for weeks after he's fit; here each one gets his rating now and a rating for **when he's fit** (for example "Rated 19 now, about 70 when fit. 137 points last season"). Three groups: **Back now** (fit again, no points in the last 30 days), **Back soon** (back within 3 gameweeks, or only a doubt) and **Out for now** (no return date yet, or a longer wait). A free agent shows who you'd drop for him and what it does to your best eleven once he's fit, a player another manager owns has a **Build a trade** link, and your own are marked. It follows the Next 5 / Until the break toggle and your Keep list (see Back in play below)
 - **Your team this week** (on the main page, under the waiver targets): your best lineup for the coming gameweek drawn as a pitch (the formation, each player's rating in a circle, his opponent and whether it's home or away, and a ! if he's a fitness doubt), with your bench beside it in the order the subs should come on. Next to it, side by side, is the **next best lineup**: the strongest eleven in a different formation, with who comes in from the bench and who goes out, and how much weaker it is. A player whose club has no game that week is benched and marked **No game**. It follows the Next 5 / Until the break toggle
 - **Players by club** (on the main page, under the waiver targets): every Premier League club, A-Z or best moves first. Open one to see its whole squad with who owns each player. A free agent shows the claim that helps your best eleven most (who you'd drop and what it does for you, such as "Claim, drop Porro, You +2.5"), or says he wouldn't improve it, along with any injury news. A player another manager owns shows your best one-for-one trade for him, what it does to both teams and whether it's fair, with a **Check this trade** link that opens the trade analyzer with that trade already ticked and run. It follows the Next 5 / Until the break toggle and your Keep list
 - **Trade analyzer** (its own page, `/trade`): pick players from your squad and another manager's, and see how the trade changes both teams' best eleven, and whether it's a fair offer they might accept. Above it, **Trade ideas by club** lists every Premier League club: open one to see its whole squad, who owns each player, and for each player another manager owns, your best one-for-one offer (which of your players to give, what it does to both teams, and whether it's fair), with a button that checks it in the analyzer
@@ -155,7 +156,8 @@ how much. Anything bigger than one for one is built by hand in the analyzer.
 
 Bench players don't count toward strength, so swapping bench players shows as
 "barely changes". Ratings look at recent form and the next few fixtures, so an
-injured star rates low even if he's back soon. Use the verdict as a guide.
+injured star rates low even if he's back soon (the main page's **Back in play**
+shows what he'd rate when fit). Use the verdict as a guide.
 
 ## How the rating works
 
@@ -193,6 +195,39 @@ Your choice goes into your link (`&view=season`), so a bookmark remembers it.
 You can tweak the weights in `WEIGHTS` and `SEASON_WEIGHTS`, the fixture windows in `LOOKAHEAD` and `SEASON_LOOKAHEAD`,
 the scale in `SCALE_PERCENTILE` and `MIN_MINUTES`, and the trade verdict
 thresholds in `TRADE_MIN_GAIN` and `FAIR_MARGIN`, all at the top of `app.py`.
+
+### Back in play
+
+A rating is built from what a player has done lately, so a player who has been
+out rates low even when he's fit again: no recent points, and few minutes. Back
+in play finds those players and gives each one a second number, his rating
+**when fit**.
+
+Who counts as coming back:
+
+- **Back now**: at least 75% likely to play, flagged injured or suspended at
+  some point this season, and no points in the last 30 days. (A fit player who
+  was never flagged is just not being picked, so he isn't listed.)
+- **Back soon**: out, with a return date that costs him 3 gameweeks or fewer,
+  or only a doubt.
+- **Out for now**: no return date yet, or a longer wait. This group starts
+  closed.
+
+The rating when fit is the normal rating with two changes: he counts as fully
+available, and his missing recent form is replaced by his points per game. If
+he has played under 180 minutes this season there is too little to go on, so he
+is rated as if he had played this season the way he played his last season of
+900 minutes or more (only for players ranked high enough before the season to
+have been drafted, to keep the number of requests small).
+
+A player is listed if he rates at least 60 when fit and that is at least 10
+above his rating now. For a free agent the page shows the claim, worked out on
+his rating when fit: who you'd drop and what it does to your best eleven.
+
+It's an estimate. It assumes he walks straight back into the team at his old
+level, and a rating built on a few games gets a **Small sample** tag. The
+waiver targets, the lineup and the trade analyzer still use his rating now. The
+settings are the `RETURN_` values at the top of `app.py`.
 
 ## The weekly recap
 

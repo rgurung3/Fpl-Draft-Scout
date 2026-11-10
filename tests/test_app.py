@@ -1760,6 +1760,389 @@ def test_trade_ideas_endpoint_explains_an_unknown_team(monkeypatch):
     assert "No Draft team found" in res.get_json()["error"]
 
 
+# ---------------------------------------------------------------- back in play (returning players)
+
+def test_ratings_are_the_same_when_the_yardstick_is_passed_in():
+    players = regulars() + [make_player(99, form="9.0", minutes=90), make_player(98, pos=2, status="i")]
+    scale = app.rating_scale(players, {}, 6)
+    for view in app.VIEWS:
+        assert app.score_players(players, {}, 6, view, scale=scale) == app.score_players(players, {}, 6, view)
+
+
+def test_as_if_fit_clears_the_flag_and_fills_empty_form_with_points_per_game():
+    hurt = {**make_player(1, form="0.0", ppg="6.0", status="i", chance=0),
+            "news": "Knee injury - Expected back 21 Nov"}
+    fit = app.as_if_fit(hurt)
+    assert (fit["status"], fit["chance_of_playing_next_round"], fit["news"]) == ("a", 100, "")
+    assert fit["form"] == 6.0
+    assert app.availability(fit) == 1.0
+    assert hurt["status"] == "i" and hurt["form"] == "0.0"          # the real line is not changed
+    # form that is already above his points per game is left alone
+    assert app.as_if_fit(make_player(2, form="7.0", ppg="3.0"))["form"] == 7.0
+
+
+LAST_SEASON = {"season_name": "2025/26", "total_points": 152, "minutes": 3420, "starts": 38,
+               "expected_goal_involvements": "19.0", "expected_goals_conceded": "38.0",
+               "defensive_contribution": 380, "creativity": "760.0"}
+
+
+def test_as_if_fit_on_a_past_season_cuts_it_down_to_the_games_played_so_far():
+    out_all_season = make_player(1, form="0.0", ppg="0.0", minutes=0, xgi="0.0")
+    fit = app.as_if_fit(out_all_season, LAST_SEASON, games_so_far=10)       # 10 of 38 gameweeks gone
+    assert fit["minutes"] == pytest.approx(900)                             # 3,420 x 10/38
+    assert fit["points_per_game"] == pytest.approx(4.0)                     # 152 points in 38 starts
+    assert fit["form"] == pytest.approx(4.0)
+    assert fit["expected_goal_involvements"] == pytest.approx(5.0)
+    assert fit["expected_goals_conceded"] == pytest.approx(10.0)
+    assert fit["defensive_contribution"] == pytest.approx(100)
+    assert fit["creativity"] == pytest.approx(200)
+
+
+def test_a_substitutes_points_per_game_come_from_his_minutes_not_his_starts():
+    sub = {**LAST_SEASON, "total_points": 80, "minutes": 1800, "starts": 10}   # 20 full games' worth
+    assert app.as_if_fit(make_player(1, minutes=0), sub, 10)["points_per_game"] == pytest.approx(4.0)
+    nothing = {**LAST_SEASON, "minutes": 0, "starts": 0}
+    assert app.as_if_fit(make_player(1, minutes=0, ppg="0.0"), nothing, 10)["points_per_game"] == 0
+
+
+def test_a_player_rates_when_fit_like_the_same_player_who_never_went_away():
+    # 20 regulars on form 5.0 and 5.0 points a game; the returning player has the same numbers but no form
+    away = make_player(99, form="0.0", ppg="5.0")
+    real = app.score_players(regulars() + [away], {}, 6)
+    fit = app.fit_ratings(regulars() + [away], [app.as_if_fit(away)], {}, 6)
+    assert set(fit) == {99}                              # only the made-up lines are rated
+    assert real[99]["score"] < real[1]["score"]          # rated now: marked down for the empty form
+    assert fit[99] == real[1]["score"]                   # rated when fit: level with the regulars
+
+
+def test_a_huge_made_up_line_cannot_move_the_yardstick():
+    star = app.as_if_fit(make_player(99, form="50.0", ppg="50.0"))
+    assert app.fit_ratings(regulars(), [star], {}, 6)[99] == app.score_players(regulars(), {}, 6)[1]["score"]
+
+
+def test_proven_season_is_the_latest_of_the_last_two_with_enough_minutes():
+    def row(season, minutes):
+        return {"season_name": season, "minutes": minutes, "total_points": 100}
+
+    rows = [row("2023/24", 3000), row("2024/25", 2000), row("2025/26", 899)]
+    assert app.proven_season(rows, TODAY)["season_name"] == "2024/25"      # last season was too short
+    rows[-1] = row("2025/26", 900)
+    assert app.proven_season(rows, TODAY)["season_name"] == "2025/26"
+    assert app.proven_season([row("2023/24", 3000)], TODAY) is None        # too long ago to count
+    assert app.proven_season([], TODAY) is None
+
+
+def returner(chance=100, form=0.0, news="", added="2026-10-05T09:30:00Z", status="a"):
+    """A player as return_status sees him. Default: fit, no points lately, flagged on 5 Oct."""
+    return {"status": status, "chance": chance, "form": form, "news": news, "news_added": added}
+
+
+def test_fit_again_with_no_points_lately_is_back_now():
+    back = app.return_status(returner(), {}, 7, TODAY)
+    assert (back["group"], back["gws_out"]) == ("back", 0)
+    assert back["text"] == "Fit again: flagged on 5 Oct, and no points in the last 30 days."
+    nearly = app.return_status(returner(chance=75, news="Knock - 75% chance of playing"), {}, 7, TODAY)
+    assert nearly["group"] == "back"
+    assert nearly["text"].startswith("Nearly back (75% to play): flagged on 5 Oct")
+
+
+@pytest.mark.parametrize("player", [
+    returner(added=None),                        # never flagged: he's fit and just not being picked
+    returner(form=0.5),                          # points in the last 30 days: his rating is already moving
+    returner(added="2026-03-01T12:00:00Z"),      # the flag is from last season
+    returner(status="u"),                        # has left his club
+    returner(chance=0, status="u", news="Has joined Juventus on loan"),
+])
+def test_who_is_not_coming_back_from_anything(player):
+    assert app.return_status(player, {}, 7, TODAY) is None
+
+
+@pytest.mark.parametrize("missed,group,ending", [
+    (0, "soon", ", in time for GW7."),
+    (1, "soon", ", so he misses 1 gameweek."),
+    (3, "soon", ", so he misses 3 gameweeks."),
+    (4, "out", ", so he misses 4 gameweeks."),     # more than RETURN_SOON_GWS
+])
+def test_a_return_date_decides_between_back_soon_and_out_for_now(missed, group, ending):
+    dl = weekly_deadlines()
+    hurt = returner(chance=0, status="i", news=injured_until(missed, dl), added="2026-10-08T12:00:00Z")
+    status = app.return_status(hurt, dl, 7, TODAY)
+    assert (status["group"], status["gws_out"]) == (group, missed)
+    assert status["text"] == injured_until(missed, dl) + ending
+    assert app.RETURN_SOON_GWS == 3
+
+
+def test_a_return_date_that_has_gone_by_says_so():
+    dl = weekly_deadlines()
+    hurt = returner(chance=0, status="i", news=injured_until(0, dl))      # expected back 9 Oct
+    late = app.return_status(hurt, dl, 7, datetime(2026, 10, 9, 12, tzinfo=timezone.utc))
+    assert late["group"] == "soon" and late["text"].endswith("That date has passed and he's still flagged.")
+
+
+def test_out_with_no_return_date_is_out_for_now_but_a_doubt_is_back_soon():
+    out = app.return_status(returner(chance=0, status="i", news="Thigh injury - Unknown return date"),
+                            weekly_deadlines(), 7, TODAY)
+    assert out == {"group": "out", "gws_out": None, "text": "Thigh injury - Unknown return date."}
+    doubt = app.return_status(returner(chance=50, status="d", news="Foot injury - 50% chance of playing"),
+                              weekly_deadlines(), 7, TODAY)
+    assert doubt["group"] == "soon" and doubt["gws_out"] is None
+    silent = app.return_status(returner(chance=0, status="i"), {}, 7, TODAY)
+    assert silent["text"] == "Out."                         # no news at all
+
+
+def test_a_player_who_is_not_back_this_season_is_left_out():
+    hurt = returner(chance=0, status="i", news="Knee injury - Expected back 1 Jul")     # 1 Jul 2027
+    assert app.return_status(hurt, weekly_deadlines(), 7, TODAY) is None
+
+
+def test_a_return_date_with_no_deadlines_to_count_is_out_for_now():
+    hurt = returner(chance=0, status="i", news="Knee injury - Expected back 21 Nov")
+    status = app.return_status(hurt, {}, 7, TODAY)
+    assert (status["group"], status["gws_out"]) == ("out", None)
+
+
+def back_league(scores=None, free=()):
+    """club_league with the season figures Back in play quotes, and some players made free agents."""
+    players = free_agents(with_scores(club_league(), scores or {}), set(free))
+    for p in players:
+        p.update(minutes=540, starts=6, ppg=5.0)
+    return players
+
+
+def on_his_way(group="back", gws_out=0):
+    return {"group": group, "text": f"He is {group}.", "gws_out": gws_out}
+
+
+def back_rows(groups):
+    """Every player in a returning_players result, by ID."""
+    return {p["id"]: p for g in groups for p in g["players"]}
+
+
+def test_a_returning_free_agent_gets_a_claim_worked_out_on_his_rating_when_fit():
+    # free agent 109 (a MID) rates 20 now but 80 when fit; my MIDs rate 50 except bench player 8 on 30
+    players = back_league({8: 30, 109: 20}, free={109})
+    before = [dict(p) for p in players]
+    groups = app.returning_players(players, 100, IDEA_MANAGERS, {109: on_his_way()}, {109: 80}, {})
+    assert [(g["key"], g["title"]) for g in groups] == [("back", "Back now"), ("soon", "Back soon"),
+                                                        ("out", "Out for now")]
+    assert all(g["hint"] for g in groups)
+    row = groups[0]["players"][0]
+    assert (row["id"], row["now"], row["fit"]) == (109, 20, 80)
+    assert (row["group"], row["status"]) == ("back", "He is back.")
+    assert row["owner"] is None and not row["mine"]
+    # the same claim, with the same lift, that a free agent who really rated 80 would get
+    as_80 = back_league({8: 30, 109: 80}, free={109})
+    real = idea_for(app.trade_ideas(as_80, 100, IDEA_MANAGERS), 109)["claim"]
+    assert row["claim"] == {**real, "drop_score": 30}
+    assert row["claim"]["drop"] == 8 and row["claim"]["me"] >= app.WORTH_XI_GAIN
+    assert players == before                                # nobody's real rating or owner was changed
+
+
+def test_the_claim_never_drops_a_kept_player():
+    players = back_league({8: 30, 109: 20}, free={109})
+    groups = app.returning_players(players, 100, IDEA_MANAGERS, {109: on_his_way()}, {109: 80}, {}, keep={8})
+    assert back_rows(groups)[109]["claim"]["drop"] == 9
+
+
+@pytest.mark.parametrize("now,fit,listed", [
+    (20, 80, True),
+    (50, 60, True),      # exactly on both bars: 60 when fit, 10 above his rating now
+    (40, 59, False),     # under RETURN_MIN_FIT
+    (71, 80, False),     # under RETURN_MIN_GAP above his rating now: the normal rating has him about right
+])
+def test_he_has_to_rate_well_when_fit_and_well_above_his_rating_now(now, fit, listed):
+    players = back_league({109: now}, free={109})
+    groups = app.returning_players(players, 100, IDEA_MANAGERS, {109: on_his_way()}, {109: fit}, {})
+    assert (109 in back_rows(groups)) == listed
+    assert (app.RETURN_MIN_FIT, app.RETURN_MIN_GAP) == (60, 10)
+
+
+def test_only_players_on_their_way_back_who_could_be_rated_are_listed():
+    players = back_league({108: 20, 109: 20}, free={109})
+    no_rating = app.returning_players(players, 100, IDEA_MANAGERS, {109: on_his_way()}, {}, {})
+    not_returning = app.returning_players(players, 100, IDEA_MANAGERS, {}, {109: 80}, {})
+    assert back_rows(no_rating) == {} and back_rows(not_returning) == {}
+
+
+def test_other_managers_players_and_my_own_are_listed_without_a_claim():
+    players = back_league({8: 20, 108: 20, 109: 20}, free={109})
+    coming = {8: on_his_way("out", None), 108: on_his_way("soon", 2), 109: on_his_way()}
+    fits = {8: 90, 108: 85, 109: 80}
+    rows = back_rows(app.returning_players(players, 100, IDEA_MANAGERS, coming, fits, {}))
+    assert rows[108]["owner"] == 200 and rows[108]["owner_name"] == "Rival FC" and rows[108]["claim"] is None
+    assert rows[8]["mine"] and rows[8]["claim"] is None
+    assert (rows[8]["group"], rows[108]["group"], rows[108]["gws_out"]) == ("out", "soon", 2)
+    assert rows[109]["claim"] is not None
+
+
+def test_a_free_agent_who_would_not_lift_my_eleven_even_when_fit_is_listed_with_no_claim():
+    mids = {8: 70, 9: 70, 10: 70, 11: 70, 12: 70}           # all my midfielders rate above him when fit
+    players = back_league({**mids, 109: 20}, free={109})
+    groups = app.returning_players(players, 100, IDEA_MANAGERS, {109: on_his_way()}, {109: 60}, {})
+    assert back_rows(groups)[109]["claim"] is None
+
+
+def test_each_group_lists_the_best_when_fit_first():
+    players = back_league({108: 20, 109: 20, 110: 20, 111: 20})
+    coming = {108: on_his_way(), 109: on_his_way(), 110: on_his_way("soon"), 111: on_his_way()}
+    fits = {108: 70, 109: 90, 110: 95, 111: 80}
+    groups = app.returning_players(players, 100, IDEA_MANAGERS, coming, fits, {})
+    assert [[p["id"] for p in g["players"]] for g in groups] == [[109, 111, 108], [110], []]
+
+
+def test_the_proof_says_which_season_the_rating_when_fit_rests_on():
+    players = back_league({108: 20, 109: 20, 110: 20})
+    for p in players:
+        if p["id"] == 108:
+            p.update(minutes=0, starts=0, ppg=0.0)           # out all season: rated on last season
+        if p["id"] == 109:
+            p.update(minutes=298, starts=3, ppg=5.5)         # rated on this season, but on few minutes
+        if p["id"] == 110:
+            p.update(minutes=41, starts=1, ppg=1.0)          # rated on the season before last
+    coming = {i: on_his_way() for i in (108, 109, 110)}
+    lasts = {108: {"season_name": "2025/26", "total_points": 137, "minutes": 2614},
+             110: {"season_name": "2024/25", "total_points": 80, "minutes": 1909}}
+    rows = back_rows(app.returning_players(players, 100, IDEA_MANAGERS, coming,
+                                           {108: 70, 109: 70, 110: 70}, lasts, today=TODAY))
+    assert rows[108]["basis"] == "last" and not rows[108]["small_sample"]
+    assert rows[108]["proof"] == "137 points last season (2,614 minutes). No minutes yet this season."
+    assert rows[110]["proof"] == "80 points in 2024/25 (1,909 minutes). Only 41 minutes this season."
+    assert rows[109]["basis"] == "this" and rows[109]["small_sample"]          # under 300 minutes
+    assert rows[109]["proof"] == "5.5 points a game this season (298 minutes, 3 starts)."
+    one_start = app.return_proof({"ppg": 2.0, "minutes": 200, "starts": 1}, None)
+    assert one_start == "2.0 points a game this season (200 minutes, 1 start)."
+
+
+def test_classic_history_gives_the_whole_row_unless_told_what_to_read(monkeypatch):
+    rows = [{"season_name": "2025/26", "total_points": 168, "minutes": 2674, "starts": 30}]
+    monkeypatch.setattr(app, "get_json", classic_site({7: rows}))
+    wilson = {"id": 260, "code": 700}
+    assert app.classic_history([wilson]) == {260: rows}
+    assert app.classic_history([wilson], lambda r: r["starts"]) == {260: [30]}
+    assert app.classic_history([wilson], lambda r: r["no_such_field"]) == {}    # unreadable: left out
+
+
+def flagged_now():
+    """A news_added time inside the season the test is run in (the routes use today's date)."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def test_returning_endpoint_lists_a_free_agent_who_is_fit_again(fake_api):
+    fake_api["elements"][0].update(form="2.0")                       # my only player, 1 (a MID)
+    # free agent 2 (a MID) scored 9 a game before he was out, and has no points since
+    fake_api["elements"][1].update(form="0.0", points_per_game="9.0", news_added=flagged_now())
+    client = app.app.test_client()
+    res = client.get("/api/team/100/returning?league=123")
+    assert res.status_code == 200
+    data = res.get_json()
+    assert (data["league_id"], data["view"], data["me"], data["next_gw"]) == (123, "week", 100, 7)
+    assert data["shown"] == app.RETURN_SHOWN
+    assert [g["key"] for g in data["groups"]] == ["back", "soon", "out"]
+    row = back_rows(data["groups"])[2]
+    assert row["group"] == "back" and row["basis"] == "this" and row["club"] == "CHE"
+    players = {p["id"]: p for p in client.get("/api/team/100").get_json()["players"]}
+    assert row["now"] == players[2]["score"]                         # the rating the rest of the page shows
+    assert row["fit"] >= row["now"] + app.RETURN_MIN_GAP
+    assert row["claim"]["drop"] == 1 and row["claim"]["drop_score"] == players[1]["score"]
+    kept = client.get("/api/team/100/returning?league=123&keep=1").get_json()
+    assert back_rows(kept["groups"])[2]["claim"] is None             # his only possible drop is kept
+
+
+def test_returning_endpoint_follows_the_view(fake_api):
+    fake_api["elements"][1].update(form="0.0", points_per_game="9.0", news_added=flagged_now())
+    data = app.app.test_client().get("/api/team/100/returning?view=season").get_json()
+    assert data["view"] == "season" and 2 in back_rows(data["groups"])
+
+
+def out_all_season(fake_api, monkeypatch, pid, rank, seen=None):
+    """
+    Make a fake player injured with no minutes this season, ranked `rank` before it, and a proven
+    scorer last season on the classic site (his classic id is the draft id + 500). `seen` collects
+    the classic site's player requests.
+    """
+    fake_api["elements"][pid - 1].update(
+        form="0.0", points_per_game="0.0", minutes=0, expected_goal_involvements="0.0", status="i",
+        chance_of_playing_next_round=0, news="Knee injury - Unknown return date",
+        news_added=flagged_now(), draft_rank=rank)
+    last = {**LAST_SEASON, "season_name": app.recent_season_names()[0]}
+    real = app.get_json
+
+    def with_history(url):
+        if "fantasy" in url and "element-summary" in url:
+            if seen is not None:
+                seen.append(url)
+            if url.rstrip("/").endswith(f"/{500 + pid}"):
+                return {"history_past": [last]}
+        return real(url)
+
+    monkeypatch.setattr(app, "get_json", with_history)
+
+
+def test_returning_endpoint_rates_a_well_ranked_player_with_no_minutes_on_last_season(fake_api, monkeypatch):
+    out_all_season(fake_api, monkeypatch, pid=3, rank=5)             # free agent 3, a forward
+    data = app.app.test_client().get("/api/team/100/returning?league=123").get_json()
+    row = back_rows(data["groups"])[3]
+    assert (row["group"], row["basis"], row["now"]) == ("out", "last", 0)
+    assert row["fit"] >= app.RETURN_MIN_FIT
+    assert row["proof"] == "152 points last season (3,420 minutes). No minutes yet this season."
+    assert row["status"] == "Knee injury - Unknown return date."
+    assert row["claim"] is None                                      # I have no forward to drop for him
+
+
+def test_returning_endpoint_does_not_look_up_a_player_ranked_outside_the_drafted(fake_api, monkeypatch):
+    seen = []
+    out_all_season(fake_api, monkeypatch, pid=3, rank=16, seen=seen)   # one manager x 15: the top 15 only
+    data = app.app.test_client().get("/api/team/100/returning?league=123").get_json()
+    assert back_rows(data["groups"]) == {} and seen == []
+    fake_api["elements"][2].pop("draft_rank")                        # no rank in the feed at all: the same
+    app.app.test_client().get("/api/team/100/returning?league=123")
+    assert seen == []
+
+
+def test_returning_endpoint_caps_the_lookups_at_the_best_ranked(fake_api, monkeypatch):
+    seen = []
+    out_all_season(fake_api, monkeypatch, pid=3, rank=5, seen=seen)
+    out_all_season(fake_api, monkeypatch, pid=2, rank=3, seen=seen)
+    monkeypatch.setattr(app, "RETURN_MAX_LOOKUPS", 1)
+    app.app.test_client().get("/api/team/100/returning?league=123")
+    assert len(seen) == 1 and seen[0].rstrip("/").endswith("/502")   # player 2 is ranked higher
+
+
+def test_returning_endpoint_survives_the_classic_site_failing(fake_api, monkeypatch):
+    out_all_season(fake_api, monkeypatch, pid=3, rank=5)
+    inner = app.get_json
+
+    def classic_down(url):
+        if "fantasy" in url and "element-summary" in url:
+            raise requests.ConnectionError("down")
+        return inner(url)
+
+    monkeypatch.setattr(app, "get_json", classic_down)
+    res = app.app.test_client().get("/api/team/100/returning?league=123")
+    assert res.status_code == 200
+    assert back_rows(res.get_json()["groups"]) == {}                 # nothing to rate him on: left off
+
+
+def test_returning_endpoint_explains_an_unknown_team(monkeypatch):
+    def not_found(url):
+        resp = requests.Response()
+        resp.status_code = 404
+        raise requests.HTTPError(response=resp)
+
+    monkeypatch.setattr(app, "get_json", not_found)
+    res = app.app.test_client().get("/api/team/999999/returning")
+    assert res.status_code == 400
+    assert "No Draft team found" in res.get_json()["error"]
+
+
+def test_the_main_page_asks_for_back_in_play():
+    res = app.app.test_client().get("/")
+    page = res.data.decode()
+    res.close()
+    assert 'id="returning"' in page and "Back in play" in page
+    assert "/returning?" in page and "loadReturning()" in page
+
+
 # ---------------------------------------------------------------- weekly lineups
 
 # players 1-2 GKP, 3-7 DEF, 8-12 MID, 13-15 FWD (full_squad); varied ratings so the shapes differ
